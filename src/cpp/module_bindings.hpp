@@ -123,6 +123,12 @@ using RawStockQuoteRowsIterator = typename ParserType::RawStockQuoteRowsIterator
 template <typename ParserType>
 using RawLineRowsIterator = typename ParserType::RawLineRowsIterator;
 
+template <typename ParserType>
+struct StockTradeApi {};
+
+template <typename ParserType>
+struct StockQuoteApi {};
+
 template <typename IteratorType>
 void bind_iterator_type(nb::module_& m, const char* iterator_name) {
   nb::class_<IteratorType>(m, iterator_name)
@@ -379,12 +385,16 @@ void bind_stock_flatfile_asset(
     const char* quote_iterator_name,
     const char* raw_trade_iterator_name,
     const char* raw_quote_iterator_name,
-    const char* raw_line_iterator_name) {
+    const char* raw_line_iterator_name,
+    const char* trade_api_name,
+    const char* quote_api_name) {
   using TradeIterator = StockTradeRowsIterator<ImplAsset>;
   using QuoteIterator = StockQuoteRowsIterator<ImplAsset>;
   using RawTradeIterator = RawStockTradeRowsIterator<ImplAsset>;
   using RawQuoteIterator = RawStockQuoteRowsIterator<ImplAsset>;
   using RawLineIterator = RawLineRowsIterator<ImplAsset>;
+  using TradeApi = StockTradeApi<ImplAsset>;
+  using QuoteApi = StockQuoteApi<ImplAsset>;
 
   bind_trade_rows_iterator<ImplAsset>(module, trade_iterator_name);
   bind_quote_rows_iterator<ImplAsset>(module, quote_iterator_name);
@@ -392,7 +402,8 @@ void bind_stock_flatfile_asset(
   bind_raw_quote_rows_iterator<ImplAsset>(module, raw_quote_iterator_name);
   bind_raw_line_rows_iterator<ImplAsset>(module, raw_line_iterator_name);
 
-  nb::class_<ImplAsset, BaseAsset>(module, name)
+  nb::class_<ImplAsset, BaseAsset> stock_class(module, name);
+  stock_class
       .def(nb::init<>())
       .def_static(
           "parse_quotes",
@@ -468,6 +479,81 @@ void bind_stock_flatfile_asset(
       .def_static("processor_name", &processor_name_static<ImplAsset>)
       .def_static("processor_type", &processor_type_static<ImplAsset>)
       .def_static("backend_kind", &backend_kind_static<ImplAsset>);
+
+  nb::class_<TradeApi>(module, trade_api_name)
+      .def_static(
+          "parse",
+          [](const std::filesystem::path& path,
+             bool sort_by_participant_timestamp,
+             bool sort_by_sip_timestamp) {
+            return TradeIterator(
+                path,
+                sort_by_participant_timestamp,
+                sort_by_sip_timestamp);
+          },
+          nb::arg("path"),
+          nb::kw_only(),
+          nb::arg("sort_by_participant_timestamp") = false,
+          nb::arg("sort_by_sip_timestamp") = false)
+      .def_static(
+          "parse_raw",
+          [](const std::filesystem::path& path,
+             bool sort_by_participant_timestamp,
+             bool sort_by_sip_timestamp) {
+            return RawTradeIterator(
+                path,
+                sort_by_participant_timestamp,
+                sort_by_sip_timestamp);
+          },
+          nb::arg("path"),
+          nb::kw_only(),
+          nb::arg("sort_by_participant_timestamp") = false,
+          nb::arg("sort_by_sip_timestamp") = false)
+      .def_static(
+          "raw_lines",
+          [](const std::filesystem::path& path) {
+            return RawLineIterator(path);
+          },
+          nb::arg("path"));
+
+  nb::class_<QuoteApi>(module, quote_api_name)
+      .def_static(
+          "parse",
+          [](const std::filesystem::path& path,
+             bool sort_by_participant_timestamp,
+             bool sort_by_sip_timestamp) {
+            return QuoteIterator(
+                path,
+                sort_by_participant_timestamp,
+                sort_by_sip_timestamp);
+          },
+          nb::arg("path"),
+          nb::kw_only(),
+          nb::arg("sort_by_participant_timestamp") = false,
+          nb::arg("sort_by_sip_timestamp") = false)
+      .def_static(
+          "parse_raw",
+          [](const std::filesystem::path& path,
+             bool sort_by_participant_timestamp,
+             bool sort_by_sip_timestamp) {
+            return RawQuoteIterator(
+                path,
+                sort_by_participant_timestamp,
+                sort_by_sip_timestamp);
+          },
+          nb::arg("path"),
+          nb::kw_only(),
+          nb::arg("sort_by_participant_timestamp") = false,
+          nb::arg("sort_by_sip_timestamp") = false)
+      .def_static(
+          "raw_lines",
+          [](const std::filesystem::path& path) {
+            return RawLineIterator(path);
+          },
+          nb::arg("path"));
+
+  stock_class.attr("Trade") = module.attr(trade_api_name);
+  stock_class.attr("Quote") = module.attr(quote_api_name);
 }
 
 template <typename BaseAsset, typename ImplAsset>
@@ -514,6 +600,10 @@ void bind_backend_module(nb::module_& m, BackendKind kind, const char* alias_pre
       std::string(alias_prefix) + "RawStockQuoteRowsIterator";
   const std::string raw_line_iterator_name =
       std::string(alias_prefix) + "RawLineRowsIterator";
+  const std::string stock_trade_api_name =
+      std::string(alias_prefix) + "StockTradeApi";
+  const std::string stock_quote_api_name =
+      std::string(alias_prefix) + "StockQuoteApi";
 
   m.def(
       "read_gzip_lines_bytes",
@@ -539,7 +629,9 @@ void bind_backend_module(nb::module_& m, BackendKind kind, const char* alias_pre
       stock_quote_iterator_name.c_str(),
       raw_stock_trade_iterator_name.c_str(),
       raw_stock_quote_iterator_name.c_str(),
-      raw_line_iterator_name.c_str());
+      raw_line_iterator_name.c_str(),
+      stock_trade_api_name.c_str(),
+      stock_quote_api_name.c_str());
   bind_flatfile_asset<FlatFileOptionsParser, Impl<FlatFileOptionsParser>>(flatfiles, "Options");
   bind_flatfile_asset<FlatFileFuturesParser, Impl<FlatFileFuturesParser>>(flatfiles, "Futures");
   bind_flatfile_asset<FlatFileIndicesParser, Impl<FlatFileIndicesParser>>(flatfiles, "Indices");

@@ -210,6 +210,18 @@ files = [
 markers = {main = "extra == \"dev\""}
 
 [[package]]
+name = "nanobind"
+version = "2.12.0"
+description = "nanobind: tiny and efficient C++/Python bindings"
+optional = false
+python-versions = "*"
+groups = ["main", "dev"]
+files = [
+    {file = "nanobind-2.12.0-py3-none-any.whl", hash = "sha256:a10d3d88e691dcdf22696f9acd893fda3c5a05635763aea238829d274fcad480"},
+    {file = "nanobind-2.12.0.tar.gz", hash = "sha256:0ae77c1a88f27153fa57045ee00f7b0a7b06b1cd3df942e95a34b38c5d0a5bee"},
+]
+
+[[package]]
 name = "packaging"
 version = "26.1"
 description = "Core utilities for Python packages"
@@ -220,7 +232,6 @@ files = [
     {file = "packaging-26.1-py3-none-any.whl", hash = "sha256:5d9c0669c6285e491e0ced2eee587eaf67b670d94a19e94e3984a481aba6802f"},
     {file = "packaging-26.1.tar.gz", hash = "sha256:f042152b681c4bfac5cae2742a55e103d27ab2ec0f3d88037136b6bfe7c9c5de"},
 ]
-markers = {main = "extra == \"dev\""}
 
 [[package]]
 name = "pathspec"
@@ -233,7 +244,6 @@ files = [
     {file = "pathspec-1.0.4-py3-none-any.whl", hash = "sha256:fb6ae2fd4e7c921a165808a552060e722767cfa526f99ca5156ed2ce45a5c723"},
     {file = "pathspec-1.0.4.tar.gz", hash = "sha256:0210e2ae8a21a9137c0d470578cb0e595af87edaa6ebf12ff176f14a02e0e645"},
 ]
-markers = {main = "extra == \"dev\""}
 
 [package.extras]
 hyperscan = ["hyperscan (>=0.7)"]
@@ -327,6 +337,26 @@ files = [
 markers = {main = "extra == \"dev\""}
 
 [[package]]
+name = "scikit-build-core"
+version = "0.12.2"
+description = "Build backend for CMake based projects"
+optional = false
+python-versions = ">=3.8"
+groups = ["main", "dev"]
+files = [
+    {file = "scikit_build_core-0.12.2-py3-none-any.whl", hash = "sha256:6ea4730da400f9a998ec3287bd3ebc1d751fe45ad0a93451bead8618adbc02b1"},
+    {file = "scikit_build_core-0.12.2.tar.gz", hash = "sha256:562e0bbc9de1a354c87825ccf732080268d6582a0200f648e8c4a2dcb1e3736d"},
+]
+
+[package.dependencies]
+packaging = ">=23.2"
+pathspec = ">=0.12.0"
+
+[package.extras]
+wheel-free-setuptools = ["setuptools (>=70.1) ; python_version >= \"3.8\""]
+wheels = ["cmake", "ninja ; sys_platform != \"win32\""]
+
+[[package]]
 name = "tqdm"
 version = "4.67.3"
 description = "Fast, Extensible Progress Meter"
@@ -362,9 +392,9 @@ files = [
 markers = {main = "extra == \"dev\""}
 
 [extras]
-dev = ["mypy", "pytest", "ruff"]
+dev = ["mypy", "nanobind", "pytest", "ruff", "scikit-build-core"]
 
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11,<4.0"
-content-hash = "b0f80b65e6d60ccd79a8f79720753ff229616b6b3dc8e0bb87779c1de8050546"
+content-hash = "928ed1982f7817b2d3ee0eb13056ea40e816aa1a94195e828ff3d518dd082319"

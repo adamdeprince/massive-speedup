@@ -401,7 +401,7 @@ class FlatFileStocksParser(FlatFileParser):
         sip_timestamp_index: int,
         sort_by_participant_timestamp: bool = False,
         sort_by_sip_timestamp: bool = False,
-    ) -> Iterator[tuple[str, ...]]:
+    ) -> Iterator[tuple[bytes, ...]]:
         if sort_by_participant_timestamp and sort_by_sip_timestamp:
             raise ValueError(
                 "sort_by_participant_timestamp and sort_by_sip_timestamp cannot both be true"
@@ -414,7 +414,7 @@ class FlatFileStocksParser(FlatFileParser):
             if not sort_by_participant_timestamp and not sort_by_sip_timestamp:
                 for fields in reader:
                     if any(fields):
-                        yield tuple(fields)
+                        yield tuple(field.encode("utf-8") for field in fields)
                 return
 
             if sort_by_participant_timestamp:
@@ -426,7 +426,8 @@ class FlatFileStocksParser(FlatFileParser):
                         _parse_int(row[sip_timestamp_index]),
                     )
                 )
-                yield from rows
+                for row in rows:
+                    yield tuple(field.encode("utf-8") for field in row)
                 return
 
             buckets: list[list[tuple[str, ...]]] = []
@@ -458,7 +459,7 @@ class FlatFileStocksParser(FlatFileParser):
                 _, _, _, bucket_index = heapq.heappop(heap)
                 row_index = offsets[bucket_index]
                 row = buckets[bucket_index][row_index]
-                yield row
+                yield tuple(field.encode("utf-8") for field in row)
 
                 offsets[bucket_index] += 1
                 if offsets[bucket_index] < len(buckets[bucket_index]):
@@ -562,7 +563,7 @@ class FlatFileStocksParser(FlatFileParser):
         *,
         sort_by_participant_timestamp: bool = False,
         sort_by_sip_timestamp: bool = False,
-    ) -> Iterator[tuple[str, ...]]:
+    ) -> Iterator[tuple[bytes, ...]]:
         yield from cls._iter_raw_rows(
             payload,
             participant_timestamp_index=9,
@@ -593,7 +594,7 @@ class FlatFileStocksParser(FlatFileParser):
         *,
         sort_by_participant_timestamp: bool = False,
         sort_by_sip_timestamp: bool = False,
-    ) -> Iterator[tuple[str, ...]]:
+    ) -> Iterator[tuple[bytes, ...]]:
         yield from cls._iter_raw_rows(
             payload,
             participant_timestamp_index=5,
@@ -603,11 +604,11 @@ class FlatFileStocksParser(FlatFileParser):
         )
 
     @classmethod
-    def raw_lines(cls, payload: str | Path) -> Iterator[str]:
-        with gzip.open(payload, "rt", encoding="utf-8", newline="") as handle:
+    def raw_lines(cls, payload: str | Path) -> Iterator[bytes]:
+        with gzip.open(payload, "rb") as handle:
             next(handle, None)
             for line in handle:
-                line = line.rstrip("\r\n")
+                line = line.rstrip(b"\r\n")
                 if line:
                     yield line
 

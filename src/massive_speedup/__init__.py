@@ -27,6 +27,9 @@ def _install_stock_api(module: ModuleType) -> ModuleType:
         return module
 
     stocks = module.FlatFiles.Stocks
+    if hasattr(stocks, "Trade") and hasattr(stocks, "Quote"):
+        module._massive_speedup_stock_api_installed = True
+        return module
 
     class Trade:
         @classmethod

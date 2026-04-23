@@ -7,7 +7,7 @@ std::string WebSocketParser::parser_group() const { return "websocket"; }
 Summary WebSocketParser::parse_message(nb::handle payload) const {
   auto split_on_commas = [](std::string_view payload, std::vector<std::string>& output) {
     if (output.empty()) {
-      output.resize(1);
+      output.resize(4);
     }
 
     std::size_t field_index = 0;

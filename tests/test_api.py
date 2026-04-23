@@ -66,20 +66,20 @@ def test_flatfiles_stocks_nested_quote_api_parse_and_parse_raw(tmp_path: Path) -
 
     assert isinstance(quote, StockQuote)
     assert raw_quote == (
-        "A",
-        "19",
-        "0.0",
-        "0",
-        "19",
-        "0.0",
-        "0",
-        "1,81",
-        "",
-        "1770800340065735000",
-        "324",
-        "1770800340066046795",
-        "1",
-        "0",
+        b"A",
+        b"19",
+        b"0.0",
+        b"0",
+        b"19",
+        b"0.0",
+        b"0",
+        b"1,81",
+        b"",
+        b"1770800340065735000",
+        b"324",
+        b"1770800340066046795",
+        b"1",
+        b"0",
     )
 
 
@@ -116,20 +116,68 @@ def test_flatfiles_stocks_nested_trade_api_parse_and_parse_raw(tmp_path: Path) -
 
     assert isinstance(trade, StockTrade)
     assert raw_trade == (
-        "A",
-        "12",
-        "0",
-        "8",
-        "52983525035849",
-        "1770810300032981000",
-        "129.79",
-        "6876",
-        "1770810300033243132",
-        "100",
-        "1",
-        "0",
-        "0",
+        b"A",
+        b"12",
+        b"0",
+        b"8",
+        b"52983525035849",
+        b"1770810300032981000",
+        b"129.79",
+        b"6876",
+        b"1770810300033243132",
+        b"100",
+        b"1",
+        b"0",
+        b"0",
     )
+
+
+def test_flatfiles_stocks_nested_trade_api_parse_raw_reads_quoted_conditions(tmp_path: Path) -> None:
+    path = tmp_path / "quoted_raw_trades.csv.gz"
+    with gzip.open(path, "wt", encoding="utf-8", newline="") as handle:
+        handle.write(
+            "ticker,conditions,correction,exchange,id,participant_timestamp,price,"
+            "sequence_number,sip_timestamp,size,tape,trf_id,trf_timestamp\n"
+        )
+        handle.write(
+            'A,"12,37",0,12,62879131135034,1769161728012624580,137.73,'
+            "4798,1769161728012983416,15,1,0,0\n"
+        )
+
+    raw_trade = next(FlatFiles.Stocks.Trade.parse_raw(path))
+
+    assert raw_trade == (
+        b"A",
+        b"12,37",
+        b"0",
+        b"12",
+        b"62879131135034",
+        b"1769161728012624580",
+        b"137.73",
+        b"4798",
+        b"1769161728012983416",
+        b"15",
+        b"1",
+        b"0",
+        b"0",
+    )
+
+
+def test_flatfiles_stocks_parse_raw_reuses_repeated_ticker_bytes(tmp_path: Path) -> None:
+    path = tmp_path / "trades.csv.gz"
+    with gzip.open(path, "wt", encoding="utf-8", newline="") as handle:
+        handle.write(
+            "ticker,conditions,correction,exchange,id,participant_timestamp,price,"
+            "sequence_number,sip_timestamp,size,tape,trf_id,trf_timestamp\n"
+        )
+        handle.write("A,12,0,8,1,2,3.5,4,5,6,7,8,9\n")
+        handle.write("A,13,0,8,10,11,12.5,13,14,15,16,17,18\n")
+        handle.write("B,14,0,8,19,20,21.5,22,23,24,25,26,27\n")
+
+    rows = list(FlatFiles.Stocks.Trade.parse_raw(path))
+
+    assert rows[0][0] is rows[1][0]
+    assert rows[1][0] is not rows[2][0]
 
 
 def test_flatfiles_stocks_nested_trade_api_raw_lines(tmp_path: Path) -> None:
@@ -143,8 +191,8 @@ def test_flatfiles_stocks_nested_trade_api_raw_lines(tmp_path: Path) -> None:
         handle.write("B,13,0,9,10,11,12.5,13,14,15,16,17,18\n")
 
     assert list(FlatFiles.Stocks.Trade.raw_lines(path)) == [
-        "A,12,0,8,1,2,3.5,4,5,6,7,8,9",
-        "B,13,0,9,10,11,12.5,13,14,15,16,17,18",
+        b"A,12,0,8,1,2,3.5,4,5,6,7,8,9",
+        b"B,13,0,9,10,11,12.5,13,14,15,16,17,18",
     ]
 
 
@@ -164,6 +212,25 @@ def test_flatfiles_stocks_parse_trades_reads_quoted_condition_sets(tmp_path: Pat
 
     assert len(trades) == 1
     assert trades[0].conditions == frozenset({1, 81})
+
+
+def test_flatfiles_stocks_nested_quote_api_parse_raw_reads_quoted_condition_fields(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "quoted_raw_quotes.csv.gz"
+    with gzip.open(path, "wt", encoding="utf-8", newline="") as handle:
+        handle.write(
+            "ticker,ask_exchange,ask_price,ask_size,bid_exchange,bid_price,bid_size,"
+            "conditions,indicators,participant_timestamp,sequence_number,"
+            "sip_timestamp,tape,trf_timestamp\n"
+        )
+        handle.write('A,19,0.0,0,19,0.0,0,"1,81",,1770800340065735000,324,1770800340066046795,1,0\n')
+
+    raw_quote = next(FlatFiles.Stocks.Quote.parse_raw(path))
+
+    assert raw_quote[7] == b"1,81"
+    assert raw_quote[8] == b""
+    assert len(raw_quote) == 14
 
 
 def test_flatfiles_stocks_parse_trades_is_unsorted_by_default(tmp_path: Path) -> None:
@@ -446,3 +513,16 @@ def test_direct_backend_module_classes_are_callable_when_built(module_name: str)
     assert hasattr(module, "read_gzip_lines_bytes")
     assert list(module.read_gzip_lines_bytes(path)) == [b"Hello", b"World!"]
     assert message_summary["asset_class"] == "messages"
+
+
+def test_sse_parse_raw_uses_backend_specialization_hooks() -> None:
+    sse_source = Path("src/cpp/backends/x86_sse.cpp").read_text(encoding="utf-8")
+    generic_source = Path("src/cpp/backends/generic.hpp").read_text(encoding="utf-8")
+
+    assert "using Implementation = massive_speedup::backend_generic::Implementation<Base, Specialization>" in sse_source
+    assert "parse_raw_trade_tuple" in generic_source
+    assert "parse_raw_quote_tuple" in generic_source
+    assert "next_raw_condition_field<true>" in generic_source
+    assert "Specialization::template parse_unquoted_field<ExpectMore>" in generic_source
+    assert "static inline std::string_view parse_unquoted_field" in sse_source
+    assert "static inline std::string_view parse_quoted_field" in sse_source

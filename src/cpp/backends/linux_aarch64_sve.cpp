@@ -5,12 +5,84 @@ namespace nb = nanobind;
 
 namespace massive_speedup::backend_linux_aarch64_sve {
 
-struct Specialization : massive_speedup::backend_generic::GenericSpecialization {
+struct Specialization {
+  static inline bool next_line(
+      massive_speedup::backend_generic::detail::BufferedGzipLineReader& reader,
+      std::string_view& line) {
+    if (reader.line_start_ >= reader.pending_.size()) {
+      reader.clear_consumed_buffer();
+    }
+
+    while (true) {
+      const auto newline = reader.pending_.find('\n', reader.search_offset_);
+      if (newline != std::string::npos) {
+        line = reader.line_view(reader.line_start_, newline);
+        reader.line_start_ = newline + 1;
+        reader.search_offset_ = reader.line_start_;
+        return true;
+      }
+
+      reader.search_offset_ = reader.pending_.size();
+      if (!reader.read_more()) {
+        break;
+      }
+    }
+
+    if (reader.line_start_ < reader.pending_.size()) {
+      line = reader.line_view(reader.line_start_, reader.pending_.size());
+      reader.line_start_ = reader.pending_.size();
+      reader.search_offset_ = reader.line_start_;
+      return true;
+    }
+
+    line = {};
+    return false;
+  }
+
+  template <bool ExpectMore>
+  static inline std::string_view parse_unquoted_field(
+      std::string_view line,
+      std::size_t& cursor) {
+    return massive_speedup::backend_generic::detail::CsvLineCursor::
+        template scalar_parse_unquoted_field<ExpectMore>(line, cursor);
+  }
+
+  template <bool ExpectMore>
+  static inline std::string_view parse_quoted_field(
+      std::string_view line,
+      std::size_t& cursor,
+      std::string& scratch) {
+    return massive_speedup::backend_generic::detail::CsvLineCursor::
+        template scalar_parse_quoted_field<ExpectMore>(line, cursor, scratch);
+  }
+
+  template <typename IntegerType>
+  static inline IntegerType parse_integer(
+      std::string_view text,
+      std::string_view field_name) {
+    return massive_speedup::backend_generic::detail::parse_integer<IntegerType>(
+        text,
+        field_name);
+  }
+
+  static inline double parse_double(std::string_view text, std::string_view field_name) {
+    return massive_speedup::backend_generic::detail::parse_double(text, field_name);
+  }
+
+  template <std::size_t BitCount>
+  static inline std::bitset<BitCount> parse_bitset(
+      std::string_view text,
+      std::string_view field_name) {
+    return massive_speedup::backend_generic::detail::parse_bitset<BitCount>(
+        text,
+        field_name);
+  }
+
   static inline void split_on_commas(
       std::string_view payload,
       std::vector<std::string>& output) {
     if (output.empty()) {
-      output.resize(1);
+      output.resize(4);
     }
 
     std::size_t field_index = 0;
@@ -39,7 +111,7 @@ struct Specialization : massive_speedup::backend_generic::GenericSpecialization 
       std::string_view line,
       std::vector<std::string>& output) {
     if (output.empty()) {
-      output.resize(1);
+      output.resize(8);
     } else {
       output[0].clear();
     }

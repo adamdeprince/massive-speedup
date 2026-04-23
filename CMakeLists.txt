@@ -6,8 +6,20 @@ include(FetchContent)
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
 find_package(nanobind CONFIG REQUIRED)
 
+set(
+  FETCHCONTENT_UPDATES_DISCONNECTED
+  ON
+  CACHE BOOL
+  "Do not contact dependency remotes for updates after FetchContent sources exist."
+)
+
 option(MASSIVE_SPEEDUP_USE_SYSTEM_SIMDJSON "Use an already-installed simdjson package." OFF)
 option(MASSIVE_SPEEDUP_USE_SYSTEM_RAPIDGZIP "Use a pre-vendored rapidgzip checkout." OFF)
+option(
+  MASSIVE_SPEEDUP_OFFLINE
+  "Never download missing third-party dependency sources."
+  OFF
+)
 set(
   MASSIVE_SPEEDUP_RAPIDGZIP_SOURCE_DIR
   ""
@@ -15,8 +27,29 @@ set(
   "Path to a local rapidgzip source checkout when MASSIVE_SPEEDUP_USE_SYSTEM_RAPIDGZIP=ON."
 )
 
+set(MASSIVE_SPEEDUP_HAS_SIMDJSON_VALUE 1)
+set(MASSIVE_SPEEDUP_HAS_RAPIDGZIP_VALUE 1)
+set(MASSIVE_SPEEDUP_DEPS_DIR "${CMAKE_BINARY_DIR}/_deps")
+
 if(MASSIVE_SPEEDUP_USE_SYSTEM_SIMDJSON)
   find_package(simdjson REQUIRED)
+elseif(EXISTS "${MASSIVE_SPEEDUP_DEPS_DIR}/simdjson-src/CMakeLists.txt")
+  set(SIMDJSON_JUST_LIBRARY ON CACHE INTERNAL "")
+  set(SIMDJSON_BUILD_STATIC ON CACHE INTERNAL "")
+  FetchContent_Declare(
+    simdjson
+    SOURCE_DIR "${MASSIVE_SPEEDUP_DEPS_DIR}/simdjson-src"
+    BINARY_DIR "${MASSIVE_SPEEDUP_DEPS_DIR}/simdjson-build"
+  )
+  FetchContent_MakeAvailable(simdjson)
+elseif(MASSIVE_SPEEDUP_OFFLINE)
+  message(
+    WARNING
+    "simdjson source checkout is missing at ${MASSIVE_SPEEDUP_DEPS_DIR}/simdjson-src; "
+    "building without C++ simdjson integration because MASSIVE_SPEEDUP_OFFLINE=ON."
+  )
+  add_library(simdjson INTERFACE)
+  set(MASSIVE_SPEEDUP_HAS_SIMDJSON_VALUE 0)
 else()
   set(SIMDJSON_JUST_LIBRARY ON CACHE INTERNAL "")
   set(SIMDJSON_BUILD_STATIC ON CACHE INTERNAL "")
@@ -25,6 +58,7 @@ else()
     GIT_REPOSITORY https://github.com/simdjson/simdjson.git
     GIT_TAG v3.13.0
     GIT_SHALLOW TRUE
+    UPDATE_DISCONNECTED TRUE
   )
   FetchContent_MakeAvailable(simdjson)
 endif()
@@ -45,12 +79,32 @@ if(MASSIVE_SPEEDUP_USE_SYSTEM_RAPIDGZIP)
     ${MASSIVE_SPEEDUP_RAPIDGZIP_SOURCE_DIR}/src
     ${MASSIVE_SPEEDUP_RAPIDGZIP_SOURCE_DIR}/librapidarchive/src
   )
+elseif(
+  EXISTS "${MASSIVE_SPEEDUP_DEPS_DIR}/rapidgzip-src/src/rapidgzip/ParallelGzipReader.hpp"
+  OR EXISTS "${MASSIVE_SPEEDUP_DEPS_DIR}/rapidgzip-src/librapidarchive/src/rapidgzip/ParallelGzipReader.hpp"
+)
+  add_library(rapidgzip INTERFACE)
+  target_include_directories(
+    rapidgzip
+    INTERFACE
+    ${MASSIVE_SPEEDUP_DEPS_DIR}/rapidgzip-src
+    ${MASSIVE_SPEEDUP_DEPS_DIR}/rapidgzip-src/src
+    ${MASSIVE_SPEEDUP_DEPS_DIR}/rapidgzip-src/librapidarchive/src
+  )
+elseif(MASSIVE_SPEEDUP_OFFLINE)
+  message(
+    FATAL_ERROR
+    "rapidgzip source checkout is missing at ${MASSIVE_SPEEDUP_DEPS_DIR}/rapidgzip-src. "
+    "Disable MASSIVE_SPEEDUP_OFFLINE to download it or set "
+    "MASSIVE_SPEEDUP_USE_SYSTEM_RAPIDGZIP=ON with MASSIVE_SPEEDUP_RAPIDGZIP_SOURCE_DIR."
+  )
 else()
   FetchContent_Declare(
     rapidgzip
     GIT_REPOSITORY https://github.com/mxmlnkn/rapidgzip.git
     GIT_TAG rapidgzip-v0.16.0
     GIT_SHALLOW TRUE
+    UPDATE_DISCONNECTED TRUE
   )
   FetchContent_GetProperties(rapidgzip)
   if(NOT rapidgzip_POPULATED)
@@ -77,8 +131,8 @@ target_link_libraries(
 target_compile_definitions(
   massive_speedup_cppdeps
   INTERFACE
-  MASSIVE_SPEEDUP_HAS_RAPIDGZIP=1
-  MASSIVE_SPEEDUP_HAS_SIMDJSON=1
+  MASSIVE_SPEEDUP_HAS_RAPIDGZIP=${MASSIVE_SPEEDUP_HAS_RAPIDGZIP_VALUE}
+  MASSIVE_SPEEDUP_HAS_SIMDJSON=${MASSIVE_SPEEDUP_HAS_SIMDJSON_VALUE}
 )
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")

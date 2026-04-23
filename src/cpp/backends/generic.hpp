@@ -205,16 +205,159 @@ inline nanobind::object tuple_iterator(nanobind::handle values) {
   return nanobind::steal<nanobind::object>(iterator);
 }
 
+inline PyObject* static_bytes_new_ref(const char* data, Py_ssize_t size) {
+  PyObject* value = PyBytes_FromStringAndSize(data, size);
+  if (value == nullptr) {
+    throw nanobind::python_error();
+  }
+  return value;
+}
+
+inline PyObject* empty_bytes_new_ref() {
+  static PyObject* value = static_bytes_new_ref("", 0);
+  Py_INCREF(value);
+  return value;
+}
+
+inline PyObject* zero_bytes_new_ref() {
+  static PyObject* value = static_bytes_new_ref("0", 1);
+  Py_INCREF(value);
+  return value;
+}
+
+inline PyObject* raw_bytes_new_ref(std::string_view field) {
+  if (field.empty()) {
+    return empty_bytes_new_ref();
+  }
+  if (field.size() == 1 && field[0] == '0') {
+    return zero_bytes_new_ref();
+  }
+
+  PyObject* value = PyBytes_FromStringAndSize(field.data(), field.size());
+  if (value == nullptr) {
+    throw nanobind::python_error();
+  }
+  return value;
+}
+
+inline std::optional<unsigned> parse_canonical_uint8_field(std::string_view field) {
+  if (field.empty() || field.size() > 3) {
+    return std::nullopt;
+  }
+  if (field.size() > 1 && field[0] == '0') {
+    return std::nullopt;
+  }
+
+  unsigned value = 0;
+  for (const char digit : field) {
+    if (digit < '0' || digit > '9') {
+      return std::nullopt;
+    }
+    value = value * 10U + static_cast<unsigned>(digit - '0');
+  }
+
+  if (value > 255U) {
+    return std::nullopt;
+  }
+  return value;
+}
+
+class RawBytesInternCache {
+ public:
+  RawBytesInternCache() = default;
+
+  ~RawBytesInternCache() {
+    Py_XDECREF(cached_ticker_bytes_);
+    for (PyObject* value : small_uint_bytes_) {
+      Py_XDECREF(value);
+    }
+  }
+
+  RawBytesInternCache(const RawBytesInternCache&) = delete;
+  RawBytesInternCache& operator=(const RawBytesInternCache&) = delete;
+
+  RawBytesInternCache(RawBytesInternCache&& other) noexcept
+      : cached_ticker_bytes_(std::exchange(other.cached_ticker_bytes_, nullptr)),
+        cached_ticker_(std::move(other.cached_ticker_)),
+        small_uint_bytes_(other.small_uint_bytes_) {
+    other.small_uint_bytes_.fill(nullptr);
+  }
+
+  RawBytesInternCache& operator=(RawBytesInternCache&& other) noexcept {
+    if (this == &other) {
+      return *this;
+    }
+
+    Py_XDECREF(cached_ticker_bytes_);
+    for (PyObject* value : small_uint_bytes_) {
+      Py_XDECREF(value);
+    }
+
+    cached_ticker_bytes_ = std::exchange(other.cached_ticker_bytes_, nullptr);
+    cached_ticker_ = std::move(other.cached_ticker_);
+    small_uint_bytes_ = other.small_uint_bytes_;
+    other.small_uint_bytes_.fill(nullptr);
+    return *this;
+  }
+
+  PyObject* ticker_new_ref(std::string_view ticker) {
+    if (cached_ticker_bytes_ != nullptr && ticker == cached_ticker_) {
+      Py_INCREF(cached_ticker_bytes_);
+      return cached_ticker_bytes_;
+    }
+
+    PyObject* value = raw_bytes_new_ref(ticker);
+    Py_XDECREF(cached_ticker_bytes_);
+    cached_ticker_bytes_ = value;
+    cached_ticker_.assign(ticker);
+    Py_INCREF(cached_ticker_bytes_);
+    return value;
+  }
+
+  PyObject* small_uint_new_ref(std::string_view field) {
+    if (field.empty()) {
+      return empty_bytes_new_ref();
+    }
+    if (field.size() == 1 && field[0] == '0') {
+      return zero_bytes_new_ref();
+    }
+
+    const auto parsed = parse_canonical_uint8_field(field);
+    if (!parsed) {
+      return raw_bytes_new_ref(field);
+    }
+
+    PyObject*& cached = small_uint_bytes_[*parsed];
+    if (cached == nullptr) {
+      cached = PyBytes_FromStringAndSize(field.data(), field.size());
+      if (cached == nullptr) {
+        throw nanobind::python_error();
+      }
+    }
+
+    Py_INCREF(cached);
+    return cached;
+  }
+
+ private:
+  PyObject* cached_ticker_bytes_ = nullptr;
+  std::string cached_ticker_;
+  std::array<PyObject*, 256> small_uint_bytes_{};
+};
+
 template <std::size_t FieldCount>
-nanobind::tuple string_tuple(const std::array<std::string, FieldCount>& fields) {
+nanobind::tuple bytes_tuple(
+    const std::array<std::string, FieldCount>& fields,
+    RawBytesInternCache& intern_cache) {
   nanobind::tuple result = nanobind::steal<nanobind::tuple>(PyTuple_New(FieldCount));
   if (!result.is_valid()) {
     throw nanobind::python_error();
   }
 
-  for (std::size_t index = 0; index < FieldCount; ++index) {
-    nanobind::object value = nanobind::cast(fields[index]);
-    PyTuple_SET_ITEM(result.ptr(), index, value.release().ptr());
+  PyTuple_SET_ITEM(result.ptr(), 0, intern_cache.ticker_new_ref(fields[0]));
+
+  for (std::size_t index = 1; index < FieldCount; ++index) {
+    PyTuple_SET_ITEM(result.ptr(), index, raw_bytes_new_ref(fields[index]));
   }
   return result;
 }
@@ -255,58 +398,25 @@ class BufferedGzipLineReader {
     return Specialization::next_line(*this, line);
   }
 
-  bool scalar_next_line(std::string_view& line) {
-#if MASSIVE_SPEEDUP_HAS_RAPIDGZIP_HEADERS
-    if (line_start_ >= pending_.size()) {
-      pending_.clear();
-      line_start_ = 0;
-      search_offset_ = 0;
-    }
-
-    while (true) {
-      const auto newline = pending_.find('\n', search_offset_);
-      if (newline != std::string::npos) {
-        line = line_view(line_start_, newline);
-        line_start_ = newline + 1;
-        search_offset_ = line_start_;
-        return true;
-      }
-
-      search_offset_ = pending_.size();
-      if (!read_more()) {
-        break;
-      }
-    }
-
-    if (line_start_ < pending_.size()) {
-      line = line_view(line_start_, pending_.size());
-      line_start_ = pending_.size();
-      search_offset_ = line_start_;
-      return true;
-    }
-
-    line = {};
-    return false;
-#else
-    static_cast<void>(line);
-    throw std::runtime_error(
-        "rapidgzip headers are not available in the current build tree; "
-        "check out the rapidgzip/librapidarchive sources before using gzip_lines");
-#endif
-  }
-
- private:
-#if MASSIVE_SPEEDUP_HAS_RAPIDGZIP_HEADERS
   std::string_view line_view(std::size_t start, std::size_t end) const {
+#if MASSIVE_SPEEDUP_HAS_RAPIDGZIP_HEADERS
     std::size_t length = end - start;
     if (length != 0 && pending_[start + length - 1] == '\r') {
       --length;
     }
 
     return std::string_view(pending_.data() + start, length);
+#else
+    static_cast<void>(start);
+    static_cast<void>(end);
+    throw std::runtime_error(
+        "rapidgzip headers are not available in the current build tree; "
+        "check out the rapidgzip/librapidarchive sources before using gzip_lines");
+#endif
   }
 
   void release_consumed_prefix() {
+#if MASSIVE_SPEEDUP_HAS_RAPIDGZIP_HEADERS
     if (line_start_ == 0) {
       return;
     }
@@ -321,9 +431,11 @@ class BufferedGzipLineReader {
     pending_.erase(0, line_start_);
     search_offset_ -= line_start_;
     line_start_ = 0;
+#endif
   }
 
   bool read_more() {
+#if MASSIVE_SPEEDUP_HAS_RAPIDGZIP_HEADERS
     release_consumed_prefix();
 
     const auto bytes_read = reader_->read(-1, buffer_.data(), buffer_.size());
@@ -333,14 +445,28 @@ class BufferedGzipLineReader {
 
     pending_.append(buffer_.data(), bytes_read);
     return true;
+#else
+    throw std::runtime_error(
+        "rapidgzip headers are not available in the current build tree; "
+        "check out the rapidgzip/librapidarchive sources before using gzip_lines");
+#endif
   }
 
-  std::unique_ptr<rapidgzip::ParallelGzipReader<rapidgzip::ChunkData>> reader_;
-#endif
+  void clear_consumed_buffer() {
+    pending_.clear();
+    line_start_ = 0;
+    search_offset_ = 0;
+  }
+
   std::vector<char> buffer_;
   std::string pending_;
   std::size_t line_start_ = 0;
   std::size_t search_offset_ = 0;
+
+ private:
+#if MASSIVE_SPEEDUP_HAS_RAPIDGZIP_HEADERS
+  std::unique_ptr<rapidgzip::ParallelGzipReader<rapidgzip::ChunkData>> reader_;
+#endif
 };
 
 class CsvLineCursor {
@@ -693,7 +819,34 @@ struct GenericSpecialization {
   static inline bool next_line(
       detail::BufferedGzipLineReader& reader,
       std::string_view& line) {
-    return reader.scalar_next_line(line);
+    if (reader.line_start_ >= reader.pending_.size()) {
+      reader.clear_consumed_buffer();
+    }
+
+    while (true) {
+      const auto newline = reader.pending_.find('\n', reader.search_offset_);
+      if (newline != std::string::npos) {
+        line = reader.line_view(reader.line_start_, newline);
+        reader.line_start_ = newline + 1;
+        reader.search_offset_ = reader.line_start_;
+        return true;
+      }
+
+      reader.search_offset_ = reader.pending_.size();
+      if (!reader.read_more()) {
+        break;
+      }
+    }
+
+    if (reader.line_start_ < reader.pending_.size()) {
+      line = reader.line_view(reader.line_start_, reader.pending_.size());
+      reader.line_start_ = reader.pending_.size();
+      reader.search_offset_ = reader.line_start_;
+      return true;
+    }
+
+    line = {};
+    return false;
   }
 
   template <bool ExpectMore>
@@ -738,7 +891,7 @@ struct GenericSpecialization {
       std::string_view payload,
       std::vector<std::string>& output) {
     if (output.empty()) {
-      output.resize(1);
+      output.resize(4);
     }
 
     std::size_t field_index = 0;
@@ -767,7 +920,7 @@ struct GenericSpecialization {
       std::string_view line,
       std::vector<std::string>& output) {
     if (output.empty()) {
-      output.resize(1);
+      output.resize(8);
     } else {
       output[0].clear();
     }
@@ -915,6 +1068,25 @@ class Implementation : public Base {
     explicit RawStockTradeStreamState(const std::filesystem::path& path)
         : reader_(path) {}
 
+    RawStockTradeStreamState(const RawStockTradeStreamState&) = delete;
+    RawStockTradeStreamState& operator=(const RawStockTradeStreamState&) = delete;
+
+    RawStockTradeStreamState(RawStockTradeStreamState&& other) noexcept
+        : reader_(std::move(other.reader_)),
+          is_first_line_(other.is_first_line_),
+          intern_cache_(std::move(other.intern_cache_)) {}
+
+    RawStockTradeStreamState& operator=(RawStockTradeStreamState&& other) noexcept {
+      if (this == &other) {
+        return *this;
+      }
+
+      reader_ = std::move(other.reader_);
+      is_first_line_ = other.is_first_line_;
+      intern_cache_ = std::move(other.intern_cache_);
+      return *this;
+    }
+
     bool next_row(RawStockTrade& row) {
       std::string_view line;
 
@@ -935,15 +1107,57 @@ class Implementation : public Base {
       return false;
     }
 
+    bool next_tuple(nanobind::tuple& row) {
+      std::string_view line;
+
+      while (reader_.template next_line<Specialization>(line)) {
+        if (is_first_line_) {
+          is_first_line_ = false;
+          continue;
+        }
+
+        if (line.empty()) {
+          continue;
+        }
+
+        row = Implementation::parse_raw_trade_tuple(
+            line,
+            intern_cache_);
+        return true;
+      }
+
+      return false;
+    }
+
    private:
     detail::BufferedGzipLineReader reader_;
     bool is_first_line_ = true;
+    detail::RawBytesInternCache intern_cache_;
   };
 
   class RawStockQuoteStreamState {
    public:
     explicit RawStockQuoteStreamState(const std::filesystem::path& path)
         : reader_(path) {}
+
+    RawStockQuoteStreamState(const RawStockQuoteStreamState&) = delete;
+    RawStockQuoteStreamState& operator=(const RawStockQuoteStreamState&) = delete;
+
+    RawStockQuoteStreamState(RawStockQuoteStreamState&& other) noexcept
+        : reader_(std::move(other.reader_)),
+          is_first_line_(other.is_first_line_),
+          intern_cache_(std::move(other.intern_cache_)) {}
+
+    RawStockQuoteStreamState& operator=(RawStockQuoteStreamState&& other) noexcept {
+      if (this == &other) {
+        return *this;
+      }
+
+      reader_ = std::move(other.reader_);
+      is_first_line_ = other.is_first_line_;
+      intern_cache_ = std::move(other.intern_cache_);
+      return *this;
+    }
 
     bool next_row(RawStockQuote& row) {
       std::string_view line;
@@ -965,19 +1179,7 @@ class Implementation : public Base {
       return false;
     }
 
-   private:
-    detail::BufferedGzipLineReader reader_;
-    bool is_first_line_ = true;
-  };
-
-  class RawLineRowsIterator {
-   public:
-    explicit RawLineRowsIterator(const std::filesystem::path& path)
-        : reader_(path) {}
-
-    RawLineRowsIterator& iter() { return *this; }
-
-    nanobind::str next() {
+    bool next_tuple(nanobind::tuple& row) {
       std::string_view line;
 
       while (reader_.template next_line<Specialization>(line)) {
@@ -990,7 +1192,42 @@ class Implementation : public Base {
           continue;
         }
 
-        return nanobind::str(line.data(), line.size());
+        row = Implementation::parse_raw_quote_tuple(
+            line,
+            intern_cache_);
+        return true;
+      }
+
+      return false;
+    }
+
+   private:
+    detail::BufferedGzipLineReader reader_;
+    bool is_first_line_ = true;
+    detail::RawBytesInternCache intern_cache_;
+  };
+
+  class RawLineRowsIterator {
+   public:
+    explicit RawLineRowsIterator(const std::filesystem::path& path)
+        : reader_(path) {}
+
+    RawLineRowsIterator& iter() { return *this; }
+
+    nanobind::bytes next() {
+      std::string_view line;
+
+      while (reader_.template next_line<Specialization>(line)) {
+        if (is_first_line_) {
+          is_first_line_ = false;
+          continue;
+        }
+
+        if (line.empty()) {
+          continue;
+        }
+
+        return nanobind::bytes(line.data(), line.size());
       }
 
       throw nanobind::stop_iteration();
@@ -1088,20 +1325,55 @@ class Implementation : public Base {
       }
     }
 
+    RawStockTradeRowsIterator(const RawStockTradeRowsIterator&) = delete;
+    RawStockTradeRowsIterator& operator=(const RawStockTradeRowsIterator&) = delete;
+
+    RawStockTradeRowsIterator(RawStockTradeRowsIterator&& other) noexcept
+        : stream_state_(std::move(other.stream_state_)),
+          rows_(std::move(other.rows_)),
+          row_index_(other.row_index_),
+          intern_cache_(std::move(other.intern_cache_)) {}
+
+    RawStockTradeRowsIterator& operator=(RawStockTradeRowsIterator&& other) noexcept {
+      if (this == &other) {
+        return *this;
+      }
+
+      stream_state_ = std::move(other.stream_state_);
+      rows_ = std::move(other.rows_);
+      row_index_ = other.row_index_;
+      intern_cache_ = std::move(other.intern_cache_);
+      return *this;
+    }
+
     RawStockTradeRowsIterator& iter() { return *this; }
 
     nanobind::tuple next() {
-      return detail::string_tuple(
-          Implementation::template next_parsed_row<RawStockTrade, RawStockTradeStreamState>(
-              stream_state_,
-              rows_,
-              row_index_));
+      if (stream_state_) {
+        nanobind::tuple row;
+        if (stream_state_->next_tuple(row)) {
+          return row;
+        }
+
+        stream_state_.reset();
+        throw nanobind::stop_iteration();
+      }
+
+      return Implementation::raw_trade_array_to_tuple(rows_next(), intern_cache_);
     }
 
    private:
+    RawStockTrade rows_next() {
+      if (row_index_ >= rows_.size()) {
+        throw nanobind::stop_iteration();
+      }
+      return std::move(rows_[row_index_++]);
+    }
+
     std::optional<RawStockTradeStreamState> stream_state_;
     std::vector<RawStockTrade> rows_;
     std::size_t row_index_ = 0;
+    detail::RawBytesInternCache intern_cache_;
   };
 
   class RawStockQuoteRowsIterator {
@@ -1123,20 +1395,55 @@ class Implementation : public Base {
       }
     }
 
+    RawStockQuoteRowsIterator(const RawStockQuoteRowsIterator&) = delete;
+    RawStockQuoteRowsIterator& operator=(const RawStockQuoteRowsIterator&) = delete;
+
+    RawStockQuoteRowsIterator(RawStockQuoteRowsIterator&& other) noexcept
+        : stream_state_(std::move(other.stream_state_)),
+          rows_(std::move(other.rows_)),
+          row_index_(other.row_index_),
+          intern_cache_(std::move(other.intern_cache_)) {}
+
+    RawStockQuoteRowsIterator& operator=(RawStockQuoteRowsIterator&& other) noexcept {
+      if (this == &other) {
+        return *this;
+      }
+
+      stream_state_ = std::move(other.stream_state_);
+      rows_ = std::move(other.rows_);
+      row_index_ = other.row_index_;
+      intern_cache_ = std::move(other.intern_cache_);
+      return *this;
+    }
+
     RawStockQuoteRowsIterator& iter() { return *this; }
 
     nanobind::tuple next() {
-      return detail::string_tuple(
-          Implementation::template next_parsed_row<RawStockQuote, RawStockQuoteStreamState>(
-              stream_state_,
-              rows_,
-              row_index_));
+      if (stream_state_) {
+        nanobind::tuple row;
+        if (stream_state_->next_tuple(row)) {
+          return row;
+        }
+
+        stream_state_.reset();
+        throw nanobind::stop_iteration();
+      }
+
+      return Implementation::raw_quote_array_to_tuple(rows_next(), intern_cache_);
     }
 
    private:
+    RawStockQuote rows_next() {
+      if (row_index_ >= rows_.size()) {
+        throw nanobind::stop_iteration();
+      }
+      return std::move(rows_[row_index_++]);
+    }
+
     std::optional<RawStockQuoteStreamState> stream_state_;
     std::vector<RawStockQuote> rows_;
     std::size_t row_index_ = 0;
+    detail::RawBytesInternCache intern_cache_;
   };
 
   static GzipLineGenerator read_gzip_lines(
@@ -1258,21 +1565,136 @@ class Implementation : public Base {
 
   template <std::size_t FieldCount>
   static std::array<std::string, FieldCount> parse_raw_row(std::string_view line) {
-    detail::CsvLineCursor cursor(line);
-    std::string scratch;
+    std::vector<std::string> fields;
+    Specialization::split_csv_fields(line, fields);
+    detail::require_field_count("Raw CSV row", fields.size(), FieldCount);
+
     std::array<std::string, FieldCount> result;
 
-    for (std::size_t index = 0; index + 1 < FieldCount; ++index) {
-      result[index].assign(cursor.template next_field<Specialization, true>(scratch));
+    for (std::size_t index = 0; index < FieldCount; ++index) {
+      result[index] = std::move(fields[index]);
     }
 
-    result[FieldCount - 1].assign(cursor.template next_field<Specialization, false>(scratch));
-    cursor.finish();
     return result;
+  }
+
+  template <std::size_t FieldCount>
+  static nanobind::tuple make_raw_tuple() {
+    nanobind::tuple result = nanobind::steal<nanobind::tuple>(PyTuple_New(FieldCount));
+    if (!result.is_valid()) {
+      throw nanobind::python_error();
+    }
+    return result;
+  }
+
+  static void set_raw_bytes_field(
+      nanobind::tuple& result,
+      std::size_t index,
+      std::string_view field) {
+    PyTuple_SET_ITEM(result.ptr(), index, detail::raw_bytes_new_ref(field));
+  }
+
+  static void set_raw_small_uint_field(
+      nanobind::tuple& result,
+      std::size_t index,
+      std::string_view field,
+      detail::RawBytesInternCache& intern_cache) {
+    PyTuple_SET_ITEM(result.ptr(), index, intern_cache.small_uint_new_ref(field));
+  }
+
+  static void set_raw_ticker_field(
+      nanobind::tuple& result,
+      std::string_view ticker,
+      detail::RawBytesInternCache& intern_cache) {
+    PyTuple_SET_ITEM(result.ptr(), 0, intern_cache.ticker_new_ref(ticker));
+  }
+
+  template <bool ExpectMore>
+  static std::string_view next_raw_unquoted_field(
+      std::string_view line,
+      std::size_t& cursor) {
+    return Specialization::template parse_unquoted_field<ExpectMore>(line, cursor);
+  }
+
+  template <bool ExpectMore>
+  static std::string_view next_raw_condition_field(
+      std::string_view line,
+      std::size_t& cursor,
+      std::string& scratch) {
+    if (cursor < line.size() && line[cursor] == '"') {
+      return Specialization::template parse_quoted_field<ExpectMore>(
+          line,
+          cursor,
+          scratch);
+    }
+
+    return Specialization::template parse_unquoted_field<ExpectMore>(line, cursor);
+  }
+
+  static void finish_raw_row(std::string_view line, std::size_t cursor) {
+    if (cursor != line.size()) {
+      throw std::invalid_argument("unexpected trailing data in CSV row");
+    }
   }
 
   static RawStockTrade parse_raw_trade_row(std::string_view line) {
     return parse_raw_row<13>(line);
+  }
+
+  static nanobind::tuple parse_raw_trade_tuple(
+      std::string_view line,
+      detail::RawBytesInternCache& intern_cache) {
+    std::size_t cursor = 0;
+    std::string scratch;
+    nanobind::tuple result = make_raw_tuple<13>();
+
+    set_raw_ticker_field(
+        result,
+        next_raw_unquoted_field<true>(line, cursor),
+        intern_cache);
+    set_raw_bytes_field(result, 1, next_raw_condition_field<true>(line, cursor, scratch));
+    set_raw_bytes_field(result, 2, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_small_uint_field(
+        result,
+        3,
+        next_raw_unquoted_field<true>(line, cursor),
+        intern_cache);
+    set_raw_bytes_field(result, 4, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_bytes_field(result, 5, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_bytes_field(result, 6, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_bytes_field(result, 7, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_bytes_field(result, 8, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_bytes_field(result, 9, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_small_uint_field(
+        result,
+        10,
+        next_raw_unquoted_field<true>(line, cursor),
+        intern_cache);
+    set_raw_bytes_field(result, 11, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_bytes_field(result, 12, next_raw_unquoted_field<false>(line, cursor));
+
+    finish_raw_row(line, cursor);
+    return result;
+  }
+
+  static nanobind::tuple raw_trade_array_to_tuple(
+      const RawStockTrade& fields,
+      detail::RawBytesInternCache& intern_cache) {
+    nanobind::tuple result = make_raw_tuple<13>();
+    set_raw_ticker_field(result, fields[0], intern_cache);
+    set_raw_bytes_field(result, 1, fields[1]);
+    set_raw_bytes_field(result, 2, fields[2]);
+    set_raw_small_uint_field(result, 3, fields[3], intern_cache);
+    set_raw_bytes_field(result, 4, fields[4]);
+    set_raw_bytes_field(result, 5, fields[5]);
+    set_raw_bytes_field(result, 6, fields[6]);
+    set_raw_bytes_field(result, 7, fields[7]);
+    set_raw_bytes_field(result, 8, fields[8]);
+    set_raw_bytes_field(result, 9, fields[9]);
+    set_raw_small_uint_field(result, 10, fields[10], intern_cache);
+    set_raw_bytes_field(result, 11, fields[11]);
+    set_raw_bytes_field(result, 12, fields[12]);
+    return result;
   }
 
   static StockQuote parse_quote_row(std::string_view line) {
@@ -1338,6 +1760,68 @@ class Implementation : public Base {
 
   static RawStockQuote parse_raw_quote_row(std::string_view line) {
     return parse_raw_row<14>(line);
+  }
+
+  static nanobind::tuple parse_raw_quote_tuple(
+      std::string_view line,
+      detail::RawBytesInternCache& intern_cache) {
+    std::size_t cursor = 0;
+    std::string scratch;
+    nanobind::tuple result = make_raw_tuple<14>();
+
+    set_raw_ticker_field(
+        result,
+        next_raw_unquoted_field<true>(line, cursor),
+        intern_cache);
+    set_raw_small_uint_field(
+        result,
+        1,
+        next_raw_unquoted_field<true>(line, cursor),
+        intern_cache);
+    set_raw_bytes_field(result, 2, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_bytes_field(result, 3, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_small_uint_field(
+        result,
+        4,
+        next_raw_unquoted_field<true>(line, cursor),
+        intern_cache);
+    set_raw_bytes_field(result, 5, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_bytes_field(result, 6, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_bytes_field(result, 7, next_raw_condition_field<true>(line, cursor, scratch));
+    set_raw_bytes_field(result, 8, next_raw_condition_field<true>(line, cursor, scratch));
+    set_raw_bytes_field(result, 9, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_bytes_field(result, 10, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_bytes_field(result, 11, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_small_uint_field(
+        result,
+        12,
+        next_raw_unquoted_field<true>(line, cursor),
+        intern_cache);
+    set_raw_bytes_field(result, 13, next_raw_unquoted_field<false>(line, cursor));
+
+    finish_raw_row(line, cursor);
+    return result;
+  }
+
+  static nanobind::tuple raw_quote_array_to_tuple(
+      const RawStockQuote& fields,
+      detail::RawBytesInternCache& intern_cache) {
+    nanobind::tuple result = make_raw_tuple<14>();
+    set_raw_ticker_field(result, fields[0], intern_cache);
+    set_raw_small_uint_field(result, 1, fields[1], intern_cache);
+    set_raw_bytes_field(result, 2, fields[2]);
+    set_raw_bytes_field(result, 3, fields[3]);
+    set_raw_small_uint_field(result, 4, fields[4], intern_cache);
+    set_raw_bytes_field(result, 5, fields[5]);
+    set_raw_bytes_field(result, 6, fields[6]);
+    set_raw_bytes_field(result, 7, fields[7]);
+    set_raw_bytes_field(result, 8, fields[8]);
+    set_raw_bytes_field(result, 9, fields[9]);
+    set_raw_bytes_field(result, 10, fields[10]);
+    set_raw_bytes_field(result, 11, fields[11]);
+    set_raw_small_uint_field(result, 12, fields[12], intern_cache);
+    set_raw_bytes_field(result, 13, fields[13]);
+    return result;
   }
 
   static void validate_sort_flags(

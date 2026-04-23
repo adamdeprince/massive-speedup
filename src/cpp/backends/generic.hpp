@@ -16,6 +16,7 @@
 #include <string_view>
 #include <thread>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -138,11 +139,89 @@ std::bitset<BitCount> parse_bitset(std::string_view text, std::string_view field
   }
 }
 
-inline std::size_t bitset_hash(const std::bitset<96>& bits) {
-  return std::hash<std::string>{}(bits.to_string());
+struct TransparentStringHash {
+  using is_transparent = void;
+
+  std::size_t operator()(std::string_view value) const noexcept {
+    return std::hash<std::string_view>{}(value);
+  }
+
+  std::size_t operator()(const std::string& value) const noexcept {
+    return std::hash<std::string_view>{}(value);
+  }
+};
+
+struct TransparentStringEqual {
+  using is_transparent = void;
+
+  bool operator()(std::string_view lhs, std::string_view rhs) const noexcept {
+    return lhs == rhs;
+  }
+};
+
+template <std::size_t BitCount>
+class BitsetParseCache {
+ public:
+  const std::bitset<BitCount>& get_or_parse(
+      std::string_view text,
+      std::string_view field_name) {
+    const auto found = cache_.find(text);
+    if (found != cache_.end()) {
+      return found->second;
+    }
+
+    auto [iter, inserted] = cache_.emplace(
+        std::string(text),
+        parse_bitset<BitCount>(text, field_name));
+    static_cast<void>(inserted);
+    return iter->second;
+  }
+
+ private:
+  std::unordered_map<
+      std::string,
+      std::bitset<BitCount>,
+      TransparentStringHash,
+      TransparentStringEqual>
+      cache_;
+};
+
+template <std::size_t BitCount>
+inline std::size_t bitset_hash(const std::bitset<BitCount>& bits) {
+  std::size_t seed = 0;
+
+  for (std::size_t base = 0; base < BitCount; base += 64) {
+    std::uint64_t chunk = 0;
+    const std::size_t limit = std::min<std::size_t>(64, BitCount - base);
+
+    for (std::size_t offset = 0; offset < limit; ++offset) {
+      if (bits.test(base + offset)) {
+        chunk |= (std::uint64_t{1} << offset);
+      }
+    }
+
+    seed ^= std::hash<std::uint64_t>{}(chunk) + 0x9e3779b97f4a7c15ULL + (seed << 6U) +
+        (seed >> 2U);
+  }
+
+  return seed;
 }
 
 inline nanobind::object bit_indices_frozenset(const std::bitset<96>& bits) {
+  struct BitsetKeyHash {
+    std::size_t operator()(const std::bitset<96>& value) const noexcept {
+      return bitset_hash(value);
+    }
+  };
+
+  using InternTable = std::unordered_map<std::bitset<96>, PyObject*, BitsetKeyHash>;
+  static InternTable* interned_sets = new InternTable();
+
+  if (const auto found = interned_sets->find(bits); found != interned_sets->end()) {
+    Py_INCREF(found->second);
+    return nanobind::steal<nanobind::object>(found->second);
+  }
+
   nanobind::object result = nanobind::steal<nanobind::object>(PyFrozenSet_New(nullptr));
   if (!result.is_valid()) {
     throw nanobind::python_error();
@@ -159,6 +238,8 @@ inline nanobind::object bit_indices_frozenset(const std::bitset<96>& bits) {
     }
   }
 
+  Py_INCREF(result.ptr());
+  interned_sets->emplace(bits, result.ptr());
   return result;
 }
 
@@ -1021,7 +1102,7 @@ class Implementation : public Base {
           continue;
         }
 
-        row = Implementation::parse_trade_row(line);
+        row = Implementation::parse_trade_row(line, bitset_cache_);
         return true;
       }
 
@@ -1031,6 +1112,7 @@ class Implementation : public Base {
    private:
     detail::BufferedGzipLineReader reader_;
     bool is_first_line_ = true;
+    detail::BitsetParseCache<96> bitset_cache_;
   };
 
   class StockQuoteStreamState {
@@ -1051,7 +1133,7 @@ class Implementation : public Base {
           continue;
         }
 
-        row = Implementation::parse_quote_row(line);
+        row = Implementation::parse_quote_row(line, bitset_cache_);
         return true;
       }
 
@@ -1061,6 +1143,7 @@ class Implementation : public Base {
    private:
     detail::BufferedGzipLineReader reader_;
     bool is_first_line_ = true;
+    detail::BitsetParseCache<96> bitset_cache_;
   };
 
   class RawStockTradeStreamState {
@@ -1247,11 +1330,14 @@ class Implementation : public Base {
       validate_sort_flags(sort_by_participant_timestamp, sort_by_sip_timestamp);
 
       if (sort_by_participant_timestamp || sort_by_sip_timestamp) {
+        detail::BitsetParseCache<96> bitset_cache;
         rows_ = collect_rows<StockTrade>(
             path,
             sort_by_participant_timestamp,
             sort_by_sip_timestamp,
-            &Implementation::parse_trade_row);
+            [&bitset_cache](std::string_view line) {
+              return Implementation::parse_trade_row(line, bitset_cache);
+            });
       } else {
         stream_state_.emplace(path);
       }
@@ -1281,11 +1367,14 @@ class Implementation : public Base {
       validate_sort_flags(sort_by_participant_timestamp, sort_by_sip_timestamp);
 
       if (sort_by_participant_timestamp || sort_by_sip_timestamp) {
+        detail::BitsetParseCache<96> bitset_cache;
         rows_ = collect_rows<StockQuote>(
             path,
             sort_by_participant_timestamp,
             sort_by_sip_timestamp,
-            &Implementation::parse_quote_row);
+            [&bitset_cache](std::string_view line) {
+              return Implementation::parse_quote_row(line, bitset_cache);
+            });
       } else {
         stream_state_.emplace(path);
       }
@@ -1462,22 +1551,28 @@ class Implementation : public Base {
       const std::filesystem::path& path,
       bool sort_by_participant_timestamp = false,
       bool sort_by_sip_timestamp = false) const {
+    detail::BitsetParseCache<96> bitset_cache;
     return collect_rows<StockTrade>(
         path,
         sort_by_participant_timestamp,
         sort_by_sip_timestamp,
-        &Implementation::parse_trade_row);
+        [&bitset_cache](std::string_view line) {
+          return Implementation::parse_trade_row(line, bitset_cache);
+        });
   }
 
   std::vector<StockQuote> parse_quote_rows(
       const std::filesystem::path& path,
       bool sort_by_participant_timestamp = false,
       bool sort_by_sip_timestamp = false) const {
+    detail::BitsetParseCache<96> bitset_cache;
     return collect_rows<StockQuote>(
         path,
         sort_by_participant_timestamp,
         sort_by_sip_timestamp,
-        &Implementation::parse_quote_row);
+        [&bitset_cache](std::string_view line) {
+          return Implementation::parse_quote_row(line, bitset_cache);
+        });
   }
 
   Summary parse_message(nb::handle payload) const {
@@ -1502,19 +1597,17 @@ class Implementation : public Base {
   }
 
  private:
-  template <typename RowType>
-  using ParseRowFn = RowType (*)(std::string_view);
-
-  static StockTrade parse_trade_row(std::string_view line) {
+  static StockTrade parse_trade_row(
+      std::string_view line,
+      detail::BitsetParseCache<96>& bitset_cache) {
     detail::CsvLineCursor cursor(line);
     std::string scratch;
     StockTrade result;
 
     result.ticker.assign(cursor.template next_field<Specialization, true>(scratch));
-    result.conditions =
-        Specialization::template parse_bitset<96>(
-            cursor.template next_field<Specialization, true>(scratch),
-            "conditions");
+    result.conditions = bitset_cache.get_or_parse(
+        cursor.template next_field<Specialization, true>(scratch),
+        "conditions");
     result.correction =
         Specialization::template parse_integer<std::int32_t>(
             cursor.template next_field<Specialization, true>(scratch),
@@ -1697,7 +1790,9 @@ class Implementation : public Base {
     return result;
   }
 
-  static StockQuote parse_quote_row(std::string_view line) {
+  static StockQuote parse_quote_row(
+      std::string_view line,
+      detail::BitsetParseCache<96>& bitset_cache) {
     detail::CsvLineCursor cursor(line);
     std::string scratch;
     StockQuote result;
@@ -1725,14 +1820,12 @@ class Implementation : public Base {
         Specialization::template parse_integer<std::uint32_t>(
             cursor.template next_field<Specialization, true>(scratch),
             "bid_size");
-    result.conditions =
-        Specialization::template parse_bitset<96>(
-            cursor.template next_field<Specialization, true>(scratch),
-            "conditions");
-    result.indicators =
-        Specialization::template parse_bitset<96>(
-            cursor.template next_field<Specialization, true>(scratch),
-            "indicators");
+    result.conditions = bitset_cache.get_or_parse(
+        cursor.template next_field<Specialization, true>(scratch),
+        "conditions");
+    result.indicators = bitset_cache.get_or_parse(
+        cursor.template next_field<Specialization, true>(scratch),
+        "indicators");
     result.participant_timestamp =
         Specialization::template parse_integer<std::uint64_t>(
             cursor.template next_field<Specialization, true>(scratch),
@@ -1898,16 +1991,16 @@ class Implementation : public Base {
     return row.ticker;
   }
 
-  template <typename RowType>
+  template <typename RowType, typename ParseRowFn>
   static std::vector<RowType> collect_rows(
       const std::filesystem::path& path,
       bool sort_by_participant_timestamp,
       bool sort_by_sip_timestamp,
-      ParseRowFn<RowType> parse_row) {
+      ParseRowFn parse_row) {
     validate_sort_flags(sort_by_participant_timestamp, sort_by_sip_timestamp);
 
     if (sort_by_participant_timestamp) {
-      auto rows = load_rows(path, parse_row);
+      auto rows = load_rows<RowType>(path, parse_row);
       std::stable_sort(rows.begin(), rows.end(), [](const RowType& lhs, const RowType& rhs) {
         const auto lhs_participant_timestamp = Implementation::participant_timestamp_value(lhs);
         const auto rhs_participant_timestamp = Implementation::participant_timestamp_value(rhs);
@@ -1923,16 +2016,16 @@ class Implementation : public Base {
     }
 
     if (!sort_by_sip_timestamp) {
-      return load_rows(path, parse_row);
+      return load_rows<RowType>(path, parse_row);
     }
 
-    return merge_flatfile_row_bins<RowType>(load_row_bins(path, parse_row));
+    return merge_flatfile_row_bins<RowType>(load_row_bins<RowType>(path, parse_row));
   }
 
-  template <typename RowType>
+  template <typename RowType, typename ParseRowFn>
   static std::vector<RowType> load_rows(
       const std::filesystem::path& path,
-      ParseRowFn<RowType> parse_row) {
+      ParseRowFn parse_row) {
     std::vector<RowType> rows;
     detail::BufferedGzipLineReader reader(path);
     std::string_view line;
@@ -1954,10 +2047,10 @@ class Implementation : public Base {
     return rows;
   }
 
-  template <typename RowType>
+  template <typename RowType, typename ParseRowFn>
   static std::vector<std::vector<RowType>> load_row_bins(
       const std::filesystem::path& path,
-      ParseRowFn<RowType> parse_row) {
+      ParseRowFn parse_row) {
     std::vector<std::vector<RowType>> bins;
     detail::BufferedGzipLineReader reader(path);
     std::string_view line;

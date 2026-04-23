@@ -417,6 +417,7 @@ def test_stock_trade_row_model_is_iterable_hashable_and_ordered() -> None:
         )
     )
     assert "participant_timestamp=200" in repr(newer)
+    assert newer.conditions is older.conditions
 
 
 def test_stock_quote_row_model_exposes_read_only_fields() -> None:
@@ -445,6 +446,46 @@ def test_stock_quote_row_model_exposes_read_only_fields() -> None:
     assert quote.indicators == frozenset({0, 3})
     assert list(quote)[9] == 500
     assert "StockQuote(" in str(quote)
+
+
+def test_condition_frozensets_are_globally_interned() -> None:
+    trade = StockTrade(
+        [
+            "AAPL",
+            "1,81",
+            "0",
+            "11",
+            "42",
+            "200",
+            "191.25",
+            "99",
+            "210",
+            "10",
+            "2",
+            "7",
+            "220",
+        ]
+    )
+    quote = StockQuote(
+        [
+            "MSFT",
+            "4",
+            "410.5",
+            "25",
+            "12",
+            "410.25",
+            "30",
+            "1,81",
+            "",
+            "500",
+            "501",
+            "502",
+            "1",
+            "503",
+        ]
+    )
+
+    assert trade.conditions is quote.conditions
 
 
 @pytest.mark.parametrize(
@@ -526,3 +567,14 @@ def test_sse_parse_raw_uses_backend_specialization_hooks() -> None:
     assert "Specialization::template parse_unquoted_field<ExpectMore>" in generic_source
     assert "static inline std::string_view parse_unquoted_field" in sse_source
     assert "static inline std::string_view parse_quoted_field" in sse_source
+
+
+def test_parsed_rows_use_instance_lifetime_bitset_cache() -> None:
+    generic_source = Path("src/cpp/backends/generic.hpp").read_text(encoding="utf-8")
+
+    assert "class BitsetParseCache" in generic_source
+    assert "detail::BitsetParseCache<96> bitset_cache_;" in generic_source
+    assert "row = Implementation::parse_trade_row(line, bitset_cache_);" in generic_source
+    assert "row = Implementation::parse_quote_row(line, bitset_cache_);" in generic_source
+    assert "result.conditions = bitset_cache.get_or_parse(" in generic_source
+    assert "result.indicators = bitset_cache.get_or_parse(" in generic_source

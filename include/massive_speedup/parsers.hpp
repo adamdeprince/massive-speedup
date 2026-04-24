@@ -83,6 +83,11 @@ class FlatFileForexParser : public FlatFileParser {
   std::string asset_class() const override;
 };
 
+class FlatFileCurrenciesParser : public FlatFileParser {
+ public:
+  std::string asset_class() const override;
+};
+
 class FlatFileCryptoParser : public FlatFileParser {
  public:
   std::string asset_class() const override;

@@ -243,6 +243,51 @@ inline nanobind::object bit_indices_frozenset(const std::bitset<96>& bits) {
   return result;
 }
 
+inline PyObject* intern_unicode_from_view(std::string_view value) {
+  PyObject* unicode = PyUnicode_FromStringAndSize(value.data(), static_cast<Py_ssize_t>(value.size()));
+  if (unicode == nullptr) {
+    throw nanobind::python_error();
+  }
+
+  PyUnicode_InternInPlace(&unicode);
+  if (unicode == nullptr) {
+    throw nanobind::python_error();
+  }
+  return unicode;
+}
+
+inline nanobind::object currency_tickers_tuple(std::string_view ticker) {
+  using InternTable = std::unordered_map<
+      std::string,
+      PyObject*,
+      TransparentStringHash,
+      TransparentStringEqual>;
+  static InternTable* interned_tickers = new InternTable();
+
+  if (const auto found = interned_tickers->find(ticker); found != interned_tickers->end()) {
+    Py_INCREF(found->second);
+    return nanobind::steal<nanobind::object>(found->second);
+  }
+
+  const auto colon = ticker.find(':');
+  const std::string_view symbol = colon == std::string_view::npos ? ticker : ticker.substr(colon + 1);
+  const auto dash = symbol.find('-');
+  const std::string_view base = dash == std::string_view::npos ? symbol : symbol.substr(0, dash);
+  const std::string_view quote = dash == std::string_view::npos ? std::string_view{} : symbol.substr(dash + 1);
+
+  nanobind::tuple result = nanobind::steal<nanobind::tuple>(PyTuple_New(2));
+  if (!result.is_valid()) {
+    throw nanobind::python_error();
+  }
+
+  PyTuple_SET_ITEM(result.ptr(), 0, intern_unicode_from_view(base));
+  PyTuple_SET_ITEM(result.ptr(), 1, intern_unicode_from_view(quote));
+
+  Py_INCREF(result.ptr());
+  interned_tickers->emplace(std::string(ticker), result.ptr());
+  return result;
+}
+
 inline std::string bit_indices_repr(const std::bitset<96>& bits) {
   std::ostringstream out;
   bool first = true;
@@ -896,6 +941,218 @@ struct StockQuote {
   }
 };
 
+struct CurrencyQuote {
+  double ask_price = 0.0;
+  double bid_price = 0.0;
+  std::uint64_t participant_timestamp = 0;
+  std::uint8_t ask_exchange = 0;
+  std::uint8_t bid_exchange = 0;
+  std::string ticker;
+
+  template <typename Specialization>
+  static CurrencyQuote from_fields(const std::vector<std::string>& fields) {
+    CurrencyQuote result;
+    detail::require_field_count("CurrencyQuote", fields.size(), 6);
+    result.ticker = fields[0];
+    result.ask_exchange =
+        Specialization::template parse_integer<std::uint8_t>(fields[1], "ask_exchange");
+    result.ask_price = Specialization::parse_double(fields[2], "ask_price");
+    result.bid_exchange =
+        Specialization::template parse_integer<std::uint8_t>(fields[3], "bid_exchange");
+    result.bid_price = Specialization::parse_double(fields[4], "bid_price");
+    result.participant_timestamp = Specialization::template parse_integer<std::uint64_t>(
+        fields[5],
+        "participant_timestamp");
+    return result;
+  }
+
+  bool operator==(const CurrencyQuote&) const = default;
+
+  nanobind::list python_fields() const {
+    nanobind::list values;
+    values.append(nanobind::cast(ticker));
+    values.append(nanobind::cast(ask_exchange));
+    values.append(nanobind::cast(ask_price));
+    values.append(nanobind::cast(bid_exchange));
+    values.append(nanobind::cast(bid_price));
+    values.append(nanobind::cast(participant_timestamp));
+    return values;
+  }
+
+  nanobind::object tickers_object() const {
+    return detail::currency_tickers_tuple(ticker);
+  }
+
+  std::size_t hash_value() const {
+    std::size_t seed = 0;
+    detail::hash_combine(seed, ticker);
+    detail::hash_combine(seed, ask_exchange);
+    detail::hash_combine(seed, ask_price);
+    detail::hash_combine(seed, bid_exchange);
+    detail::hash_combine(seed, bid_price);
+    detail::hash_combine(seed, participant_timestamp);
+    return seed;
+  }
+
+  std::string repr() const {
+    std::ostringstream out;
+    out << "CurrencyQuote("
+        << "ticker='" << ticker << "', "
+        << "ask_exchange=" << static_cast<unsigned>(ask_exchange) << ", "
+        << "ask_price=" << ask_price << ", "
+        << "bid_exchange=" << static_cast<unsigned>(bid_exchange) << ", "
+        << "bid_price=" << bid_price << ", "
+        << "participant_timestamp=" << participant_timestamp << ")";
+    return out.str();
+  }
+};
+
+struct StockAggregate {
+  double open = 0.0;
+  double close = 0.0;
+  double high = 0.0;
+  double low = 0.0;
+  std::uint64_t volume = 0;
+  std::uint64_t window_start = 0;
+  std::uint64_t transactions = 0;
+  std::string ticker;
+
+  template <typename Specialization>
+  static StockAggregate from_fields(const std::vector<std::string>& fields) {
+    StockAggregate result;
+    detail::require_field_count("StockAggregate", fields.size(), 8);
+    result.ticker = fields[0];
+    result.volume =
+        Specialization::template parse_integer<std::uint64_t>(fields[1], "volume");
+    result.open = Specialization::parse_double(fields[2], "open");
+    result.close = Specialization::parse_double(fields[3], "close");
+    result.high = Specialization::parse_double(fields[4], "high");
+    result.low = Specialization::parse_double(fields[5], "low");
+    result.window_start =
+        Specialization::template parse_integer<std::uint64_t>(fields[6], "window_start");
+    result.transactions =
+        Specialization::template parse_integer<std::uint64_t>(fields[7], "transactions");
+    return result;
+  }
+
+  bool operator==(const StockAggregate&) const = default;
+
+  nanobind::list python_fields() const {
+    nanobind::list values;
+    values.append(nanobind::cast(ticker));
+    values.append(nanobind::cast(volume));
+    values.append(nanobind::cast(open));
+    values.append(nanobind::cast(close));
+    values.append(nanobind::cast(high));
+    values.append(nanobind::cast(low));
+    values.append(nanobind::cast(window_start));
+    values.append(nanobind::cast(transactions));
+    return values;
+  }
+
+  std::size_t hash_value() const {
+    std::size_t seed = 0;
+    detail::hash_combine(seed, ticker);
+    detail::hash_combine(seed, volume);
+    detail::hash_combine(seed, open);
+    detail::hash_combine(seed, close);
+    detail::hash_combine(seed, high);
+    detail::hash_combine(seed, low);
+    detail::hash_combine(seed, window_start);
+    detail::hash_combine(seed, transactions);
+    return seed;
+  }
+
+  std::string repr() const {
+    std::ostringstream out;
+    out << "StockAggregate("
+        << "ticker='" << ticker << "', "
+        << "volume=" << volume << ", "
+        << "open=" << open << ", "
+        << "close=" << close << ", "
+        << "high=" << high << ", "
+        << "low=" << low << ", "
+        << "window_start=" << window_start << ", "
+        << "transactions=" << transactions << ")";
+    return out.str();
+  }
+};
+
+struct CurrencyAggregate {
+  double open = 0.0;
+  double close = 0.0;
+  double high = 0.0;
+  double low = 0.0;
+  std::uint64_t volume = 0;
+  std::uint64_t window_start = 0;
+  std::uint64_t transactions = 0;
+  std::string ticker;
+
+  template <typename Specialization>
+  static CurrencyAggregate from_fields(const std::vector<std::string>& fields) {
+    CurrencyAggregate result;
+    detail::require_field_count("CurrencyAggregate", fields.size(), 8);
+    result.ticker = fields[0];
+    result.volume =
+        Specialization::template parse_integer<std::uint64_t>(fields[1], "volume");
+    result.open = Specialization::parse_double(fields[2], "open");
+    result.close = Specialization::parse_double(fields[3], "close");
+    result.high = Specialization::parse_double(fields[4], "high");
+    result.low = Specialization::parse_double(fields[5], "low");
+    result.window_start =
+        Specialization::template parse_integer<std::uint64_t>(fields[6], "window_start");
+    result.transactions =
+        Specialization::template parse_integer<std::uint64_t>(fields[7], "transactions");
+    return result;
+  }
+
+  bool operator==(const CurrencyAggregate&) const = default;
+
+  nanobind::list python_fields() const {
+    nanobind::list values;
+    values.append(nanobind::cast(ticker));
+    values.append(nanobind::cast(volume));
+    values.append(nanobind::cast(open));
+    values.append(nanobind::cast(close));
+    values.append(nanobind::cast(high));
+    values.append(nanobind::cast(low));
+    values.append(nanobind::cast(window_start));
+    values.append(nanobind::cast(transactions));
+    return values;
+  }
+
+  nanobind::object tickers_object() const {
+    return detail::currency_tickers_tuple(ticker);
+  }
+
+  std::size_t hash_value() const {
+    std::size_t seed = 0;
+    detail::hash_combine(seed, ticker);
+    detail::hash_combine(seed, volume);
+    detail::hash_combine(seed, open);
+    detail::hash_combine(seed, close);
+    detail::hash_combine(seed, high);
+    detail::hash_combine(seed, low);
+    detail::hash_combine(seed, window_start);
+    detail::hash_combine(seed, transactions);
+    return seed;
+  }
+
+  std::string repr() const {
+    std::ostringstream out;
+    out << "CurrencyAggregate("
+        << "ticker='" << ticker << "', "
+        << "volume=" << volume << ", "
+        << "open=" << open << ", "
+        << "close=" << close << ", "
+        << "high=" << high << ", "
+        << "low=" << low << ", "
+        << "window_start=" << window_start << ", "
+        << "transactions=" << transactions << ")";
+    return out.str();
+  }
+};
+
 struct GenericSpecialization {
   static inline bool next_line(
       detail::BufferedGzipLineReader& reader,
@@ -1047,6 +1304,9 @@ class Implementation : public Base {
   using GzipLineIteratorType = decltype(std::declval<GzipLineGenerator&>().begin());
   using RawStockTrade = std::array<std::string, 13>;
   using RawStockQuote = std::array<std::string, 14>;
+  using RawStockAggregate = std::array<std::string, 8>;
+  using RawCurrencyQuote = std::array<std::string, 6>;
+  using RawCurrencyAggregate = std::array<std::string, 8>;
 
   class GzipLinesIterator {
    public:
@@ -1144,6 +1404,96 @@ class Implementation : public Base {
     detail::BufferedGzipLineReader reader_;
     bool is_first_line_ = true;
     detail::BitsetParseCache<96> bitset_cache_;
+  };
+
+  class CurrencyQuoteStreamState {
+   public:
+    explicit CurrencyQuoteStreamState(const std::filesystem::path& path)
+        : reader_(path) {}
+
+    bool next_row(CurrencyQuote& row) {
+      std::string_view line;
+
+      while (reader_.template next_line<Specialization>(line)) {
+        if (is_first_line_) {
+          is_first_line_ = false;
+          continue;
+        }
+
+        if (line.empty()) {
+          continue;
+        }
+
+        row = Implementation::parse_currency_quote_row(line);
+        return true;
+      }
+
+      return false;
+    }
+
+   private:
+    detail::BufferedGzipLineReader reader_;
+    bool is_first_line_ = true;
+  };
+
+  class StockAggregateStreamState {
+   public:
+    explicit StockAggregateStreamState(const std::filesystem::path& path)
+        : reader_(path) {}
+
+    bool next_row(StockAggregate& row) {
+      std::string_view line;
+
+      while (reader_.template next_line<Specialization>(line)) {
+        if (is_first_line_) {
+          is_first_line_ = false;
+          continue;
+        }
+
+        if (line.empty()) {
+          continue;
+        }
+
+        row = Implementation::parse_stock_aggregate_row(line);
+        return true;
+      }
+
+      return false;
+    }
+
+   private:
+    detail::BufferedGzipLineReader reader_;
+    bool is_first_line_ = true;
+  };
+
+  class CurrencyAggregateStreamState {
+   public:
+    explicit CurrencyAggregateStreamState(const std::filesystem::path& path)
+        : reader_(path) {}
+
+    bool next_row(CurrencyAggregate& row) {
+      std::string_view line;
+
+      while (reader_.template next_line<Specialization>(line)) {
+        if (is_first_line_) {
+          is_first_line_ = false;
+          continue;
+        }
+
+        if (line.empty()) {
+          continue;
+        }
+
+        row = Implementation::parse_currency_aggregate_row(line);
+        return true;
+      }
+
+      return false;
+    }
+
+   private:
+    detail::BufferedGzipLineReader reader_;
+    bool is_first_line_ = true;
   };
 
   class RawStockTradeStreamState {
@@ -1290,6 +1640,216 @@ class Implementation : public Base {
     detail::RawBytesInternCache intern_cache_;
   };
 
+  class RawCurrencyQuoteStreamState {
+   public:
+    explicit RawCurrencyQuoteStreamState(const std::filesystem::path& path)
+        : reader_(path) {}
+
+    RawCurrencyQuoteStreamState(const RawCurrencyQuoteStreamState&) = delete;
+    RawCurrencyQuoteStreamState& operator=(const RawCurrencyQuoteStreamState&) = delete;
+
+    RawCurrencyQuoteStreamState(RawCurrencyQuoteStreamState&& other) noexcept
+        : reader_(std::move(other.reader_)),
+          is_first_line_(other.is_first_line_),
+          intern_cache_(std::move(other.intern_cache_)) {}
+
+    RawCurrencyQuoteStreamState& operator=(RawCurrencyQuoteStreamState&& other) noexcept {
+      if (this == &other) {
+        return *this;
+      }
+
+      reader_ = std::move(other.reader_);
+      is_first_line_ = other.is_first_line_;
+      intern_cache_ = std::move(other.intern_cache_);
+      return *this;
+    }
+
+    bool next_row(RawCurrencyQuote& row) {
+      std::string_view line;
+
+      while (reader_.template next_line<Specialization>(line)) {
+        if (is_first_line_) {
+          is_first_line_ = false;
+          continue;
+        }
+
+        if (line.empty()) {
+          continue;
+        }
+
+        row = Implementation::parse_raw_currency_quote_row(line);
+        return true;
+      }
+
+      return false;
+    }
+
+    bool next_tuple(nanobind::tuple& row) {
+      std::string_view line;
+
+      while (reader_.template next_line<Specialization>(line)) {
+        if (is_first_line_) {
+          is_first_line_ = false;
+          continue;
+        }
+
+        if (line.empty()) {
+          continue;
+        }
+
+        row = Implementation::parse_raw_currency_quote_tuple(line, intern_cache_);
+        return true;
+      }
+
+      return false;
+    }
+
+   private:
+    detail::BufferedGzipLineReader reader_;
+    bool is_first_line_ = true;
+    detail::RawBytesInternCache intern_cache_;
+  };
+
+  class RawStockAggregateStreamState {
+   public:
+    explicit RawStockAggregateStreamState(const std::filesystem::path& path)
+        : reader_(path) {}
+
+    RawStockAggregateStreamState(const RawStockAggregateStreamState&) = delete;
+    RawStockAggregateStreamState& operator=(const RawStockAggregateStreamState&) = delete;
+
+    RawStockAggregateStreamState(RawStockAggregateStreamState&& other) noexcept
+        : reader_(std::move(other.reader_)),
+          is_first_line_(other.is_first_line_),
+          intern_cache_(std::move(other.intern_cache_)) {}
+
+    RawStockAggregateStreamState& operator=(RawStockAggregateStreamState&& other) noexcept {
+      if (this == &other) {
+        return *this;
+      }
+
+      reader_ = std::move(other.reader_);
+      is_first_line_ = other.is_first_line_;
+      intern_cache_ = std::move(other.intern_cache_);
+      return *this;
+    }
+
+    bool next_row(RawStockAggregate& row) {
+      std::string_view line;
+
+      while (reader_.template next_line<Specialization>(line)) {
+        if (is_first_line_) {
+          is_first_line_ = false;
+          continue;
+        }
+
+        if (line.empty()) {
+          continue;
+        }
+
+        row = Implementation::parse_raw_stock_aggregate_row(line);
+        return true;
+      }
+
+      return false;
+    }
+
+    bool next_tuple(nanobind::tuple& row) {
+      std::string_view line;
+
+      while (reader_.template next_line<Specialization>(line)) {
+        if (is_first_line_) {
+          is_first_line_ = false;
+          continue;
+        }
+
+        if (line.empty()) {
+          continue;
+        }
+
+        row = Implementation::parse_raw_stock_aggregate_tuple(line, intern_cache_);
+        return true;
+      }
+
+      return false;
+    }
+
+   private:
+    detail::BufferedGzipLineReader reader_;
+    bool is_first_line_ = true;
+    detail::RawBytesInternCache intern_cache_;
+  };
+
+  class RawCurrencyAggregateStreamState {
+   public:
+    explicit RawCurrencyAggregateStreamState(const std::filesystem::path& path)
+        : reader_(path) {}
+
+    RawCurrencyAggregateStreamState(const RawCurrencyAggregateStreamState&) = delete;
+    RawCurrencyAggregateStreamState& operator=(const RawCurrencyAggregateStreamState&) = delete;
+
+    RawCurrencyAggregateStreamState(RawCurrencyAggregateStreamState&& other) noexcept
+        : reader_(std::move(other.reader_)),
+          is_first_line_(other.is_first_line_),
+          intern_cache_(std::move(other.intern_cache_)) {}
+
+    RawCurrencyAggregateStreamState& operator=(RawCurrencyAggregateStreamState&& other) noexcept {
+      if (this == &other) {
+        return *this;
+      }
+
+      reader_ = std::move(other.reader_);
+      is_first_line_ = other.is_first_line_;
+      intern_cache_ = std::move(other.intern_cache_);
+      return *this;
+    }
+
+    bool next_row(RawCurrencyAggregate& row) {
+      std::string_view line;
+
+      while (reader_.template next_line<Specialization>(line)) {
+        if (is_first_line_) {
+          is_first_line_ = false;
+          continue;
+        }
+
+        if (line.empty()) {
+          continue;
+        }
+
+        row = Implementation::parse_raw_currency_aggregate_row(line);
+        return true;
+      }
+
+      return false;
+    }
+
+    bool next_tuple(nanobind::tuple& row) {
+      std::string_view line;
+
+      while (reader_.template next_line<Specialization>(line)) {
+        if (is_first_line_) {
+          is_first_line_ = false;
+          continue;
+        }
+
+        if (line.empty()) {
+          continue;
+        }
+
+        row = Implementation::parse_raw_currency_aggregate_tuple(line, intern_cache_);
+        return true;
+      }
+
+      return false;
+    }
+
+   private:
+    detail::BufferedGzipLineReader reader_;
+    bool is_first_line_ = true;
+    detail::RawBytesInternCache intern_cache_;
+  };
+
   class RawLineRowsIterator {
    public:
     explicit RawLineRowsIterator(const std::filesystem::path& path)
@@ -1392,6 +1952,112 @@ class Implementation : public Base {
    private:
     std::optional<StockQuoteStreamState> stream_state_;
     std::vector<StockQuote> rows_;
+    std::size_t row_index_ = 0;
+  };
+
+  class CurrencyQuoteRowsIterator {
+   public:
+    explicit CurrencyQuoteRowsIterator(
+        const std::filesystem::path& path,
+        bool sort_by_participant_timestamp = false,
+        bool sort_by_sip_timestamp = false) {
+      validate_currency_sort_flags(sort_by_participant_timestamp, sort_by_sip_timestamp);
+
+      if (sort_by_participant_timestamp) {
+        rows_ = collect_rows<CurrencyQuote>(
+            path,
+            sort_by_participant_timestamp,
+            false,
+            &Implementation::parse_currency_quote_row);
+      } else {
+        stream_state_.emplace(path);
+      }
+    }
+
+    CurrencyQuoteRowsIterator& iter() { return *this; }
+
+    CurrencyQuote next() {
+      return Implementation::template next_parsed_row<CurrencyQuote, CurrencyQuoteStreamState>(
+          stream_state_,
+          rows_,
+          row_index_);
+    }
+
+   private:
+    std::optional<CurrencyQuoteStreamState> stream_state_;
+    std::vector<CurrencyQuote> rows_;
+    std::size_t row_index_ = 0;
+  };
+
+  class StockAggregateRowsIterator {
+   public:
+    explicit StockAggregateRowsIterator(
+        const std::filesystem::path& path,
+        bool sort_by_window_start = false) {
+      if (sort_by_window_start) {
+        rows_ = load_rows<StockAggregate>(path, &Implementation::parse_stock_aggregate_row);
+        std::stable_sort(
+            rows_.begin(),
+            rows_.end(),
+            [](const StockAggregate& lhs, const StockAggregate& rhs) {
+              if (lhs.window_start != rhs.window_start) {
+                return lhs.window_start < rhs.window_start;
+              }
+              return lhs.ticker < rhs.ticker;
+            });
+      } else {
+        stream_state_.emplace(path);
+      }
+    }
+
+    StockAggregateRowsIterator& iter() { return *this; }
+
+    StockAggregate next() {
+      return Implementation::template next_parsed_row<StockAggregate, StockAggregateStreamState>(
+          stream_state_,
+          rows_,
+          row_index_);
+    }
+
+   private:
+    std::optional<StockAggregateStreamState> stream_state_;
+    std::vector<StockAggregate> rows_;
+    std::size_t row_index_ = 0;
+  };
+
+  class CurrencyAggregateRowsIterator {
+   public:
+    explicit CurrencyAggregateRowsIterator(
+        const std::filesystem::path& path,
+        bool sort_by_window_start = false) {
+      if (sort_by_window_start) {
+        rows_ = load_rows<CurrencyAggregate>(path, &Implementation::parse_currency_aggregate_row);
+        std::stable_sort(
+            rows_.begin(),
+            rows_.end(),
+            [](const CurrencyAggregate& lhs, const CurrencyAggregate& rhs) {
+              if (lhs.window_start != rhs.window_start) {
+                return lhs.window_start < rhs.window_start;
+              }
+              return lhs.ticker < rhs.ticker;
+            });
+      } else {
+        stream_state_.emplace(path);
+      }
+    }
+
+    CurrencyAggregateRowsIterator& iter() { return *this; }
+
+    CurrencyAggregate next() {
+      return Implementation::template next_parsed_row<CurrencyAggregate, CurrencyAggregateStreamState>(
+          stream_state_,
+          rows_,
+          row_index_);
+    }
+
+   private:
+    std::optional<CurrencyAggregateStreamState> stream_state_;
+    std::vector<CurrencyAggregate> rows_;
     std::size_t row_index_ = 0;
   };
 
@@ -1535,6 +2201,232 @@ class Implementation : public Base {
     detail::RawBytesInternCache intern_cache_;
   };
 
+  class RawCurrencyQuoteRowsIterator {
+   public:
+    explicit RawCurrencyQuoteRowsIterator(
+        const std::filesystem::path& path,
+        bool sort_by_participant_timestamp = false,
+        bool sort_by_sip_timestamp = false) {
+      validate_currency_sort_flags(sort_by_participant_timestamp, sort_by_sip_timestamp);
+
+      if (sort_by_participant_timestamp) {
+        rows_ = collect_rows<RawCurrencyQuote>(
+            path,
+            sort_by_participant_timestamp,
+            false,
+            &Implementation::parse_raw_currency_quote_row);
+      } else {
+        stream_state_.emplace(path);
+      }
+    }
+
+    RawCurrencyQuoteRowsIterator(const RawCurrencyQuoteRowsIterator&) = delete;
+    RawCurrencyQuoteRowsIterator& operator=(const RawCurrencyQuoteRowsIterator&) = delete;
+
+    RawCurrencyQuoteRowsIterator(RawCurrencyQuoteRowsIterator&& other) noexcept
+        : stream_state_(std::move(other.stream_state_)),
+          rows_(std::move(other.rows_)),
+          row_index_(other.row_index_),
+          intern_cache_(std::move(other.intern_cache_)) {}
+
+    RawCurrencyQuoteRowsIterator& operator=(RawCurrencyQuoteRowsIterator&& other) noexcept {
+      if (this == &other) {
+        return *this;
+      }
+
+      stream_state_ = std::move(other.stream_state_);
+      rows_ = std::move(other.rows_);
+      row_index_ = other.row_index_;
+      intern_cache_ = std::move(other.intern_cache_);
+      return *this;
+    }
+
+    RawCurrencyQuoteRowsIterator& iter() { return *this; }
+
+    nanobind::tuple next() {
+      if (stream_state_) {
+        nanobind::tuple row;
+        if (stream_state_->next_tuple(row)) {
+          return row;
+        }
+
+        stream_state_.reset();
+        throw nanobind::stop_iteration();
+      }
+
+      return Implementation::raw_currency_quote_array_to_tuple(rows_next(), intern_cache_);
+    }
+
+   private:
+    RawCurrencyQuote rows_next() {
+      if (row_index_ >= rows_.size()) {
+        throw nanobind::stop_iteration();
+      }
+      return std::move(rows_[row_index_++]);
+    }
+
+    std::optional<RawCurrencyQuoteStreamState> stream_state_;
+    std::vector<RawCurrencyQuote> rows_;
+    std::size_t row_index_ = 0;
+    detail::RawBytesInternCache intern_cache_;
+  };
+
+  class RawStockAggregateRowsIterator {
+   public:
+    explicit RawStockAggregateRowsIterator(
+        const std::filesystem::path& path,
+        bool sort_by_window_start = false) {
+      if (sort_by_window_start) {
+        rows_ = load_rows<RawStockAggregate>(
+            path,
+            &Implementation::parse_raw_stock_aggregate_row);
+        std::stable_sort(
+            rows_.begin(),
+            rows_.end(),
+            [](const RawStockAggregate& lhs, const RawStockAggregate& rhs) {
+              const auto lhs_window_start =
+                  Specialization::template parse_integer<std::uint64_t>(lhs[6], "window_start");
+              const auto rhs_window_start =
+                  Specialization::template parse_integer<std::uint64_t>(rhs[6], "window_start");
+              if (lhs_window_start != rhs_window_start) {
+                return lhs_window_start < rhs_window_start;
+              }
+              return lhs[0] < rhs[0];
+            });
+      } else {
+        stream_state_.emplace(path);
+      }
+    }
+
+    RawStockAggregateRowsIterator(const RawStockAggregateRowsIterator&) = delete;
+    RawStockAggregateRowsIterator& operator=(const RawStockAggregateRowsIterator&) = delete;
+
+    RawStockAggregateRowsIterator(RawStockAggregateRowsIterator&& other) noexcept
+        : stream_state_(std::move(other.stream_state_)),
+          rows_(std::move(other.rows_)),
+          row_index_(other.row_index_),
+          intern_cache_(std::move(other.intern_cache_)) {}
+
+    RawStockAggregateRowsIterator& operator=(RawStockAggregateRowsIterator&& other) noexcept {
+      if (this == &other) {
+        return *this;
+      }
+
+      stream_state_ = std::move(other.stream_state_);
+      rows_ = std::move(other.rows_);
+      row_index_ = other.row_index_;
+      intern_cache_ = std::move(other.intern_cache_);
+      return *this;
+    }
+
+    RawStockAggregateRowsIterator& iter() { return *this; }
+
+    nanobind::tuple next() {
+      if (stream_state_) {
+        nanobind::tuple row;
+        if (stream_state_->next_tuple(row)) {
+          return row;
+        }
+
+        stream_state_.reset();
+        throw nanobind::stop_iteration();
+      }
+
+      return Implementation::raw_stock_aggregate_array_to_tuple(rows_next(), intern_cache_);
+    }
+
+   private:
+    RawStockAggregate rows_next() {
+      if (row_index_ >= rows_.size()) {
+        throw nanobind::stop_iteration();
+      }
+      return std::move(rows_[row_index_++]);
+    }
+
+    std::optional<RawStockAggregateStreamState> stream_state_;
+    std::vector<RawStockAggregate> rows_;
+    std::size_t row_index_ = 0;
+    detail::RawBytesInternCache intern_cache_;
+  };
+
+  class RawCurrencyAggregateRowsIterator {
+   public:
+    explicit RawCurrencyAggregateRowsIterator(
+        const std::filesystem::path& path,
+        bool sort_by_window_start = false) {
+      if (sort_by_window_start) {
+        rows_ = load_rows<RawCurrencyAggregate>(
+            path,
+            &Implementation::parse_raw_currency_aggregate_row);
+        std::stable_sort(
+            rows_.begin(),
+            rows_.end(),
+            [](const RawCurrencyAggregate& lhs, const RawCurrencyAggregate& rhs) {
+              const auto lhs_window_start =
+                  Specialization::template parse_integer<std::uint64_t>(lhs[6], "window_start");
+              const auto rhs_window_start =
+                  Specialization::template parse_integer<std::uint64_t>(rhs[6], "window_start");
+              if (lhs_window_start != rhs_window_start) {
+                return lhs_window_start < rhs_window_start;
+              }
+              return lhs[0] < rhs[0];
+            });
+      } else {
+        stream_state_.emplace(path);
+      }
+    }
+
+    RawCurrencyAggregateRowsIterator(const RawCurrencyAggregateRowsIterator&) = delete;
+    RawCurrencyAggregateRowsIterator& operator=(const RawCurrencyAggregateRowsIterator&) = delete;
+
+    RawCurrencyAggregateRowsIterator(RawCurrencyAggregateRowsIterator&& other) noexcept
+        : stream_state_(std::move(other.stream_state_)),
+          rows_(std::move(other.rows_)),
+          row_index_(other.row_index_),
+          intern_cache_(std::move(other.intern_cache_)) {}
+
+    RawCurrencyAggregateRowsIterator& operator=(RawCurrencyAggregateRowsIterator&& other) noexcept {
+      if (this == &other) {
+        return *this;
+      }
+
+      stream_state_ = std::move(other.stream_state_);
+      rows_ = std::move(other.rows_);
+      row_index_ = other.row_index_;
+      intern_cache_ = std::move(other.intern_cache_);
+      return *this;
+    }
+
+    RawCurrencyAggregateRowsIterator& iter() { return *this; }
+
+    nanobind::tuple next() {
+      if (stream_state_) {
+        nanobind::tuple row;
+        if (stream_state_->next_tuple(row)) {
+          return row;
+        }
+
+        stream_state_.reset();
+        throw nanobind::stop_iteration();
+      }
+
+      return Implementation::raw_currency_aggregate_array_to_tuple(rows_next(), intern_cache_);
+    }
+
+   private:
+    RawCurrencyAggregate rows_next() {
+      if (row_index_ >= rows_.size()) {
+        throw nanobind::stop_iteration();
+      }
+      return std::move(rows_[row_index_++]);
+    }
+
+    std::optional<RawCurrencyAggregateStreamState> stream_state_;
+    std::vector<RawCurrencyAggregate> rows_;
+    std::size_t row_index_ = 0;
+    detail::RawBytesInternCache intern_cache_;
+  };
+
   static GzipLineGenerator read_gzip_lines(
       std::filesystem::path path,
       std::size_t parallelization = 0,
@@ -1573,6 +2465,48 @@ class Implementation : public Base {
         [&bitset_cache](std::string_view line) {
           return Implementation::parse_quote_row(line, bitset_cache);
         });
+  }
+
+  std::vector<CurrencyQuote> parse_currency_quote_rows(
+      const std::filesystem::path& path,
+      bool sort_by_participant_timestamp = false,
+      bool sort_by_sip_timestamp = false) const {
+    validate_currency_sort_flags(sort_by_participant_timestamp, sort_by_sip_timestamp);
+    return collect_rows<CurrencyQuote>(
+        path,
+        sort_by_participant_timestamp,
+        false,
+        &Implementation::parse_currency_quote_row);
+  }
+
+  std::vector<StockAggregate> parse_stock_aggregate_rows(
+      const std::filesystem::path& path,
+      bool sort_by_window_start = false) const {
+    auto rows = load_rows<StockAggregate>(path, &Implementation::parse_stock_aggregate_row);
+    if (sort_by_window_start) {
+      std::stable_sort(rows.begin(), rows.end(), [](const StockAggregate& lhs, const StockAggregate& rhs) {
+        if (lhs.window_start != rhs.window_start) {
+          return lhs.window_start < rhs.window_start;
+        }
+        return lhs.ticker < rhs.ticker;
+      });
+    }
+    return rows;
+  }
+
+  std::vector<CurrencyAggregate> parse_currency_aggregate_rows(
+      const std::filesystem::path& path,
+      bool sort_by_window_start = false) const {
+    auto rows = load_rows<CurrencyAggregate>(path, &Implementation::parse_currency_aggregate_row);
+    if (sort_by_window_start) {
+      std::stable_sort(rows.begin(), rows.end(), [](const CurrencyAggregate& lhs, const CurrencyAggregate& rhs) {
+        if (lhs.window_start != rhs.window_start) {
+          return lhs.window_start < rhs.window_start;
+        }
+        return lhs.ticker < rhs.ticker;
+      });
+    }
+    return rows;
   }
 
   Summary parse_message(nb::handle payload) const {
@@ -1917,6 +2851,232 @@ class Implementation : public Base {
     return result;
   }
 
+  static CurrencyQuote parse_currency_quote_row(std::string_view line) {
+    detail::CsvLineCursor cursor(line);
+    std::string scratch;
+    CurrencyQuote result;
+
+    result.ticker.assign(cursor.template next_field<Specialization, true>(scratch));
+    result.ask_exchange =
+        Specialization::template parse_integer<std::uint8_t>(
+            cursor.template next_field<Specialization, true>(scratch),
+            "ask_exchange");
+    result.ask_price = Specialization::parse_double(
+        cursor.template next_field<Specialization, true>(scratch),
+        "ask_price");
+    result.bid_exchange =
+        Specialization::template parse_integer<std::uint8_t>(
+            cursor.template next_field<Specialization, true>(scratch),
+            "bid_exchange");
+    result.bid_price = Specialization::parse_double(
+        cursor.template next_field<Specialization, true>(scratch),
+        "bid_price");
+    result.participant_timestamp =
+        Specialization::template parse_integer<std::uint64_t>(
+            cursor.template next_field<Specialization, false>(scratch),
+            "participant_timestamp");
+
+    cursor.finish();
+    return result;
+  }
+
+  static StockAggregate parse_stock_aggregate_row(std::string_view line) {
+    detail::CsvLineCursor cursor(line);
+    std::string scratch;
+    StockAggregate result;
+
+    result.ticker.assign(cursor.template next_field<Specialization, true>(scratch));
+    result.volume =
+        Specialization::template parse_integer<std::uint64_t>(
+            cursor.template next_field<Specialization, true>(scratch),
+            "volume");
+    result.open = Specialization::parse_double(
+        cursor.template next_field<Specialization, true>(scratch),
+        "open");
+    result.close = Specialization::parse_double(
+        cursor.template next_field<Specialization, true>(scratch),
+        "close");
+    result.high = Specialization::parse_double(
+        cursor.template next_field<Specialization, true>(scratch),
+        "high");
+    result.low = Specialization::parse_double(
+        cursor.template next_field<Specialization, true>(scratch),
+        "low");
+    result.window_start =
+        Specialization::template parse_integer<std::uint64_t>(
+            cursor.template next_field<Specialization, true>(scratch),
+            "window_start");
+    result.transactions =
+        Specialization::template parse_integer<std::uint64_t>(
+            cursor.template next_field<Specialization, false>(scratch),
+            "transactions");
+
+    cursor.finish();
+    return result;
+  }
+
+  static CurrencyAggregate parse_currency_aggregate_row(std::string_view line) {
+    detail::CsvLineCursor cursor(line);
+    std::string scratch;
+    CurrencyAggregate result;
+
+    result.ticker.assign(cursor.template next_field<Specialization, true>(scratch));
+    result.volume =
+        Specialization::template parse_integer<std::uint64_t>(
+            cursor.template next_field<Specialization, true>(scratch),
+            "volume");
+    result.open = Specialization::parse_double(
+        cursor.template next_field<Specialization, true>(scratch),
+        "open");
+    result.close = Specialization::parse_double(
+        cursor.template next_field<Specialization, true>(scratch),
+        "close");
+    result.high = Specialization::parse_double(
+        cursor.template next_field<Specialization, true>(scratch),
+        "high");
+    result.low = Specialization::parse_double(
+        cursor.template next_field<Specialization, true>(scratch),
+        "low");
+    result.window_start =
+        Specialization::template parse_integer<std::uint64_t>(
+            cursor.template next_field<Specialization, true>(scratch),
+            "window_start");
+    result.transactions =
+        Specialization::template parse_integer<std::uint64_t>(
+            cursor.template next_field<Specialization, false>(scratch),
+            "transactions");
+
+    cursor.finish();
+    return result;
+  }
+
+  static RawCurrencyQuote parse_raw_currency_quote_row(std::string_view line) {
+    return parse_raw_row<6>(line);
+  }
+
+  static RawStockAggregate parse_raw_stock_aggregate_row(std::string_view line) {
+    return parse_raw_row<8>(line);
+  }
+
+  static nanobind::tuple parse_raw_currency_quote_tuple(
+      std::string_view line,
+      detail::RawBytesInternCache& intern_cache) {
+    std::size_t cursor = 0;
+    nanobind::tuple result = make_raw_tuple<6>();
+
+    set_raw_ticker_field(
+        result,
+        next_raw_unquoted_field<true>(line, cursor),
+        intern_cache);
+    set_raw_small_uint_field(
+        result,
+        1,
+        next_raw_unquoted_field<true>(line, cursor),
+        intern_cache);
+    set_raw_bytes_field(result, 2, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_small_uint_field(
+        result,
+        3,
+        next_raw_unquoted_field<true>(line, cursor),
+        intern_cache);
+    set_raw_bytes_field(result, 4, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_bytes_field(result, 5, next_raw_unquoted_field<false>(line, cursor));
+
+    finish_raw_row(line, cursor);
+    return result;
+  }
+
+  static RawCurrencyAggregate parse_raw_currency_aggregate_row(std::string_view line) {
+    return parse_raw_row<8>(line);
+  }
+
+  static nanobind::tuple parse_raw_currency_aggregate_tuple(
+      std::string_view line,
+      detail::RawBytesInternCache& intern_cache) {
+    std::size_t cursor = 0;
+    nanobind::tuple result = make_raw_tuple<8>();
+
+    set_raw_ticker_field(
+        result,
+        next_raw_unquoted_field<true>(line, cursor),
+        intern_cache);
+    set_raw_bytes_field(result, 1, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_bytes_field(result, 2, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_bytes_field(result, 3, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_bytes_field(result, 4, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_bytes_field(result, 5, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_bytes_field(result, 6, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_bytes_field(result, 7, next_raw_unquoted_field<false>(line, cursor));
+
+    finish_raw_row(line, cursor);
+    return result;
+  }
+
+  static nanobind::tuple parse_raw_stock_aggregate_tuple(
+      std::string_view line,
+      detail::RawBytesInternCache& intern_cache) {
+    std::size_t cursor = 0;
+    nanobind::tuple result = make_raw_tuple<8>();
+
+    set_raw_ticker_field(
+        result,
+        next_raw_unquoted_field<true>(line, cursor),
+        intern_cache);
+    set_raw_bytes_field(result, 1, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_bytes_field(result, 2, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_bytes_field(result, 3, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_bytes_field(result, 4, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_bytes_field(result, 5, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_bytes_field(result, 6, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_bytes_field(result, 7, next_raw_unquoted_field<false>(line, cursor));
+
+    finish_raw_row(line, cursor);
+    return result;
+  }
+
+  static nanobind::tuple raw_currency_aggregate_array_to_tuple(
+      const RawCurrencyAggregate& fields,
+      detail::RawBytesInternCache& intern_cache) {
+    nanobind::tuple result = make_raw_tuple<8>();
+    set_raw_ticker_field(result, fields[0], intern_cache);
+    set_raw_bytes_field(result, 1, fields[1]);
+    set_raw_bytes_field(result, 2, fields[2]);
+    set_raw_bytes_field(result, 3, fields[3]);
+    set_raw_bytes_field(result, 4, fields[4]);
+    set_raw_bytes_field(result, 5, fields[5]);
+    set_raw_bytes_field(result, 6, fields[6]);
+    set_raw_bytes_field(result, 7, fields[7]);
+    return result;
+  }
+
+  static nanobind::tuple raw_stock_aggregate_array_to_tuple(
+      const RawStockAggregate& fields,
+      detail::RawBytesInternCache& intern_cache) {
+    nanobind::tuple result = make_raw_tuple<8>();
+    set_raw_ticker_field(result, fields[0], intern_cache);
+    set_raw_bytes_field(result, 1, fields[1]);
+    set_raw_bytes_field(result, 2, fields[2]);
+    set_raw_bytes_field(result, 3, fields[3]);
+    set_raw_bytes_field(result, 4, fields[4]);
+    set_raw_bytes_field(result, 5, fields[5]);
+    set_raw_bytes_field(result, 6, fields[6]);
+    set_raw_bytes_field(result, 7, fields[7]);
+    return result;
+  }
+
+  static nanobind::tuple raw_currency_quote_array_to_tuple(
+      const RawCurrencyQuote& fields,
+      detail::RawBytesInternCache& intern_cache) {
+    nanobind::tuple result = make_raw_tuple<6>();
+    set_raw_ticker_field(result, fields[0], intern_cache);
+    set_raw_small_uint_field(result, 1, fields[1], intern_cache);
+    set_raw_bytes_field(result, 2, fields[2]);
+    set_raw_small_uint_field(result, 3, fields[3], intern_cache);
+    set_raw_bytes_field(result, 4, fields[4]);
+    set_raw_bytes_field(result, 5, fields[5]);
+    return result;
+  }
+
   static void validate_sort_flags(
       bool sort_by_participant_timestamp,
       bool sort_by_sip_timestamp) {
@@ -1924,6 +3084,16 @@ class Implementation : public Base {
       throw std::invalid_argument(
           "sort_by_participant_timestamp and sort_by_sip_timestamp cannot both be true");
     }
+  }
+
+  static void validate_currency_sort_flags(
+      bool sort_by_participant_timestamp,
+      bool sort_by_sip_timestamp) {
+    if (sort_by_sip_timestamp) {
+      throw std::invalid_argument(
+          "currency quotes do not support sort_by_sip_timestamp");
+    }
+    static_cast<void>(sort_by_participant_timestamp);
   }
 
   template <typename RowType, typename StreamState>
@@ -1960,6 +3130,12 @@ class Implementation : public Base {
         "participant_timestamp");
   }
 
+  static std::uint64_t participant_timestamp_value(const RawCurrencyQuote& row) {
+    return Specialization::template parse_integer<std::uint64_t>(
+        row[5],
+        "participant_timestamp");
+  }
+
   template <typename RowType>
   static std::uint64_t participant_timestamp_value(const RowType& row) {
     return row.participant_timestamp;
@@ -1973,6 +3149,14 @@ class Implementation : public Base {
     return Specialization::template parse_integer<std::uint64_t>(row[11], "sip_timestamp");
   }
 
+  static std::uint64_t sip_timestamp_value(const RawCurrencyQuote& row) {
+    return participant_timestamp_value(row);
+  }
+
+  static std::uint64_t sip_timestamp_value(const CurrencyQuote& row) {
+    return row.participant_timestamp;
+  }
+
   template <typename RowType>
   static std::uint64_t sip_timestamp_value(const RowType& row) {
     return row.sip_timestamp;
@@ -1983,6 +3167,10 @@ class Implementation : public Base {
   }
 
   static const std::string& ticker_value(const RawStockQuote& row) {
+    return row[0];
+  }
+
+  static const std::string& ticker_value(const RawCurrencyQuote& row) {
     return row[0];
   }
 

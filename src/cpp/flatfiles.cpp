@@ -33,6 +33,7 @@ std::string FlatFileOptionsParser::asset_class() const { return "options"; }
 std::string FlatFileFuturesParser::asset_class() const { return "futures"; }
 std::string FlatFileIndicesParser::asset_class() const { return "indices"; }
 std::string FlatFileForexParser::asset_class() const { return "forex"; }
+std::string FlatFileCurrenciesParser::asset_class() const { return "currencies"; }
 std::string FlatFileCryptoParser::asset_class() const { return "crypto"; }
 
 }  // namespace massive_speedup

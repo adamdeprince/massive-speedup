@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import gzip
 import heapq
+import sys
 from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
@@ -125,6 +126,21 @@ def _parse_bitset96(text: str) -> str:
 def _bitset_indices(text: str) -> frozenset[int]:
     bit_string = _parse_bitset96(text)
     return frozenset(index for index, value in enumerate(reversed(bit_string)) if value == "1")
+
+
+_TICKERS_INTERN_CACHE: dict[str, tuple[str, str]] = {}
+
+
+def _intern_tickers(ticker: str) -> tuple[str, str]:
+    cached = _TICKERS_INTERN_CACHE.get(ticker)
+    if cached is not None:
+        return cached
+
+    symbol = ticker.partition(":")[2] or ticker
+    base, _, quote = symbol.partition("-")
+    cached = (sys.intern(base), sys.intern(quote))
+    _TICKERS_INTERN_CACHE[ticker] = cached
+    return cached
 
 
 class StockTrade:
@@ -315,6 +331,227 @@ class StockQuote:
 
 
 StockQuotes = StockQuote
+
+
+class StockAggregate:
+    __slots__ = (
+        "ticker",
+        "volume",
+        "open",
+        "close",
+        "high",
+        "low",
+        "window_start",
+        "transactions",
+    )
+
+    def __init__(self, fields: list[str]) -> None:
+        if len(fields) != 8:
+            raise ValueError(f"StockAggregate expected 8 fields, received {len(fields)}")
+        self.ticker = fields[0]
+        self.volume = _parse_int(fields[1])
+        self.open = _parse_float(fields[2])
+        self.close = _parse_float(fields[3])
+        self.high = _parse_float(fields[4])
+        self.low = _parse_float(fields[5])
+        self.window_start = _parse_int(fields[6])
+        self.transactions = _parse_int(fields[7])
+
+    def __iter__(self) -> Iterator[object]:
+        yield self.ticker
+        yield self.volume
+        yield self.open
+        yield self.close
+        yield self.high
+        yield self.low
+        yield self.window_start
+        yield self.transactions
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, StockAggregate):
+            return NotImplemented
+        return tuple(self) == tuple(other)
+
+    def __lt__(self, other: object) -> bool:
+        if not isinstance(other, StockAggregate):
+            return NotImplemented
+        return self.window_start < other.window_start
+
+    def __le__(self, other: object) -> bool:
+        if not isinstance(other, StockAggregate):
+            return NotImplemented
+        return self.window_start <= other.window_start
+
+    def __gt__(self, other: object) -> bool:
+        if not isinstance(other, StockAggregate):
+            return NotImplemented
+        return self.window_start > other.window_start
+
+    def __ge__(self, other: object) -> bool:
+        if not isinstance(other, StockAggregate):
+            return NotImplemented
+        return self.window_start >= other.window_start
+
+    def __hash__(self) -> int:
+        return hash(tuple(self))
+
+    def __repr__(self) -> str:
+        return (
+            "StockAggregate("
+            f"ticker={self.ticker!r}, volume={self.volume}, open={self.open}, "
+            f"close={self.close}, high={self.high}, low={self.low}, "
+            f"window_start={self.window_start}, transactions={self.transactions})"
+        )
+
+    __str__ = __repr__
+
+
+class CurrencyQuote:
+    __slots__ = (
+        "ticker",
+        "ask_exchange",
+        "ask_price",
+        "bid_exchange",
+        "bid_price",
+        "participant_timestamp",
+    )
+
+    def __init__(self, fields: list[str]) -> None:
+        if len(fields) != 6:
+            raise ValueError(f"CurrencyQuote expected 6 fields, received {len(fields)}")
+        self.ticker = fields[0]
+        self.ask_exchange = _parse_int(fields[1])
+        self.ask_price = _parse_float(fields[2])
+        self.bid_exchange = _parse_int(fields[3])
+        self.bid_price = _parse_float(fields[4])
+        self.participant_timestamp = _parse_int(fields[5])
+
+    def __iter__(self) -> Iterator[object]:
+        yield self.ticker
+        yield self.ask_exchange
+        yield self.ask_price
+        yield self.bid_exchange
+        yield self.bid_price
+        yield self.participant_timestamp
+
+    @property
+    def tickers(self) -> tuple[str, str]:
+        return _intern_tickers(self.ticker)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, CurrencyQuote):
+            return NotImplemented
+        return tuple(self) == tuple(other)
+
+    def __lt__(self, other: object) -> bool:
+        if not isinstance(other, CurrencyQuote):
+            return NotImplemented
+        return self.participant_timestamp < other.participant_timestamp
+
+    def __le__(self, other: object) -> bool:
+        if not isinstance(other, CurrencyQuote):
+            return NotImplemented
+        return self.participant_timestamp <= other.participant_timestamp
+
+    def __gt__(self, other: object) -> bool:
+        if not isinstance(other, CurrencyQuote):
+            return NotImplemented
+        return self.participant_timestamp > other.participant_timestamp
+
+    def __ge__(self, other: object) -> bool:
+        if not isinstance(other, CurrencyQuote):
+            return NotImplemented
+        return self.participant_timestamp >= other.participant_timestamp
+
+    def __hash__(self) -> int:
+        return hash(tuple(self))
+
+    def __repr__(self) -> str:
+        return (
+            "CurrencyQuote("
+            f"ticker={self.ticker!r}, ask_exchange={self.ask_exchange}, "
+            f"ask_price={self.ask_price}, bid_exchange={self.bid_exchange}, "
+            f"bid_price={self.bid_price}, participant_timestamp={self.participant_timestamp})"
+        )
+
+    __str__ = __repr__
+
+
+class CurrencyAggregate:
+    __slots__ = (
+        "ticker",
+        "volume",
+        "open",
+        "close",
+        "high",
+        "low",
+        "window_start",
+        "transactions",
+    )
+
+    def __init__(self, fields: list[str]) -> None:
+        if len(fields) != 8:
+            raise ValueError(f"CurrencyAggregate expected 8 fields, received {len(fields)}")
+        self.ticker = fields[0]
+        self.volume = _parse_int(fields[1])
+        self.open = _parse_float(fields[2])
+        self.close = _parse_float(fields[3])
+        self.high = _parse_float(fields[4])
+        self.low = _parse_float(fields[5])
+        self.window_start = _parse_int(fields[6])
+        self.transactions = _parse_int(fields[7])
+
+    def __iter__(self) -> Iterator[object]:
+        yield self.ticker
+        yield self.volume
+        yield self.open
+        yield self.close
+        yield self.high
+        yield self.low
+        yield self.window_start
+        yield self.transactions
+
+    @property
+    def tickers(self) -> tuple[str, str]:
+        return _intern_tickers(self.ticker)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, CurrencyAggregate):
+            return NotImplemented
+        return tuple(self) == tuple(other)
+
+    def __lt__(self, other: object) -> bool:
+        if not isinstance(other, CurrencyAggregate):
+            return NotImplemented
+        return self.window_start < other.window_start
+
+    def __le__(self, other: object) -> bool:
+        if not isinstance(other, CurrencyAggregate):
+            return NotImplemented
+        return self.window_start <= other.window_start
+
+    def __gt__(self, other: object) -> bool:
+        if not isinstance(other, CurrencyAggregate):
+            return NotImplemented
+        return self.window_start > other.window_start
+
+    def __ge__(self, other: object) -> bool:
+        if not isinstance(other, CurrencyAggregate):
+            return NotImplemented
+        return self.window_start >= other.window_start
+
+    def __hash__(self) -> int:
+        return hash(tuple(self))
+
+    def __repr__(self) -> str:
+        return (
+            "CurrencyAggregate("
+            f"ticker={self.ticker!r}, volume={self.volume}, open={self.open}, "
+            f"close={self.close}, high={self.high}, low={self.low}, "
+            f"window_start={self.window_start}, transactions={self.transactions})"
+        )
+
+    __str__ = __repr__
 
 
 class Parser:
@@ -541,6 +778,41 @@ class FlatFileStocksParser(FlatFileParser):
                         ),
                     )
 
+    @staticmethod
+    def _iter_aggregate_rows(
+        payload: str | Path,
+        row_type,
+        *,
+        sort_by_window_start: bool = False,
+    ):
+        with gzip.open(payload, "rt", encoding="utf-8", newline="") as handle:
+            reader = csv.reader(handle)
+            next(reader, None)
+            rows = [row_type(fields) for fields in reader if any(fields)]
+
+        if sort_by_window_start:
+            rows.sort(key=lambda row: (row.window_start, row.ticker))
+
+        yield from rows
+
+    @staticmethod
+    def _iter_raw_aggregate_rows(
+        payload: str | Path,
+        *,
+        window_start_index: int,
+        sort_by_window_start: bool = False,
+    ) -> Iterator[tuple[bytes, ...]]:
+        with gzip.open(payload, "rt", encoding="utf-8", newline="") as handle:
+            reader = csv.reader(handle)
+            next(reader, None)
+            rows = [tuple(fields) for fields in reader if any(fields)]
+
+        if sort_by_window_start:
+            rows.sort(key=lambda row: (_parse_int(row[window_start_index]), row[0]))
+
+        for row in rows:
+            yield tuple(field.encode("utf-8") for field in row)
+
     @classmethod
     def parse_quotes(
         cls,
@@ -570,6 +842,56 @@ class FlatFileStocksParser(FlatFileParser):
             sip_timestamp_index=11,
             sort_by_participant_timestamp=sort_by_participant_timestamp,
             sort_by_sip_timestamp=sort_by_sip_timestamp,
+        )
+
+    @classmethod
+    def parse_minute_aggregates(
+        cls,
+        payload: str | Path,
+        *,
+        sort_by_window_start: bool = False,
+    ) -> Iterator[StockAggregate]:
+        yield from cls._iter_aggregate_rows(
+            payload,
+            StockAggregate,
+            sort_by_window_start=sort_by_window_start,
+        )
+
+    @classmethod
+    def parse_daily_aggregates(
+        cls,
+        payload: str | Path,
+        *,
+        sort_by_window_start: bool = False,
+    ) -> Iterator[StockAggregate]:
+        yield from cls.parse_minute_aggregates(
+            payload,
+            sort_by_window_start=sort_by_window_start,
+        )
+
+    @classmethod
+    def parse_raw_minute_aggregates(
+        cls,
+        payload: str | Path,
+        *,
+        sort_by_window_start: bool = False,
+    ) -> Iterator[tuple[bytes, ...]]:
+        yield from cls._iter_raw_aggregate_rows(
+            payload,
+            window_start_index=6,
+            sort_by_window_start=sort_by_window_start,
+        )
+
+    @classmethod
+    def parse_raw_daily_aggregates(
+        cls,
+        payload: str | Path,
+        *,
+        sort_by_window_start: bool = False,
+    ) -> Iterator[tuple[bytes, ...]]:
+        yield from cls.parse_raw_minute_aggregates(
+            payload,
+            sort_by_window_start=sort_by_window_start,
         )
 
     @classmethod
@@ -629,6 +951,142 @@ class FlatFileForexParser(FlatFileParser):
     asset_class_name = "forex"
 
 
+class FlatFileCurrenciesParser(FlatFileParser):
+    asset_class_name = "currencies"
+
+    @staticmethod
+    def _iter_rows(
+        payload: str | Path,
+        row_type,
+        *,
+        sort_by_window_start: bool = False,
+    ):
+        with gzip.open(payload, "rt", encoding="utf-8", newline="") as handle:
+            reader = csv.reader(handle)
+            next(reader, None)
+            rows = [row_type(fields) for fields in reader if any(fields)]
+
+        if sort_by_window_start:
+            rows.sort(key=lambda row: (row.window_start, row.ticker))
+
+        yield from rows
+
+    @staticmethod
+    def _iter_raw_rows(
+        payload: str | Path,
+        *,
+        window_start_index: int,
+        sort_by_window_start: bool = False,
+    ) -> Iterator[tuple[bytes, ...]]:
+        with gzip.open(payload, "rt", encoding="utf-8", newline="") as handle:
+            reader = csv.reader(handle)
+            next(reader, None)
+            rows = [tuple(fields) for fields in reader if any(fields)]
+
+        if sort_by_window_start:
+            rows.sort(key=lambda row: (_parse_int(row[window_start_index]), row[0]))
+
+        for row in rows:
+            yield tuple(field.encode("utf-8") for field in row)
+
+    @classmethod
+    def parse_quotes(
+        cls,
+        payload: str | Path,
+        *,
+        sort_by_participant_timestamp: bool = False,
+        sort_by_sip_timestamp: bool = False,
+    ) -> Iterator[CurrencyQuote]:
+        if sort_by_sip_timestamp:
+            raise ValueError("currency quotes do not support sort_by_sip_timestamp")
+
+        with gzip.open(payload, "rt", encoding="utf-8", newline="") as handle:
+            reader = csv.reader(handle)
+            next(reader, None)
+            rows = [CurrencyQuote(fields) for fields in reader if any(fields)]
+
+        if sort_by_participant_timestamp:
+            rows.sort(key=lambda row: (row.participant_timestamp, row.ticker))
+
+        yield from rows
+
+    @classmethod
+    def parse_raw_quotes(
+        cls,
+        payload: str | Path,
+        *,
+        sort_by_participant_timestamp: bool = False,
+        sort_by_sip_timestamp: bool = False,
+    ) -> Iterator[tuple[bytes, ...]]:
+        if sort_by_sip_timestamp:
+            raise ValueError("currency quotes do not support sort_by_sip_timestamp")
+
+        yield from cls._iter_raw_rows(
+            payload,
+            window_start_index=5,
+            sort_by_window_start=sort_by_participant_timestamp,
+        )
+
+    @classmethod
+    def parse_minute_aggregates(
+        cls,
+        payload: str | Path,
+        *,
+        sort_by_window_start: bool = False,
+    ) -> Iterator[CurrencyAggregate]:
+        yield from cls._iter_rows(
+            payload,
+            CurrencyAggregate,
+            sort_by_window_start=sort_by_window_start,
+        )
+
+    @classmethod
+    def parse_daily_aggregates(
+        cls,
+        payload: str | Path,
+        *,
+        sort_by_window_start: bool = False,
+    ) -> Iterator[CurrencyAggregate]:
+        yield from cls.parse_minute_aggregates(
+            payload,
+            sort_by_window_start=sort_by_window_start,
+        )
+
+    @classmethod
+    def parse_raw_minute_aggregates(
+        cls,
+        payload: str | Path,
+        *,
+        sort_by_window_start: bool = False,
+    ) -> Iterator[tuple[bytes, ...]]:
+        yield from cls._iter_raw_rows(
+            payload,
+            window_start_index=6,
+            sort_by_window_start=sort_by_window_start,
+        )
+
+    @classmethod
+    def parse_raw_daily_aggregates(
+        cls,
+        payload: str | Path,
+        *,
+        sort_by_window_start: bool = False,
+    ) -> Iterator[tuple[bytes, ...]]:
+        yield from cls.parse_raw_minute_aggregates(
+            payload,
+            sort_by_window_start=sort_by_window_start,
+        )
+
+    @classmethod
+    def raw_lines(cls, payload: str | Path) -> Iterator[bytes]:
+        with gzip.open(payload, "rb") as handle:
+            next(handle, None)
+            for line in handle:
+                line = line.rstrip(b"\r\n")
+                if line:
+                    yield line
+
+
 class FlatFileCryptoParser(FlatFileParser):
     asset_class_name = "crypto"
 
@@ -662,11 +1120,12 @@ class WebSocketCryptoParser(WebSocketParser):
 
 
 FlatFiles = SimpleNamespace(
-    Stocks=FlatFileStocksParser,
+    Stock=FlatFileStocksParser,
     Options=FlatFileOptionsParser,
     Futures=FlatFileFuturesParser,
     Indices=FlatFileIndicesParser,
     Forex=FlatFileForexParser,
+    currency=FlatFileCurrenciesParser,
     Crypto=FlatFileCryptoParser,
 )
 
@@ -682,4 +1141,34 @@ WebSocket = SimpleNamespace(
 
 FlatFiles.StockTrade = StockTrade
 FlatFiles.StockQuote = StockQuote
+FlatFiles.StockAggregate = StockAggregate
 FlatFiles.StockQuotes = StockQuote
+FlatFiles.CurrencyQuote = CurrencyQuote
+FlatFiles.CurrencyAggregate = CurrencyAggregate
+
+FlatFiles.Stock.Trade = SimpleNamespace(
+    parse=FlatFileStocksParser.parse_trades,
+    parse_raw=FlatFileStocksParser.parse_raw_trades,
+    raw_lines=FlatFileStocksParser.raw_lines,
+)
+FlatFiles.Stock.Quote = SimpleNamespace(
+    parse=FlatFileStocksParser.parse_quotes,
+    parse_raw=FlatFileStocksParser.parse_raw_quotes,
+    raw_lines=FlatFileStocksParser.raw_lines,
+)
+FlatFiles.Stock.Aggregate = SimpleNamespace(
+    parse=FlatFileStocksParser.parse_minute_aggregates,
+    parse_raw=FlatFileStocksParser.parse_raw_minute_aggregates,
+    raw_lines=FlatFileStocksParser.raw_lines,
+)
+
+FlatFiles.currency.Quote = SimpleNamespace(
+    parse=FlatFileCurrenciesParser.parse_quotes,
+    parse_raw=FlatFileCurrenciesParser.parse_raw_quotes,
+    raw_lines=FlatFileCurrenciesParser.raw_lines,
+)
+FlatFiles.currency.Aggregate = SimpleNamespace(
+    parse=FlatFileCurrenciesParser.parse_minute_aggregates,
+    parse_raw=FlatFileCurrenciesParser.parse_raw_minute_aggregates,
+    raw_lines=FlatFileCurrenciesParser.raw_lines,
+)

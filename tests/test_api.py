@@ -5,7 +5,10 @@ import gzip
 import pytest
 from massive_speedup import (
     BackendKind,
+    CurrencyAggregate,
+    CurrencyQuote,
     FlatFiles,
+    StockAggregate,
     StockQuote,
     StockTrade,
     WebSocket,
@@ -42,7 +45,7 @@ def test_flatfiles_stocks_parse_quotes_reads_gzip_records(tmp_path: Path) -> Non
         )
         handle.write('A,19,0.0,0,19,0.0,0,"1,81",,1770800340065735000,324,1770800340066046795,1,0\n')
 
-    quotes = list(FlatFiles.Stocks.parse_quotes(path))
+    quotes = list(FlatFiles.Stock.parse_quotes(path))
 
     assert len(quotes) == 1
     assert isinstance(quotes[0], StockQuote)
@@ -61,8 +64,8 @@ def test_flatfiles_stocks_nested_quote_api_parse_and_parse_raw(tmp_path: Path) -
         )
         handle.write('A,19,0.0,0,19,0.0,0,"1,81",,1770800340065735000,324,1770800340066046795,1,0\n')
 
-    quote = next(FlatFiles.Stocks.Quote.parse(path))
-    raw_quote = next(FlatFiles.Stocks.Quote.parse_raw(path))
+    quote = next(FlatFiles.Stock.Quote.parse(path))
+    raw_quote = next(FlatFiles.Stock.Quote.parse_raw(path))
 
     assert isinstance(quote, StockQuote)
     assert raw_quote == (
@@ -92,7 +95,7 @@ def test_flatfiles_stocks_parse_trades_reads_gzip_records(tmp_path: Path) -> Non
         )
         handle.write("A,12,0,8,52983525035849,1770810300032981000,129.79,6876,1770810300033243132,100,1,0,0\n")
 
-    trades = list(FlatFiles.Stocks.parse_trades(path))
+    trades = list(FlatFiles.Stock.parse_trades(path))
 
     assert len(trades) == 1
     assert isinstance(trades[0], StockTrade)
@@ -111,8 +114,8 @@ def test_flatfiles_stocks_nested_trade_api_parse_and_parse_raw(tmp_path: Path) -
         )
         handle.write("A,12,0,8,52983525035849,1770810300032981000,129.79,6876,1770810300033243132,100,1,0,0\n")
 
-    trade = next(FlatFiles.Stocks.Trade.parse(path))
-    raw_trade = next(FlatFiles.Stocks.Trade.parse_raw(path))
+    trade = next(FlatFiles.Stock.Trade.parse(path))
+    raw_trade = next(FlatFiles.Stock.Trade.parse_raw(path))
 
     assert isinstance(trade, StockTrade)
     assert raw_trade == (
@@ -144,7 +147,7 @@ def test_flatfiles_stocks_nested_trade_api_parse_raw_reads_quoted_conditions(tmp
             "4798,1769161728012983416,15,1,0,0\n"
         )
 
-    raw_trade = next(FlatFiles.Stocks.Trade.parse_raw(path))
+    raw_trade = next(FlatFiles.Stock.Trade.parse_raw(path))
 
     assert raw_trade == (
         b"A",
@@ -174,7 +177,7 @@ def test_flatfiles_stocks_parse_raw_reuses_repeated_ticker_bytes(tmp_path: Path)
         handle.write("A,13,0,8,10,11,12.5,13,14,15,16,17,18\n")
         handle.write("B,14,0,8,19,20,21.5,22,23,24,25,26,27\n")
 
-    rows = list(FlatFiles.Stocks.Trade.parse_raw(path))
+    rows = list(FlatFiles.Stock.Trade.parse_raw(path))
 
     assert rows[0][0] is rows[1][0]
     assert rows[1][0] is not rows[2][0]
@@ -190,7 +193,7 @@ def test_flatfiles_stocks_nested_trade_api_raw_lines(tmp_path: Path) -> None:
         handle.write("A,12,0,8,1,2,3.5,4,5,6,7,8,9\n")
         handle.write("B,13,0,9,10,11,12.5,13,14,15,16,17,18\n")
 
-    assert list(FlatFiles.Stocks.Trade.raw_lines(path)) == [
+    assert list(FlatFiles.Stock.Trade.raw_lines(path)) == [
         b"A,12,0,8,1,2,3.5,4,5,6,7,8,9",
         b"B,13,0,9,10,11,12.5,13,14,15,16,17,18",
     ]
@@ -208,7 +211,7 @@ def test_flatfiles_stocks_parse_trades_reads_quoted_condition_sets(tmp_path: Pat
             "1770810300033243132,100,1,0,0\n"
         )
 
-    trades = list(FlatFiles.Stocks.parse_trades(path))
+    trades = list(FlatFiles.Stock.parse_trades(path))
 
     assert len(trades) == 1
     assert trades[0].conditions == frozenset({1, 81})
@@ -226,11 +229,136 @@ def test_flatfiles_stocks_nested_quote_api_parse_raw_reads_quoted_condition_fiel
         )
         handle.write('A,19,0.0,0,19,0.0,0,"1,81",,1770800340065735000,324,1770800340066046795,1,0\n')
 
-    raw_quote = next(FlatFiles.Stocks.Quote.parse_raw(path))
+    raw_quote = next(FlatFiles.Stock.Quote.parse_raw(path))
 
     assert raw_quote[7] == b"1,81"
     assert raw_quote[8] == b""
     assert len(raw_quote) == 14
+
+
+def test_flatfiles_currencies_quote_parse_and_parse_raw(tmp_path: Path) -> None:
+    path = tmp_path / "currencies.csv.gz"
+    with gzip.open(path, "wt", encoding="utf-8", newline="") as handle:
+        handle.write(
+            "ticker,ask_exchange,ask_price,bid_exchange,bid_price,participant_timestamp\n"
+        )
+        handle.write(
+            "C:AED-AUD,48,0.412060465749694,48,0.411836123587859,1757552407000000000\n"
+        )
+
+    quote = next(FlatFiles.currency.Quote.parse(path))
+    raw_quote = next(FlatFiles.currency.Quote.parse_raw(path))
+
+    assert isinstance(quote, CurrencyQuote)
+    assert quote.ticker == "C:AED-AUD"
+    assert quote.ask_exchange == 48
+    assert quote.bid_price == 0.411836123587859
+    assert quote.participant_timestamp == 1757552407000000000
+    assert raw_quote == (
+        b"C:AED-AUD",
+        b"48",
+        b"0.412060465749694",
+        b"48",
+        b"0.411836123587859",
+        b"1757552407000000000",
+    )
+    assert quote.tickers == ("AED", "AUD")
+
+
+def test_flatfiles_currencies_aggregate_parse_and_parse_raw(tmp_path: Path) -> None:
+    path = tmp_path / "currency_aggregates.csv.gz"
+    with gzip.open(path, "wt", encoding="utf-8", newline="") as handle:
+        handle.write("ticker,volume,open,close,high,low,window_start,transactions\n")
+        handle.write(
+            "C:AED-AUD,1,0.397700393851942,0.397700393851942,0.397700393851942,"
+            "0.397700393851942,1769133600000000000,1\n"
+        )
+
+    aggregate = next(FlatFiles.currency.Aggregate.parse(path))
+    raw_aggregate = next(FlatFiles.currency.Aggregate.parse_raw(path))
+
+    assert isinstance(aggregate, CurrencyAggregate)
+    assert aggregate.ticker == "C:AED-AUD"
+    assert aggregate.volume == 1
+    assert aggregate.window_start == 1769133600000000000
+    assert aggregate.transactions == 1
+    assert raw_aggregate == (
+        b"C:AED-AUD",
+        b"1",
+        b"0.397700393851942",
+        b"0.397700393851942",
+        b"0.397700393851942",
+        b"0.397700393851942",
+        b"1769133600000000000",
+        b"1",
+    )
+    assert aggregate.tickers == ("AED", "AUD")
+
+
+def test_flatfiles_currencies_aggregate_can_sort_by_window_start(tmp_path: Path) -> None:
+    path = tmp_path / "currency_aggregates.csv.gz"
+    with gzip.open(path, "wt", encoding="utf-8", newline="") as handle:
+        handle.write("ticker,volume,open,close,high,low,window_start,transactions\n")
+        handle.write("C:GBP-USD,2,1.2,1.2,1.2,1.2,200,2\n")
+        handle.write("C:AED-AUD,1,0.4,0.4,0.4,0.4,100,1\n")
+
+    aggregates = list(FlatFiles.currency.Aggregate.parse(path, sort_by_window_start=True))
+
+    assert [aggregate.window_start for aggregate in aggregates] == [100, 200]
+    assert [aggregate.ticker for aggregate in aggregates] == ["C:AED-AUD", "C:GBP-USD"]
+
+
+def test_flatfiles_currencies_quote_rejects_sort_by_sip_timestamp(tmp_path: Path) -> None:
+    path = tmp_path / "currencies.csv.gz"
+    with gzip.open(path, "wt", encoding="utf-8", newline="") as handle:
+        handle.write(
+            "ticker,ask_exchange,ask_price,bid_exchange,bid_price,participant_timestamp\n"
+        )
+        handle.write(
+            "C:AED-AUD,48,0.412060465749694,48,0.411836123587859,1757552407000000000\n"
+        )
+
+    with pytest.raises(Exception):
+        list(FlatFiles.currency.Quote.parse(path, sort_by_sip_timestamp=True))
+
+
+def test_flatfiles_stock_aggregate_parse_and_parse_raw(tmp_path: Path) -> None:
+    path = tmp_path / "stock_aggregates.csv.gz"
+    with gzip.open(path, "wt", encoding="utf-8", newline="") as handle:
+        handle.write("ticker,volume,open,close,high,low,window_start,transactions\n")
+        handle.write("A,18218,138.0,137.93,138.36,137.75,1769178600000000000,125\n")
+
+    aggregate = next(FlatFiles.Stock.Aggregate.parse(path))
+    raw_aggregate = next(FlatFiles.Stock.Aggregate.parse_raw(path))
+
+    assert isinstance(aggregate, StockAggregate)
+    assert aggregate.ticker == "A"
+    assert aggregate.volume == 18218
+    assert aggregate.close == 137.93
+    assert aggregate.window_start == 1769178600000000000
+    assert raw_aggregate == (
+        b"A",
+        b"18218",
+        b"138.0",
+        b"137.93",
+        b"138.36",
+        b"137.75",
+        b"1769178600000000000",
+        b"125",
+    )
+
+
+def test_flatfiles_stock_aggregate_can_sort_by_window_start(tmp_path: Path) -> None:
+    path = tmp_path / "stock_aggregates.csv.gz"
+    with gzip.open(path, "wt", encoding="utf-8", newline="") as handle:
+        handle.write("ticker,volume,open,close,high,low,window_start,transactions\n")
+        handle.write("B,10,1.0,1.1,1.2,0.9,200,2\n")
+        handle.write("A,12,2.0,2.1,2.2,1.9,100,3\n")
+
+    aggregates = list(FlatFiles.Stock.Aggregate.parse(path, sort_by_window_start=True))
+
+    assert [aggregate.window_start for aggregate in aggregates] == [100, 200]
+    assert [aggregate.ticker for aggregate in aggregates] == ["A", "B"]
 
 
 def test_flatfiles_stocks_parse_trades_is_unsorted_by_default(tmp_path: Path) -> None:
@@ -245,7 +373,7 @@ def test_flatfiles_stocks_parse_trades_is_unsorted_by_default(tmp_path: Path) ->
         handle.write("B,1,0,8,3,200,12.0,3,200,100,1,0,200\n")
         handle.write("B,1,0,8,4,50,13.0,4,400,100,1,0,400\n")
 
-    trades = list(FlatFiles.Stocks.parse_trades(path))
+    trades = list(FlatFiles.Stock.parse_trades(path))
 
     assert [trade.id for trade in trades] == [1, 2, 3, 4]
 
@@ -262,7 +390,7 @@ def test_flatfiles_stocks_parse_trades_can_sort_by_sip_timestamp(tmp_path: Path)
         handle.write("B,1,0,8,3,200,12.0,3,200,100,1,0,200\n")
         handle.write("B,1,0,8,4,50,13.0,4,400,100,1,0,400\n")
 
-    trades = list(FlatFiles.Stocks.parse_trades(path, sort_by_sip_timestamp=True))
+    trades = list(FlatFiles.Stock.parse_trades(path, sort_by_sip_timestamp=True))
 
     assert [trade.id for trade in trades] == [3, 1, 4, 2]
     assert [trade.sip_timestamp for trade in trades] == [200, 300, 400, 500]
@@ -280,7 +408,7 @@ def test_flatfiles_stocks_parse_trades_can_sort_by_participant_timestamp(tmp_pat
         handle.write("B,1,0,8,3,200,12.0,3,200,100,1,0,200\n")
         handle.write("B,1,0,8,4,50,13.0,4,400,100,1,0,400\n")
 
-    trades = list(FlatFiles.Stocks.parse_trades(path, sort_by_participant_timestamp=True))
+    trades = list(FlatFiles.Stock.parse_trades(path, sort_by_participant_timestamp=True))
 
     assert [trade.id for trade in trades] == [4, 2, 3, 1]
     assert [trade.participant_timestamp for trade in trades] == [50, 100, 200, 300]
@@ -297,7 +425,7 @@ def test_flatfiles_stocks_parse_trades_rejects_conflicting_sort_flags(tmp_path: 
 
     with pytest.raises(Exception):
         list(
-            FlatFiles.Stocks.parse_trades(
+            FlatFiles.Stock.parse_trades(
                 path,
                 sort_by_participant_timestamp=True,
                 sort_by_sip_timestamp=True,
@@ -315,7 +443,7 @@ def test_flatfiles_stocks_parse_trades_sort_flags_are_keyword_only(tmp_path: Pat
         handle.write("A,1,0,8,1,300,10.0,1,300,100,1,0,300\n")
 
     with pytest.raises(TypeError):
-        list(FlatFiles.Stocks.parse_trades(path, True))
+        list(FlatFiles.Stock.parse_trades(path, True))
 
 
 def test_flatfiles_forex_unimplemented_methods_raise() -> None:
@@ -448,6 +576,140 @@ def test_stock_quote_row_model_exposes_read_only_fields() -> None:
     assert "StockQuote(" in str(quote)
 
 
+def test_currency_quote_row_model_is_iterable_hashable_and_ordered() -> None:
+    newer = CurrencyQuote(
+        [
+            "C:AED-AUD",
+            "48",
+            "0.412060465749694",
+            "48",
+            "0.411836123587859",
+            "1757552407000000001",
+        ]
+    )
+    older = CurrencyQuote(
+        [
+            "C:AED-AUD",
+            "48",
+            "0.412060465749694",
+            "48",
+            "0.411836123587859",
+            "1757552407000000000",
+        ]
+    )
+
+    assert newer.ask_exchange == 48
+    assert list(newer)[5] == 1757552407000000001
+    assert newer > older
+    assert hash(newer) == hash(
+        CurrencyQuote(
+            [
+                "C:AED-AUD",
+                "48",
+                "0.412060465749694",
+                "48",
+                "0.411836123587859",
+                "1757552407000000001",
+            ]
+        )
+    )
+    assert "CurrencyQuote(" in repr(newer)
+    assert newer.tickers == ("AED", "AUD")
+
+
+def test_currency_aggregate_row_model_is_iterable_hashable_and_ordered() -> None:
+    newer = CurrencyAggregate(
+        [
+            "C:AED-AUD",
+            "2",
+            "0.4",
+            "0.5",
+            "0.6",
+            "0.3",
+            "1769133600000000001",
+            "7",
+        ]
+    )
+    older = CurrencyAggregate(
+        [
+            "C:AED-AUD",
+            "2",
+            "0.4",
+            "0.5",
+            "0.6",
+            "0.3",
+            "1769133600000000000",
+            "7",
+        ]
+    )
+
+    assert newer.volume == 2
+    assert list(newer)[6] == 1769133600000000001
+    assert newer > older
+    assert hash(newer) == hash(
+        CurrencyAggregate(
+            [
+                "C:AED-AUD",
+                "2",
+                "0.4",
+                "0.5",
+                "0.6",
+                "0.3",
+                "1769133600000000001",
+                "7",
+            ]
+        )
+    )
+    assert newer.tickers == ("AED", "AUD")
+    assert "CurrencyAggregate(" in repr(newer)
+
+
+def test_stock_aggregate_row_model_is_iterable_hashable_and_ordered() -> None:
+    newer = StockAggregate(
+        [
+            "A",
+            "18218",
+            "138.0",
+            "137.93",
+            "138.36",
+            "137.75",
+            "1769178600000000001",
+            "125",
+        ]
+    )
+    older = StockAggregate(
+        [
+            "A",
+            "18218",
+            "138.0",
+            "137.93",
+            "138.36",
+            "137.75",
+            "1769178600000000000",
+            "125",
+        ]
+    )
+
+    assert newer.volume == 18218
+    assert list(newer)[6] == 1769178600000000001
+    assert newer > older
+    assert hash(newer) == hash(
+        StockAggregate(
+            [
+                "A",
+                "18218",
+                "138.0",
+                "137.93",
+                "138.36",
+                "137.75",
+                "1769178600000000001",
+                "125",
+            ]
+        )
+    )
+    assert "StockAggregate(" in repr(newer)
+
+
 def test_condition_frozensets_are_globally_interned() -> None:
     trade = StockTrade(
         [
@@ -488,6 +750,33 @@ def test_condition_frozensets_are_globally_interned() -> None:
     assert trade.conditions is quote.conditions
 
 
+def test_currency_tickers_are_globally_interned() -> None:
+    quote = CurrencyQuote(
+        [
+            "C:AED-AUD",
+            "48",
+            "0.412060465749694",
+            "48",
+            "0.411836123587859",
+            "1757552407000000000",
+        ]
+    )
+    aggregate = CurrencyAggregate(
+        [
+            "C:AED-AUD",
+            "1",
+            "0.397700393851942",
+            "0.397700393851942",
+            "0.397700393851942",
+            "0.397700393851942",
+            "1769133600000000000",
+            "1",
+        ]
+    )
+
+    assert quote.tickers is aggregate.tickers
+
+
 @pytest.mark.parametrize(
     ("module_name", "flatfile_attr", "websocket_attr"),
     [
@@ -518,6 +807,9 @@ def test_direct_backend_module_imports_expose_backend_specific_aliases(
     assert hasattr(module, "BACKEND_NAME")
     assert hasattr(module, "StockTrade")
     assert hasattr(module, "StockQuote")
+    assert hasattr(module, "StockAggregate")
+    assert hasattr(module, "CurrencyQuote")
+    assert hasattr(module, "CurrencyAggregate")
     assert hasattr(module, "gzip_lines")
     assert hasattr(module, flatfile_attr)
     assert hasattr(module, websocket_attr)
@@ -546,11 +838,25 @@ def test_direct_backend_module_classes_are_callable_when_built(module_name: str)
     path = Path(__file__).resolve().parent / "data" / "hello_world.txt.gz"
     message_summary = module.WebSocket.Messages.parse_message(b'{"ev":"status"}')
 
-    assert hasattr(module.FlatFiles.Stocks, "parse_quotes")
-    assert hasattr(module.FlatFiles.Stocks, "parse_trades")
-    assert hasattr(module.FlatFiles.Stocks, "parse_raw_quotes")
-    assert hasattr(module.FlatFiles.Stocks, "parse_raw_trades")
-    assert hasattr(module.FlatFiles.Stocks, "raw_lines")
+    assert hasattr(module.FlatFiles.Stock, "parse_quotes")
+    assert hasattr(module.FlatFiles.Stock, "parse_trades")
+    assert hasattr(module.FlatFiles.Stock, "parse_raw_quotes")
+    assert hasattr(module.FlatFiles.Stock, "parse_raw_trades")
+    assert hasattr(module.FlatFiles.Stock, "parse_minute_aggregates")
+    assert hasattr(module.FlatFiles.Stock, "parse_daily_aggregates")
+    assert hasattr(module.FlatFiles.Stock, "parse_raw_minute_aggregates")
+    assert hasattr(module.FlatFiles.Stock, "parse_raw_daily_aggregates")
+    assert hasattr(module.FlatFiles.Stock, "Aggregate")
+    assert hasattr(module.FlatFiles.Stock, "raw_lines")
+    assert not hasattr(module.FlatFiles, "Stocks")
+    assert hasattr(module.FlatFiles.currency, "parse_quotes")
+    assert hasattr(module.FlatFiles.currency, "parse_raw_quotes")
+    assert hasattr(module.FlatFiles.currency, "parse_minute_aggregates")
+    assert hasattr(module.FlatFiles.currency, "parse_daily_aggregates")
+    assert hasattr(module.FlatFiles.currency, "parse_raw_minute_aggregates")
+    assert hasattr(module.FlatFiles.currency, "parse_raw_daily_aggregates")
+    assert hasattr(module.FlatFiles.currency, "Aggregate")
+    assert hasattr(module.FlatFiles.currency, "raw_lines")
     assert hasattr(module, "read_gzip_lines_bytes")
     assert list(module.read_gzip_lines_bytes(path)) == [b"Hello", b"World!"]
     assert message_summary["asset_class"] == "messages"

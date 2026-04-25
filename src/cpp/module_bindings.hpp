@@ -18,36 +18,6 @@ namespace massive_speedup::bindings {
 
 namespace nb = nanobind;
 
-inline nb::object find_existing_backend_attr(const char* attr_name) {
-  static constexpr const char* backend_modules[] = {
-      "massive_speedup._generic",
-      "massive_speedup._sse",
-      "massive_speedup._avx",
-      "massive_speedup._avx512",
-      "massive_speedup._neon",
-      "massive_speedup._sve",
-      "massive_speedup._sve2",
-      "massive_speedup._lsx",
-      "massive_speedup._lasx",
-  };
-
-  PyObject* modules = PyImport_GetModuleDict();
-  for (const char* module_name : backend_modules) {
-    PyObject* module = PyDict_GetItemString(modules, module_name);
-    if (module == nullptr || !PyObject_HasAttrString(module, attr_name)) {
-      continue;
-    }
-
-    PyObject* value = PyObject_GetAttrString(module, attr_name);
-    if (value == nullptr) {
-      throw nb::python_error();
-    }
-    return nb::steal<nb::object>(value);
-  }
-
-  return nb::object();
-}
-
 template <typename ParserType>
 std::vector<nb::bytes> read_gzip_lines_bytes(
     const std::filesystem::path& path,
@@ -93,16 +63,6 @@ std::string serialize_static() {
 template <typename ParserType>
 std::string processor_name_static() {
   return ParserType{}.processor_name();
-}
-
-template <typename ParserType>
-ProcessorType processor_type_static() {
-  return ParserType{}.processor_type();
-}
-
-template <typename ParserType>
-BackendKind backend_kind_static() {
-  return module_backend_kind();
 }
 
 template <typename ParserType>
@@ -299,22 +259,6 @@ void bind_window_start_ordering(nb::class_<RowType>& class_) {
 
 template <typename Specialization>
 inline void bind_row_models(nb::module_& m, nb::module_& flatfiles) {
-  if (nb::object existing = find_existing_backend_attr("StockTrade"); existing.is_valid()) {
-    m.attr("StockTrade") = existing;
-    m.attr("StockQuote") = find_existing_backend_attr("StockQuote");
-    m.attr("StockAggregate") = find_existing_backend_attr("StockAggregate");
-    m.attr("CurrencyQuote") = find_existing_backend_attr("CurrencyQuote");
-    m.attr("CurrencyAggregate") = find_existing_backend_attr("CurrencyAggregate");
-    m.attr("StockQuotes") = m.attr("StockQuote");
-    flatfiles.attr("StockTrade") = m.attr("StockTrade");
-    flatfiles.attr("StockQuote") = m.attr("StockQuote");
-    flatfiles.attr("StockAggregate") = m.attr("StockAggregate");
-    flatfiles.attr("CurrencyQuote") = m.attr("CurrencyQuote");
-    flatfiles.attr("CurrencyAggregate") = m.attr("CurrencyAggregate");
-    flatfiles.attr("StockQuotes") = m.attr("StockQuote");
-    return;
-  }
-
   auto stock_trade =
       nb::class_<backend_generic::StockTrade>(m, "StockTrade")
           .def(
@@ -511,27 +455,6 @@ inline void bind_row_models(nb::module_& m, nb::module_& flatfiles) {
 }
 
 inline void bind_common_bases(nb::module_& m) {
-  if (nb::object existing = find_existing_backend_attr("Parser"); existing.is_valid()) {
-    m.attr("Parser") = existing;
-    m.attr("FlatFileParser") = find_existing_backend_attr("FlatFileParser");
-    m.attr("WebSocketParser") = find_existing_backend_attr("WebSocketParser");
-    m.attr("FlatFileStocksParser") = find_existing_backend_attr("FlatFileStocksParser");
-    m.attr("FlatFileOptionsParser") = find_existing_backend_attr("FlatFileOptionsParser");
-    m.attr("FlatFileFuturesParser") = find_existing_backend_attr("FlatFileFuturesParser");
-    m.attr("FlatFileIndicesParser") = find_existing_backend_attr("FlatFileIndicesParser");
-    m.attr("FlatFileForexParser") = find_existing_backend_attr("FlatFileForexParser");
-    m.attr("FlatFileCurrenciesParser") = find_existing_backend_attr("FlatFileCurrenciesParser");
-    m.attr("FlatFileCryptoParser") = find_existing_backend_attr("FlatFileCryptoParser");
-    m.attr("WebSocketMessagesParser") = find_existing_backend_attr("WebSocketMessagesParser");
-    m.attr("WebSocketStocksParser") = find_existing_backend_attr("WebSocketStocksParser");
-    m.attr("WebSocketOptionsParser") = find_existing_backend_attr("WebSocketOptionsParser");
-    m.attr("WebSocketFuturesParser") = find_existing_backend_attr("WebSocketFuturesParser");
-    m.attr("WebSocketIndicesParser") = find_existing_backend_attr("WebSocketIndicesParser");
-    m.attr("WebSocketForexParser") = find_existing_backend_attr("WebSocketForexParser");
-    m.attr("WebSocketCryptoParser") = find_existing_backend_attr("WebSocketCryptoParser");
-    return;
-  }
-
   nb::class_<Parser>(m, "Parser");
 
   nb::class_<FlatFileParser, Parser>(m, "FlatFileParser");
@@ -570,9 +493,7 @@ void bind_flatfile_asset(nb::module_& module, const char* name) {
           nb::arg("payload"))
       .def_static("parse_trades", &parse_trades_static<ImplAsset>, nb::arg("payload"))
       .def_static("serialize", &serialize_static<ImplAsset>)
-      .def_static("processor_name", &processor_name_static<ImplAsset>)
-      .def_static("processor_type", &processor_type_static<ImplAsset>)
-      .def_static("backend_kind", &backend_kind_static<ImplAsset>);
+      .def_static("processor_name", &processor_name_static<ImplAsset>);
 }
 
 template <typename BaseAsset, typename ImplAsset>
@@ -706,9 +627,7 @@ void bind_stock_flatfile_asset(
           },
           nb::arg("path"))
       .def_static("serialize", &serialize_static<ImplAsset>)
-      .def_static("processor_name", &processor_name_static<ImplAsset>)
-      .def_static("processor_type", &processor_type_static<ImplAsset>)
-      .def_static("backend_kind", &backend_kind_static<ImplAsset>);
+      .def_static("processor_name", &processor_name_static<ImplAsset>);
 
   nb::class_<TradeApi>(module, trade_api_name)
       .def_static(
@@ -817,9 +736,7 @@ void bind_websocket_asset(nb::module_& module, const char* name) {
       .def(nb::init<>())
       .def_static("parse_message", &parse_message_static<ImplAsset>, nb::arg("payload"))
       .def_static("serialize", &serialize_static<ImplAsset>)
-      .def_static("processor_name", &processor_name_static<ImplAsset>)
-      .def_static("processor_type", &processor_type_static<ImplAsset>)
-      .def_static("backend_kind", &backend_kind_static<ImplAsset>);
+      .def_static("processor_name", &processor_name_static<ImplAsset>);
 }
 
 template <typename BaseAsset, typename ImplAsset>
@@ -916,9 +833,7 @@ void bind_currency_flatfile_asset(
           },
           nb::arg("path"))
       .def_static("serialize", &serialize_static<ImplAsset>)
-      .def_static("processor_name", &processor_name_static<ImplAsset>)
-      .def_static("processor_type", &processor_type_static<ImplAsset>)
-      .def_static("backend_kind", &backend_kind_static<ImplAsset>);
+      .def_static("processor_name", &processor_name_static<ImplAsset>);
 
   nb::class_<QuoteApi>(module, quote_api_name)
       .def_static(
@@ -984,28 +899,8 @@ void bind_currency_flatfile_asset(
   currency_class.attr("Aggregate") = module.attr(aggregate_api_name);
 }
 
-inline void export_backend_specific_aliases(nb::module_& m, nb::module_& flatfiles, nb::module_& websocket, const char* alias_prefix) {
-  const std::string prefix = alias_prefix;
-
-  m.attr((prefix + "FlatFileStocksParser").c_str()) = flatfiles.attr("Stock");
-  m.attr((prefix + "FlatFileOptionsParser").c_str()) = flatfiles.attr("Options");
-  m.attr((prefix + "FlatFileFuturesParser").c_str()) = flatfiles.attr("Futures");
-  m.attr((prefix + "FlatFileIndicesParser").c_str()) = flatfiles.attr("Indices");
-  m.attr((prefix + "FlatFileForexParser").c_str()) = flatfiles.attr("Forex");
-  m.attr((prefix + "FlatFileCurrenciesParser").c_str()) = flatfiles.attr("currency");
-  m.attr((prefix + "FlatFileCryptoParser").c_str()) = flatfiles.attr("Crypto");
-
-  m.attr((prefix + "WebSocketMessagesParser").c_str()) = websocket.attr("Messages");
-  m.attr((prefix + "WebSocketStocksParser").c_str()) = websocket.attr("Stocks");
-  m.attr((prefix + "WebSocketOptionsParser").c_str()) = websocket.attr("Options");
-  m.attr((prefix + "WebSocketFuturesParser").c_str()) = websocket.attr("Futures");
-  m.attr((prefix + "WebSocketIndicesParser").c_str()) = websocket.attr("Indices");
-  m.attr((prefix + "WebSocketForexParser").c_str()) = websocket.attr("Forex");
-  m.attr((prefix + "WebSocketCryptoParser").c_str()) = websocket.attr("Crypto");
-}
-
 template <template <typename> class Impl>
-void bind_backend_module(nb::module_& m, BackendKind kind, const char* alias_prefix) {
+void bind_backend_module(nb::module_& m, const char* alias_prefix) {
   m.doc() = "Backend-specialized parser bindings.";
   const std::string gzip_iterator_name = std::string(alias_prefix) + "GzipLinesIterator";
   const std::string stock_trade_iterator_name =
@@ -1047,12 +942,7 @@ void bind_backend_module(nb::module_& m, BackendKind kind, const char* alias_pre
       nb::arg("path"),
       nb::arg("parallelization") = 0,
       nb::arg("chunk_size") = 1U << 20);
-  m.def("detect_best_backend", &detect_best_backend);
-  m.def("detect_processor_type", &detect_processor_type);
-  m.def("backend_is_available", &backend_is_available, nb::arg("kind"));
-  m.attr("BACKEND_KIND") = nb::cast(kind);
-  m.attr("BACKEND_NAME") = nb::cast(std::string(backend_kind_name(kind)));
-  m.attr("BACKEND_ALIAS_PREFIX") = nb::cast(std::string(alias_prefix));
+  static_cast<void>(alias_prefix);
 
   bind_gzip_lines<Impl<FlatFileStocksParser>>(m, gzip_iterator_name.c_str());
   bind_common_bases(m);
@@ -1097,7 +987,6 @@ void bind_backend_module(nb::module_& m, BackendKind kind, const char* alias_pre
   bind_websocket_asset<WebSocketCryptoParser, Impl<WebSocketCryptoParser>>(websocket, "Crypto");
 
   bind_row_models<typename Impl<FlatFileStocksParser>::specialization_type>(m, flatfiles);
-  export_backend_specific_aliases(m, flatfiles, websocket, alias_prefix);
 }
 
 }  // namespace massive_speedup::bindings

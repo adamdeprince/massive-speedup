@@ -48,11 +48,7 @@ std::string Parser::serialize() const {
          ";processor=" + processor_name();
 }
 
-ProcessorType Parser::processor_type() const { return module_processor_type(); }
-
-std::string Parser::processor_name() const {
-  return processor_type_name(processor_type());
-}
+std::string Parser::processor_name() const { return "generic"; }
 
 Summary Parser::build_summary(
     std::string_view payload,

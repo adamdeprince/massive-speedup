@@ -6,6 +6,5 @@ namespace nb = nanobind;
 NB_MODULE(_generic, m) {
   massive_speedup::bindings::bind_backend_module<massive_speedup::backend_generic::Implementation>(
       m,
-      massive_speedup::BackendKind::generic,
       "_Generic");
 }

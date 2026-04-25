@@ -6,68 +6,9 @@ import csv
 import gzip
 import heapq
 import sys
-from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Iterator
-
-
-class ProcessorType(Enum):
-    GENERIC = 0
-    SSE42 = 1
-    AVX = 2
-    AVX512BW = 3
-    NEON = 4
-    SVE = 5
-    SVE2 = 6
-    LSX = 7
-    LASX = 8
-
-
-class BackendKind(Enum):
-    GENERIC = 0
-    X86_SSE42 = 1
-    X86_AVX2 = 2
-    X86_AVX512 = 3
-    LINUX_AARCH64_NEON = 4
-    LINUX_AARCH64_SVE = 5
-    LINUX_AARCH64_SVE2 = 6
-    LINUX_LOONGARCH64_LSX = 7
-    LINUX_LOONGARCH64_LASX = 8
-
-
-class BackendRecord:
-    def __init__(self, kind: BackendKind, name: str, compiled: bool, available: bool) -> None:
-        self.kind = kind
-        self.name = name
-        self.compiled = compiled
-        self.available = available
-
-
-def detect_processor_type() -> ProcessorType:
-    return ProcessorType.GENERIC
-
-
-def detect_best_backend() -> BackendKind:
-    return BackendKind.GENERIC
-
-
-def backend_is_available(kind: BackendKind) -> bool:
-    return kind == BackendKind.GENERIC
-
-
-def available_backends() -> list[BackendRecord]:
-    return [
-        BackendRecord(BackendKind.GENERIC, "generic", True, True),
-        BackendRecord(BackendKind.X86_SSE42, "x86_sse42", False, False),
-        BackendRecord(BackendKind.X86_AVX2, "x86_avx2", False, False),
-        BackendRecord(BackendKind.X86_AVX512, "x86_avx512", False, False),
-        BackendRecord(BackendKind.LINUX_AARCH64_NEON, "linux_aarch64_neon", False, False),
-        BackendRecord(BackendKind.LINUX_AARCH64_SVE, "linux_aarch64_sve", False, False),
-        BackendRecord(BackendKind.LINUX_AARCH64_SVE2, "linux_aarch64_sve2", False, False),
-        BackendRecord(BackendKind.LINUX_LOONGARCH64_LSX, "linux_loongarch64_lsx", False, False),
-        BackendRecord(BackendKind.LINUX_LOONGARCH64_LASX, "linux_loongarch64_lasx", False, False),
-    ]
 
 
 def read_gzip_lines(path: str | Path):
@@ -563,9 +504,6 @@ class Parser:
             f"parser_group={self.parser_group_name};asset_class={self.asset_class_name};"
             f"processor={self.processor_name()}"
         )
-
-    def processor_type(self) -> ProcessorType:
-        return ProcessorType.GENERIC
 
     def processor_name(self) -> str:
         return "generic"

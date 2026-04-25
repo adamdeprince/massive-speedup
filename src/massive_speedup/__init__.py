@@ -1,16 +1,14 @@
-"""Python bootstrap for processor-specialized nanobind modules."""
+"""Python bootstrap for the generic nanobind module."""
 
 from types import ModuleType
 import sys
-
-from ._cpu import BackendKind, available_backends, backend_is_available, detect_best_backend, detect_processor_type
 
 
 def _install_stock_api(module: ModuleType) -> None:
     if getattr(module, "_massive_speedup_stock_api_installed", False):
         return
 
-    stock = getattr(module.FlatFiles, "Stock", None)
+    stock = module.FlatFiles.Stock
     if hasattr(stock, "Trade") and hasattr(stock, "Quote") and hasattr(stock, "Aggregate"):
         module._massive_speedup_stock_api_installed = True
         return
@@ -103,7 +101,6 @@ def _install_stock_api(module: ModuleType) -> None:
     stock.Trade = Trade
     stock.Quote = Quote
     stock.Aggregate = Aggregate
-    module.FlatFiles.Stock = stock
     module._massive_speedup_stock_api_installed = True
 
 
@@ -174,30 +171,11 @@ def _install_currency_api(module: ModuleType) -> None:
 
         currency.Aggregate = Aggregate
 
-    module.FlatFiles.currency = currency
     module._massive_speedup_currency_api_installed = True
 
 
 try:
-    match detect_best_backend():
-        case BackendKind.X86_SSE42:
-            from ._sse import *  # noqa: F403
-        case BackendKind.X86_AVX2:
-            from ._avx import *  # noqa: F403
-        case BackendKind.X86_AVX512:
-            from ._avx512 import *  # noqa: F403
-        case BackendKind.LINUX_AARCH64_NEON:
-            from ._neon import *  # type: ignore[attr-defined]  # noqa: F403
-        case BackendKind.LINUX_AARCH64_SVE:
-            from ._sve import *  # type: ignore[attr-defined]  # noqa: F403
-        case BackendKind.LINUX_AARCH64_SVE2:
-            from ._sve2 import *  # type: ignore[attr-defined]  # noqa: F403
-        case BackendKind.LINUX_LOONGARCH64_LSX:
-            from ._lsx import *  # type: ignore[attr-defined]  # noqa: F403
-        case BackendKind.LINUX_LOONGARCH64_LASX:
-            from ._lasx import *  # type: ignore[attr-defined]  # noqa: F403
-        case _:
-            from ._generic import *  # noqa: F403
+    from ._generic import *  # noqa: F403
 except ImportError:
     from ._fallback import *  # noqa: F403
 
@@ -215,7 +193,6 @@ def read_gzip_lines(path, parallelization=0, chunk_size=1 << 20):
 
 
 __all__ = [
-    "BackendKind",
     "FlatFiles",
     "StockTrade",
     "StockQuote",
@@ -224,10 +201,6 @@ __all__ = [
     "CurrencyQuote",
     "CurrencyAggregate",
     "WebSocket",
-    "available_backends",
-    "backend_is_available",
-    "detect_best_backend",
-    "detect_processor_type",
     "gzip_lines",
     "read_gzip_lines",
 ]

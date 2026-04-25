@@ -1,7 +1,7 @@
 [project]
 name = "massive-speedup"
 version = "0.1.0"
-description = "SIMD-oriented parsers for polygon, bulk S3, and websocket market data."
+description = "Nanobind/C++ parsers for polygon, bulk S3, and websocket market data."
 readme = "README.md"
 requires-python = ">=3.11,<4.0"
 license = "Apache-2.0"
@@ -9,7 +9,6 @@ authors = [
   { name = "Adam" }
 ]
 keywords = [
-  "simd",
   "nanobind",
   "polygon",
   "s3",

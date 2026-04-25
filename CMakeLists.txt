@@ -168,7 +168,6 @@ function(add_massive_speedup_backend module_name backend_source)
     ${module_name}
     STABLE_ABI
     ${backend_source}
-    src/cpp/cpu.cpp
     ${MASSIVE_SPEEDUP_COMMON_SOURCES}
   )
 
@@ -176,82 +175,4 @@ function(add_massive_speedup_backend module_name backend_source)
   install(TARGETS ${module_name} LIBRARY DESTINATION massive_speedup)
 endfunction()
 
-nanobind_add_module(
-  _cpu
-  STABLE_ABI
-  src/cpp/cpu_module.cpp
-  src/cpp/cpu.cpp
-)
-
-configure_massive_speedup_target(_cpu)
-
-set(MASSIVE_SPEEDUP_CPU_COMPILE_DEFINITIONS)
-list(APPEND MASSIVE_SPEEDUP_CPU_COMPILE_DEFINITIONS MASSIVE_SPEEDUP_HAVE_GENERIC=1)
-
 add_massive_speedup_backend(_generic src/cpp/backends/generic.cpp)
-
-install(TARGETS _cpu LIBRARY DESTINATION massive_speedup)
-
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|i[3-6]86)$")
-  add_massive_speedup_backend(_sse src/cpp/backends/x86_sse.cpp)
-  target_compile_definitions(_sse PRIVATE MASSIVE_SPEEDUP_PROCESSOR_SSE42=1)
-  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-    target_compile_options(_sse PRIVATE -msse4.2)
-  endif()
-  list(APPEND MASSIVE_SPEEDUP_CPU_COMPILE_DEFINITIONS MASSIVE_SPEEDUP_HAVE_X86_SSE42=1)
-
-  add_massive_speedup_backend(_avx src/cpp/backends/x86_avx.cpp)
-  target_compile_definitions(_avx PRIVATE MASSIVE_SPEEDUP_PROCESSOR_AVX=1)
-  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-    target_compile_options(_avx PRIVATE -mavx2)
-  endif()
-  list(APPEND MASSIVE_SPEEDUP_CPU_COMPILE_DEFINITIONS MASSIVE_SPEEDUP_HAVE_X86_AVX2=1)
-
-  add_massive_speedup_backend(_avx512 src/cpp/backends/x86_avx512.cpp)
-  target_compile_definitions(_avx512 PRIVATE MASSIVE_SPEEDUP_PROCESSOR_AVX512BW=1)
-  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-    target_compile_options(_avx512 PRIVATE -mavx512f -mavx512bw)
-  endif()
-  list(APPEND MASSIVE_SPEEDUP_CPU_COMPILE_DEFINITIONS MASSIVE_SPEEDUP_HAVE_X86_AVX512=1)
-endif()
-
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
-  add_massive_speedup_backend(_neon src/cpp/backends/linux_aarch64_neon.cpp)
-  target_compile_definitions(_neon PRIVATE MASSIVE_SPEEDUP_PROCESSOR_NEON=1)
-  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-    target_compile_options(_neon PRIVATE -march=armv8-a+simd)
-  endif()
-  list(APPEND MASSIVE_SPEEDUP_CPU_COMPILE_DEFINITIONS MASSIVE_SPEEDUP_HAVE_LINUX_AARCH64_NEON=1)
-
-  add_massive_speedup_backend(_sve src/cpp/backends/linux_aarch64_sve.cpp)
-  target_compile_definitions(_sve PRIVATE MASSIVE_SPEEDUP_PROCESSOR_SVE=1)
-  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-    target_compile_options(_sve PRIVATE -march=armv8.2-a+sve)
-  endif()
-  list(APPEND MASSIVE_SPEEDUP_CPU_COMPILE_DEFINITIONS MASSIVE_SPEEDUP_HAVE_LINUX_AARCH64_SVE=1)
-
-  add_massive_speedup_backend(_sve2 src/cpp/backends/linux_aarch64_sve2.cpp)
-  target_compile_definitions(_sve2 PRIVATE MASSIVE_SPEEDUP_PROCESSOR_SVE2=1)
-  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-    target_compile_options(_sve2 PRIVATE -march=armv9-a+sve2)
-  endif()
-  list(APPEND MASSIVE_SPEEDUP_CPU_COMPILE_DEFINITIONS MASSIVE_SPEEDUP_HAVE_LINUX_AARCH64_SVE2=1)
-endif()
-
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(loongarch64|loong64)$")
-  add_massive_speedup_backend(_lsx src/cpp/backends/linux_loongarch64_lsx.cpp)
-  target_compile_definitions(_lsx PRIVATE MASSIVE_SPEEDUP_PROCESSOR_LSX=1)
-  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-    target_compile_options(_lsx PRIVATE -mlsx)
-  endif()
-  list(APPEND MASSIVE_SPEEDUP_CPU_COMPILE_DEFINITIONS MASSIVE_SPEEDUP_HAVE_LINUX_LOONGARCH64_LSX=1)
-
-  add_massive_speedup_backend(_lasx src/cpp/backends/linux_loongarch64_lasx.cpp)
-  target_compile_definitions(_lasx PRIVATE MASSIVE_SPEEDUP_PROCESSOR_LASX=1)
-  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-    target_compile_options(_lasx PRIVATE -mlasx)
-  endif()
-  list(APPEND MASSIVE_SPEEDUP_CPU_COMPILE_DEFINITIONS MASSIVE_SPEEDUP_HAVE_LINUX_LOONGARCH64_LASX=1)
-endif()
-
-target_compile_definitions(_cpu PRIVATE ${MASSIVE_SPEEDUP_CPU_COMPILE_DEFINITIONS})

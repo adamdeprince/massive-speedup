@@ -4,7 +4,6 @@ import gzip
 
 import pytest
 from massive_speedup import (
-    BackendKind,
     CurrencyAggregate,
     CurrencyQuote,
     FlatFiles,
@@ -12,27 +11,9 @@ from massive_speedup import (
     StockQuote,
     StockTrade,
     WebSocket,
-    available_backends,
-    backend_is_available,
-    detect_best_backend,
-    detect_processor_type,
     gzip_lines,
     read_gzip_lines,
 )
-
-
-def test_detect_best_backend_returns_enum() -> None:
-    backend = detect_best_backend()
-    assert isinstance(backend, BackendKind)
-
-
-def test_available_backends_includes_generic() -> None:
-    backends = available_backends()
-    assert any(record.name == "generic" and record.available for record in backends)
-
-
-def test_backend_is_available_for_detected_backend() -> None:
-    assert backend_is_available(detect_best_backend())
 
 
 def test_flatfiles_stocks_parse_quotes_reads_gzip_records(tmp_path: Path) -> None:
@@ -777,63 +758,27 @@ def test_currency_tickers_are_globally_interned() -> None:
     assert quote.tickers is aggregate.tickers
 
 
-@pytest.mark.parametrize(
-    ("module_name", "flatfile_attr", "websocket_attr"),
-    [
-        ("massive_speedup._generic", "_GenericFlatFileStocksParser", "_GenericWebSocketMessagesParser"),
-        ("massive_speedup._sse", "_SseFlatFileStocksParser", "_SseWebSocketMessagesParser"),
-        ("massive_speedup._avx", "_AvxFlatFileStocksParser", "_AvxWebSocketMessagesParser"),
-        ("massive_speedup._avx512", "_Avx512FlatFileStocksParser", "_Avx512WebSocketMessagesParser"),
-        ("massive_speedup._neon", "_NeonFlatFileStocksParser", "_NeonWebSocketMessagesParser"),
-        ("massive_speedup._sve", "_SveFlatFileStocksParser", "_SveWebSocketMessagesParser"),
-        ("massive_speedup._sve2", "_Sve2FlatFileStocksParser", "_Sve2WebSocketMessagesParser"),
-        ("massive_speedup._lsx", "_LsxFlatFileStocksParser", "_LsxWebSocketMessagesParser"),
-        ("massive_speedup._lasx", "_LasxFlatFileStocksParser", "_LasxWebSocketMessagesParser"),
-    ],
-)
-def test_direct_backend_module_imports_expose_backend_specific_aliases(
-    module_name: str,
-    flatfile_attr: str,
-    websocket_attr: str,
-) -> None:
+def test_direct_generic_backend_module_exports_api() -> None:
     try:
-        module = import_module(module_name)
+        module = import_module("massive_speedup._generic")
     except ImportError:
-        pytest.skip(f"{module_name} is not built in this environment")
+        pytest.skip("massive_speedup._generic is not built in this environment")
 
     assert hasattr(module, "FlatFiles")
     assert hasattr(module, "WebSocket")
-    assert hasattr(module, "BACKEND_KIND")
-    assert hasattr(module, "BACKEND_NAME")
     assert hasattr(module, "StockTrade")
     assert hasattr(module, "StockQuote")
     assert hasattr(module, "StockAggregate")
     assert hasattr(module, "CurrencyQuote")
     assert hasattr(module, "CurrencyAggregate")
     assert hasattr(module, "gzip_lines")
-    assert hasattr(module, flatfile_attr)
-    assert hasattr(module, websocket_attr)
 
 
-@pytest.mark.parametrize(
-    "module_name",
-    [
-        "massive_speedup._generic",
-        "massive_speedup._sse",
-        "massive_speedup._avx",
-        "massive_speedup._avx512",
-        "massive_speedup._neon",
-        "massive_speedup._sve",
-        "massive_speedup._sve2",
-        "massive_speedup._lsx",
-        "massive_speedup._lasx",
-    ],
-)
-def test_direct_backend_module_classes_are_callable_when_built(module_name: str) -> None:
+def test_direct_generic_backend_module_classes_are_callable_when_built() -> None:
     try:
-        module = import_module(module_name)
+        module = import_module("massive_speedup._generic")
     except ImportError:
-        pytest.skip(f"{module_name} is not built in this environment")
+        pytest.skip("massive_speedup._generic is not built in this environment")
 
     path = Path(__file__).resolve().parent / "data" / "hello_world.txt.gz"
     message_summary = module.WebSocket.Messages.parse_message(b'{"ev":"status"}')
@@ -860,19 +805,6 @@ def test_direct_backend_module_classes_are_callable_when_built(module_name: str)
     assert hasattr(module, "read_gzip_lines_bytes")
     assert list(module.read_gzip_lines_bytes(path)) == [b"Hello", b"World!"]
     assert message_summary["asset_class"] == "messages"
-
-
-def test_sse_parse_raw_uses_backend_specialization_hooks() -> None:
-    sse_source = Path("src/cpp/backends/x86_sse.cpp").read_text(encoding="utf-8")
-    generic_source = Path("src/cpp/backends/generic.hpp").read_text(encoding="utf-8")
-
-    assert "using Implementation = massive_speedup::backend_generic::Implementation<Base, Specialization>" in sse_source
-    assert "parse_raw_trade_tuple" in generic_source
-    assert "parse_raw_quote_tuple" in generic_source
-    assert "next_raw_condition_field<true>" in generic_source
-    assert "Specialization::template parse_unquoted_field<ExpectMore>" in generic_source
-    assert "static inline std::string_view parse_unquoted_field" in sse_source
-    assert "static inline std::string_view parse_quoted_field" in sse_source
 
 
 def test_parsed_rows_use_instance_lifetime_bitset_cache() -> None:

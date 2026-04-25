@@ -8,8 +8,6 @@
 #include <unordered_map>
 #include <vector>
 
-#include "massive_speedup/cpu.hpp"
-
 namespace massive_speedup {
 
 namespace nb = nanobind;
@@ -30,7 +28,6 @@ class Parser {
   virtual std::string asset_class() const = 0;
 
   std::string serialize() const;
-  ProcessorType processor_type() const;
   std::string processor_name() const;
 
  protected:

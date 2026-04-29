@@ -64,9 +64,18 @@ def _parse_bitset96(text: str) -> str:
     return "".join("1" if bit else "0" for bit in reversed(bits))
 
 
+_BITSET_INDICES_INTERN_CACHE: dict[str, frozenset[int]] = {}
+
+
 def _bitset_indices(text: str) -> frozenset[int]:
     bit_string = _parse_bitset96(text)
-    return frozenset(index for index, value in enumerate(reversed(bit_string)) if value == "1")
+    cached = _BITSET_INDICES_INTERN_CACHE.get(bit_string)
+    if cached is not None:
+        return cached
+
+    cached = frozenset(index for index, value in enumerate(reversed(bit_string)) if value == "1")
+    _BITSET_INDICES_INTERN_CACHE[bit_string] = cached
+    return cached
 
 
 _TICKERS_INTERN_CACHE: dict[str, tuple[str, str]] = {}

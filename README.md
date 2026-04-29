@@ -1,13 +1,12 @@
 # massive-speedup
 
-`massive-speedup` is a Poetry-managed Python package with nanobind/C++ parser
-modules selected at Python import time. The native core is centered on:
+`massive-speedup` is a Poetry-managed Python package with a nanobind/C++ parser
+module. The native core is centered on:
 
 - C++23-native parser and utility code
 - A serializable `Parser` base class implemented in C++
 - Two common parser modules: `FlatFiles` and `WebSocket`
-- Backend-specialized native extensions for `generic`, `sse`, `avx`,
-  `avx512`, `neon`, `sve`, `sve2`, `lsx`, and `lasx`
+- A single native extension module, `massive_speedup._native`
 - Native C++ access to `simdjson` and `rapidgzip` so decompression and JSON
   parsing can stay out of Python bytecode paths
 
@@ -20,14 +19,10 @@ modules selected at Python import time. The native core is centered on:
 |-- pyproject.toml
 |-- src/
 |   |-- cpp/
-|   |   |-- backends/
-|   |   |   |-- generic.cpp
-|   |   |   |-- x86_sse.cpp
-|   |   |   |-- x86_avx.cpp
-|   |   |   `-- ...
-|   |   |-- cpu.cpp
 |   |   |-- flatfiles.cpp
 |   |   |-- module_bindings.hpp
+|   |   |-- native.cpp
+|   |   |-- native.hpp
 |   |   |-- parser_common.cpp
 |   |   `-- websocket.cpp
 |   `-- massive_speedup/
@@ -67,16 +62,11 @@ and yield one decoded line at a time through `std::generator<std::string>`.
 
 ## API Direction
 
-`massive_speedup.FlatFiles` and `massive_speedup.WebSocket` choose a backend
-module at import time using `detect_best_backend()`, following the same pattern
-as `negcycle`: the top-level `__init__.py` imports one backend module such as
-`massive_speedup._generic`, `massive_speedup._sse`, `massive_speedup._avx`, or
-`massive_speedup._avx512`. The package also exposes `available_backends()` and
-`backend_is_available(...)` for explicit inspection. The common C++ subclasses
-own the stub parse methods, and the backend-specialized modules currently only
-override the virtual `split_on_commas(std::string, std::vector<std::string>&)`.
+`massive_speedup.FlatFiles` and `massive_speedup.WebSocket` are exposed from the
+single native module, `massive_speedup._native`. The top-level package imports
+that module directly and falls back to the pure Python compatibility layer only
+when the native extension is unavailable.
 
 
 sudo apt install cmake g++ libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev libgflags-dev protobuf-compiler-grpc
-
 

@@ -7,11 +7,12 @@
 #include <nanobind/stl/unordered_map.h>
 #include <nanobind/stl/vector.h>
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <vector>
 
-#include "backends/generic.hpp"
+#include "native.hpp"
 #include "massive_speedup/parsers.hpp"
 
 namespace massive_speedup::bindings {
@@ -257,192 +258,305 @@ void bind_window_start_ordering(nb::class_<RowType>& class_) {
           nb::is_operator());
 }
 
+inline std::string_view bytes_view(nb::bytes value) {
+  char* buffer = nullptr;
+  Py_ssize_t length = 0;
+  if (PyBytes_AsStringAndSize(value.ptr(), &buffer, &length) != 0) {
+    throw nb::python_error();
+  }
+  return {buffer, static_cast<std::size_t>(length)};
+}
+
+template <typename RowType>
+void construct_row_from_packed(RowType* self, nb::bytes packed) {
+  new (self) RowType(bytes_view(packed));
+}
+
+template <typename RowType>
+RowType row_from_packed(nb::bytes packed) {
+  return RowType::from_packed(bytes_view(packed));
+}
+
+template <typename RowType>
+std::uint64_t participant_timestamp_from_packed(nb::bytes packed) {
+  const auto view = bytes_view(packed);
+  native::detail::require_packed_size("packed row", view.size(), RowType::packed_size);
+  return RowType::participant_timestamp_at(view.data());
+}
+
+template <typename RowType>
+std::uint64_t sip_timestamp_from_packed(nb::bytes packed) {
+  const auto view = bytes_view(packed);
+  native::detail::require_packed_size("packed row", view.size(), RowType::packed_size);
+  return RowType::sip_timestamp_at(view.data());
+}
+
 template <typename Specialization>
 inline void bind_row_models(nb::module_& m, nb::module_& flatfiles) {
   auto stock_trade =
-      nb::class_<backend_generic::StockTrade>(m, "StockTrade")
+      nb::class_<native::StockTrade>(m, "StockTrade")
           .def(
               "__init__",
-              [](backend_generic::StockTrade* self,
+              [](native::StockTrade* self,
                  const std::vector<std::string>& fields) {
-                new (self) backend_generic::StockTrade(
-                    backend_generic::StockTrade::template from_fields<Specialization>(fields));
+                new (self) native::StockTrade(
+                    native::StockTrade::template from_fields<Specialization>(fields));
               },
               nb::arg("fields"))
-          .def_ro("ticker", &backend_generic::StockTrade::ticker)
-          .def_prop_ro("conditions", &backend_generic::StockTrade::conditions_object)
-          .def_ro("correction", &backend_generic::StockTrade::correction)
-          .def_ro("exchange", &backend_generic::StockTrade::exchange)
-          .def_ro("id", &backend_generic::StockTrade::id)
+          .def(
+              "__init__",
+              &construct_row_from_packed<native::StockTrade>,
+              nb::arg("packed"))
+          .def_ro("ticker", &native::StockTrade::ticker)
+          .def_prop_ro("conditions", &native::StockTrade::conditions_object)
+          .def_ro("correction", &native::StockTrade::correction)
+          .def_ro("exchange", &native::StockTrade::exchange)
+          .def_ro("id", &native::StockTrade::id)
           .def_ro(
               "participant_timestamp",
-              &backend_generic::StockTrade::participant_timestamp)
-          .def_ro("price", &backend_generic::StockTrade::price)
+              &native::StockTrade::participant_timestamp)
+          .def_ro("price", &native::StockTrade::price)
           .def_ro(
               "sequence_number",
-              &backend_generic::StockTrade::sequence_number)
-          .def_ro("sip_timestamp", &backend_generic::StockTrade::sip_timestamp)
-          .def_ro("size", &backend_generic::StockTrade::size)
-          .def_ro("tape", &backend_generic::StockTrade::tape)
-          .def_ro("trf_id", &backend_generic::StockTrade::trf_id)
-          .def_ro("trf_timestamp", &backend_generic::StockTrade::trf_timestamp)
+              &native::StockTrade::sequence_number)
+          .def_ro("sip_timestamp", &native::StockTrade::sip_timestamp)
+          .def_ro("size", &native::StockTrade::size)
+          .def_ro("tape", &native::StockTrade::tape)
+          .def_ro("trf_id", &native::StockTrade::trf_id)
+          .def_ro("trf_timestamp", &native::StockTrade::trf_timestamp)
           .def(
               "__iter__",
-              [](const backend_generic::StockTrade& self) {
-                return backend_generic::detail::tuple_iterator(self.python_fields());
+              [](const native::StockTrade& self) {
+                return native::detail::tuple_iterator(self.python_fields());
               })
-          .def("__hash__", &backend_generic::StockTrade::hash_value)
-          .def("__str__", &backend_generic::StockTrade::repr)
-          .def("__repr__", &backend_generic::StockTrade::repr)
+          .def("pack", &native::StockTrade::packed_bytes)
+          .def_static(
+              "from_packed",
+              &row_from_packed<native::StockTrade>,
+              nb::arg("packed"))
+          .def_static(
+              "participant_timestamp_from_packed",
+              &participant_timestamp_from_packed<native::StockTrade>,
+              nb::arg("packed"))
+          .def_static(
+              "sip_timestamp_from_packed",
+              &sip_timestamp_from_packed<native::StockTrade>,
+              nb::arg("packed"))
+          .def("__hash__", &native::StockTrade::hash_value)
+          .def("__str__", &native::StockTrade::repr)
+          .def("__repr__", &native::StockTrade::repr)
           .def(
               "__eq__",
-              [](const backend_generic::StockTrade& lhs,
-                 const backend_generic::StockTrade& rhs) { return lhs == rhs; },
+              [](const native::StockTrade& lhs,
+                 const native::StockTrade& rhs) { return lhs == rhs; },
               nb::is_operator());
+  stock_trade.attr("packed_size") = nb::int_(native::StockTrade::packed_size);
+  stock_trade.attr("packed_participant_timestamp_offset") =
+      nb::int_(native::StockTrade::packed_participant_timestamp_offset);
+  stock_trade.attr("packed_sip_timestamp_offset") =
+      nb::int_(native::StockTrade::packed_sip_timestamp_offset);
   bind_participant_timestamp_ordering(stock_trade);
 
   auto stock_quote =
-      nb::class_<backend_generic::StockQuote>(m, "StockQuote")
+      nb::class_<native::StockQuote>(m, "StockQuote")
           .def(
               "__init__",
-              [](backend_generic::StockQuote* self,
+              [](native::StockQuote* self,
                  const std::vector<std::string>& fields) {
-                new (self) backend_generic::StockQuote(
-                    backend_generic::StockQuote::template from_fields<Specialization>(fields));
+                new (self) native::StockQuote(
+                    native::StockQuote::template from_fields<Specialization>(fields));
               },
               nb::arg("fields"))
-          .def_ro("ticker", &backend_generic::StockQuote::ticker)
-          .def_ro("ask_exchange", &backend_generic::StockQuote::ask_exchange)
-          .def_ro("ask_price", &backend_generic::StockQuote::ask_price)
-          .def_ro("ask_size", &backend_generic::StockQuote::ask_size)
-          .def_ro("bid_exchange", &backend_generic::StockQuote::bid_exchange)
-          .def_ro("bid_price", &backend_generic::StockQuote::bid_price)
-          .def_ro("bid_size", &backend_generic::StockQuote::bid_size)
-          .def_prop_ro("conditions", &backend_generic::StockQuote::conditions_object)
-          .def_prop_ro("indicators", &backend_generic::StockQuote::indicators_object)
+          .def(
+              "__init__",
+              &construct_row_from_packed<native::StockQuote>,
+              nb::arg("packed"))
+          .def_ro("ticker", &native::StockQuote::ticker)
+          .def_ro("ask_exchange", &native::StockQuote::ask_exchange)
+          .def_ro("ask_price", &native::StockQuote::ask_price)
+          .def_ro("ask_size", &native::StockQuote::ask_size)
+          .def_ro("bid_exchange", &native::StockQuote::bid_exchange)
+          .def_ro("bid_price", &native::StockQuote::bid_price)
+          .def_ro("bid_size", &native::StockQuote::bid_size)
+          .def_prop_ro("conditions", &native::StockQuote::conditions_object)
+          .def_prop_ro("indicators", &native::StockQuote::indicators_object)
           .def_ro(
               "participant_timestamp",
-              &backend_generic::StockQuote::participant_timestamp)
+              &native::StockQuote::participant_timestamp)
           .def_ro(
               "sequence_number",
-              &backend_generic::StockQuote::sequence_number)
-          .def_ro("sip_timestamp", &backend_generic::StockQuote::sip_timestamp)
-          .def_ro("tape", &backend_generic::StockQuote::tape)
-          .def_ro("trf_timestamp", &backend_generic::StockQuote::trf_timestamp)
+              &native::StockQuote::sequence_number)
+          .def_ro("sip_timestamp", &native::StockQuote::sip_timestamp)
+          .def_ro("tape", &native::StockQuote::tape)
+          .def_ro("trf_timestamp", &native::StockQuote::trf_timestamp)
           .def(
               "__iter__",
-              [](const backend_generic::StockQuote& self) {
-                return backend_generic::detail::tuple_iterator(self.python_fields());
+              [](const native::StockQuote& self) {
+                return native::detail::tuple_iterator(self.python_fields());
               })
-          .def("__hash__", &backend_generic::StockQuote::hash_value)
-          .def("__str__", &backend_generic::StockQuote::repr)
-          .def("__repr__", &backend_generic::StockQuote::repr)
+          .def("pack", &native::StockQuote::packed_bytes)
+          .def_static(
+              "from_packed",
+              &row_from_packed<native::StockQuote>,
+              nb::arg("packed"))
+          .def_static(
+              "participant_timestamp_from_packed",
+              &participant_timestamp_from_packed<native::StockQuote>,
+              nb::arg("packed"))
+          .def_static(
+              "sip_timestamp_from_packed",
+              &sip_timestamp_from_packed<native::StockQuote>,
+              nb::arg("packed"))
+          .def("__hash__", &native::StockQuote::hash_value)
+          .def("__str__", &native::StockQuote::repr)
+          .def("__repr__", &native::StockQuote::repr)
           .def(
               "__eq__",
-              [](const backend_generic::StockQuote& lhs,
-                 const backend_generic::StockQuote& rhs) { return lhs == rhs; },
+              [](const native::StockQuote& lhs,
+                 const native::StockQuote& rhs) { return lhs == rhs; },
               nb::is_operator());
+  stock_quote.attr("packed_size") = nb::int_(native::StockQuote::packed_size);
+  stock_quote.attr("packed_participant_timestamp_offset") =
+      nb::int_(native::StockQuote::packed_participant_timestamp_offset);
+  stock_quote.attr("packed_sip_timestamp_offset") =
+      nb::int_(native::StockQuote::packed_sip_timestamp_offset);
   bind_participant_timestamp_ordering(stock_quote);
 
   auto currency_quote =
-      nb::class_<backend_generic::CurrencyQuote>(m, "CurrencyQuote")
+      nb::class_<native::CurrencyQuote>(m, "CurrencyQuote")
           .def(
               "__init__",
-              [](backend_generic::CurrencyQuote* self,
+              [](native::CurrencyQuote* self,
                  const std::vector<std::string>& fields) {
-                new (self) backend_generic::CurrencyQuote(
-                    backend_generic::CurrencyQuote::template from_fields<Specialization>(fields));
+                new (self) native::CurrencyQuote(
+                    native::CurrencyQuote::template from_fields<Specialization>(fields));
               },
               nb::arg("fields"))
-          .def_ro("ticker", &backend_generic::CurrencyQuote::ticker)
-          .def_ro("ask_exchange", &backend_generic::CurrencyQuote::ask_exchange)
-          .def_ro("ask_price", &backend_generic::CurrencyQuote::ask_price)
-          .def_ro("bid_exchange", &backend_generic::CurrencyQuote::bid_exchange)
-          .def_ro("bid_price", &backend_generic::CurrencyQuote::bid_price)
-          .def_prop_ro("tickers", &backend_generic::CurrencyQuote::tickers_object)
+          .def(
+              "__init__",
+              &construct_row_from_packed<native::CurrencyQuote>,
+              nb::arg("packed"))
+          .def_ro("ticker", &native::CurrencyQuote::ticker)
+          .def_ro("ask_exchange", &native::CurrencyQuote::ask_exchange)
+          .def_ro("ask_price", &native::CurrencyQuote::ask_price)
+          .def_ro("bid_exchange", &native::CurrencyQuote::bid_exchange)
+          .def_ro("bid_price", &native::CurrencyQuote::bid_price)
+          .def_prop_ro("tickers", &native::CurrencyQuote::tickers_object)
           .def_ro(
               "participant_timestamp",
-              &backend_generic::CurrencyQuote::participant_timestamp)
+              &native::CurrencyQuote::participant_timestamp)
           .def(
               "__iter__",
-              [](const backend_generic::CurrencyQuote& self) {
-                return backend_generic::detail::tuple_iterator(self.python_fields());
+              [](const native::CurrencyQuote& self) {
+                return native::detail::tuple_iterator(self.python_fields());
               })
-          .def("__hash__", &backend_generic::CurrencyQuote::hash_value)
-          .def("__str__", &backend_generic::CurrencyQuote::repr)
-          .def("__repr__", &backend_generic::CurrencyQuote::repr)
+          .def("pack", &native::CurrencyQuote::packed_bytes)
+          .def_static(
+              "from_packed",
+              &row_from_packed<native::CurrencyQuote>,
+              nb::arg("packed"))
+          .def_static(
+              "participant_timestamp_from_packed",
+              &participant_timestamp_from_packed<native::CurrencyQuote>,
+              nb::arg("packed"))
+          .def("__hash__", &native::CurrencyQuote::hash_value)
+          .def("__str__", &native::CurrencyQuote::repr)
+          .def("__repr__", &native::CurrencyQuote::repr)
           .def(
               "__eq__",
-              [](const backend_generic::CurrencyQuote& lhs,
-                 const backend_generic::CurrencyQuote& rhs) { return lhs == rhs; },
+              [](const native::CurrencyQuote& lhs,
+                 const native::CurrencyQuote& rhs) { return lhs == rhs; },
               nb::is_operator());
+  currency_quote.attr("packed_size") = nb::int_(native::CurrencyQuote::packed_size);
+  currency_quote.attr("packed_participant_timestamp_offset") =
+      nb::int_(native::CurrencyQuote::packed_participant_timestamp_offset);
   bind_participant_timestamp_ordering(currency_quote);
 
   auto stock_aggregate =
-      nb::class_<backend_generic::StockAggregate>(m, "StockAggregate")
+      nb::class_<native::StockAggregate>(m, "StockAggregate")
           .def(
               "__init__",
-              [](backend_generic::StockAggregate* self,
+              [](native::StockAggregate* self,
                  const std::vector<std::string>& fields) {
-                new (self) backend_generic::StockAggregate(
-                    backend_generic::StockAggregate::template from_fields<Specialization>(fields));
+                new (self) native::StockAggregate(
+                    native::StockAggregate::template from_fields<Specialization>(fields));
               },
               nb::arg("fields"))
-          .def_ro("ticker", &backend_generic::StockAggregate::ticker)
-          .def_ro("volume", &backend_generic::StockAggregate::volume)
-          .def_ro("open", &backend_generic::StockAggregate::open)
-          .def_ro("close", &backend_generic::StockAggregate::close)
-          .def_ro("high", &backend_generic::StockAggregate::high)
-          .def_ro("low", &backend_generic::StockAggregate::low)
-          .def_ro("window_start", &backend_generic::StockAggregate::window_start)
-          .def_ro("transactions", &backend_generic::StockAggregate::transactions)
+          .def(
+              "__init__",
+              &construct_row_from_packed<native::StockAggregate>,
+              nb::arg("packed"))
+          .def_ro("ticker", &native::StockAggregate::ticker)
+          .def_ro("volume", &native::StockAggregate::volume)
+          .def_ro("open", &native::StockAggregate::open)
+          .def_ro("close", &native::StockAggregate::close)
+          .def_ro("high", &native::StockAggregate::high)
+          .def_ro("low", &native::StockAggregate::low)
+          .def_ro("window_start", &native::StockAggregate::window_start)
+          .def_ro("transactions", &native::StockAggregate::transactions)
           .def(
               "__iter__",
-              [](const backend_generic::StockAggregate& self) {
-                return backend_generic::detail::tuple_iterator(self.python_fields());
+              [](const native::StockAggregate& self) {
+                return native::detail::tuple_iterator(self.python_fields());
               })
-          .def("__hash__", &backend_generic::StockAggregate::hash_value)
-          .def("__str__", &backend_generic::StockAggregate::repr)
-          .def("__repr__", &backend_generic::StockAggregate::repr)
+          .def("pack", &native::StockAggregate::packed_bytes)
+          .def_static(
+              "from_packed",
+              &row_from_packed<native::StockAggregate>,
+              nb::arg("packed"))
+          .def("__hash__", &native::StockAggregate::hash_value)
+          .def("__str__", &native::StockAggregate::repr)
+          .def("__repr__", &native::StockAggregate::repr)
           .def(
               "__eq__",
-              [](const backend_generic::StockAggregate& lhs,
-                 const backend_generic::StockAggregate& rhs) { return lhs == rhs; },
+              [](const native::StockAggregate& lhs,
+                 const native::StockAggregate& rhs) { return lhs == rhs; },
               nb::is_operator());
+  stock_aggregate.attr("packed_size") = nb::int_(native::StockAggregate::packed_size);
   bind_window_start_ordering(stock_aggregate);
 
   auto currency_aggregate =
-      nb::class_<backend_generic::CurrencyAggregate>(m, "CurrencyAggregate")
+      nb::class_<native::CurrencyAggregate>(m, "CurrencyAggregate")
           .def(
               "__init__",
-              [](backend_generic::CurrencyAggregate* self,
+              [](native::CurrencyAggregate* self,
                  const std::vector<std::string>& fields) {
-                new (self) backend_generic::CurrencyAggregate(
-                    backend_generic::CurrencyAggregate::template from_fields<Specialization>(fields));
+                new (self) native::CurrencyAggregate(
+                    native::CurrencyAggregate::template from_fields<Specialization>(fields));
               },
               nb::arg("fields"))
-          .def_ro("ticker", &backend_generic::CurrencyAggregate::ticker)
-          .def_ro("volume", &backend_generic::CurrencyAggregate::volume)
-          .def_ro("open", &backend_generic::CurrencyAggregate::open)
-          .def_ro("close", &backend_generic::CurrencyAggregate::close)
-          .def_ro("high", &backend_generic::CurrencyAggregate::high)
-          .def_ro("low", &backend_generic::CurrencyAggregate::low)
-          .def_ro("window_start", &backend_generic::CurrencyAggregate::window_start)
-          .def_ro("transactions", &backend_generic::CurrencyAggregate::transactions)
-          .def_prop_ro("tickers", &backend_generic::CurrencyAggregate::tickers_object)
+          .def(
+              "__init__",
+              &construct_row_from_packed<native::CurrencyAggregate>,
+              nb::arg("packed"))
+          .def_ro("ticker", &native::CurrencyAggregate::ticker)
+          .def_ro("volume", &native::CurrencyAggregate::volume)
+          .def_ro("open", &native::CurrencyAggregate::open)
+          .def_ro("close", &native::CurrencyAggregate::close)
+          .def_ro("high", &native::CurrencyAggregate::high)
+          .def_ro("low", &native::CurrencyAggregate::low)
+          .def_ro("window_start", &native::CurrencyAggregate::window_start)
+          .def_ro("transactions", &native::CurrencyAggregate::transactions)
+          .def_prop_ro("tickers", &native::CurrencyAggregate::tickers_object)
           .def(
               "__iter__",
-              [](const backend_generic::CurrencyAggregate& self) {
-                return backend_generic::detail::tuple_iterator(self.python_fields());
+              [](const native::CurrencyAggregate& self) {
+                return native::detail::tuple_iterator(self.python_fields());
               })
-          .def("__hash__", &backend_generic::CurrencyAggregate::hash_value)
-          .def("__str__", &backend_generic::CurrencyAggregate::repr)
-          .def("__repr__", &backend_generic::CurrencyAggregate::repr)
+          .def("pack", &native::CurrencyAggregate::packed_bytes)
+          .def_static(
+              "from_packed",
+              &row_from_packed<native::CurrencyAggregate>,
+              nb::arg("packed"))
+          .def("__hash__", &native::CurrencyAggregate::hash_value)
+          .def("__str__", &native::CurrencyAggregate::repr)
+          .def("__repr__", &native::CurrencyAggregate::repr)
           .def(
               "__eq__",
-              [](const backend_generic::CurrencyAggregate& lhs,
-                 const backend_generic::CurrencyAggregate& rhs) { return lhs == rhs; },
+              [](const native::CurrencyAggregate& lhs,
+                 const native::CurrencyAggregate& rhs) { return lhs == rhs; },
               nb::is_operator());
+  currency_aggregate.attr("packed_size") = nb::int_(native::CurrencyAggregate::packed_size);
   bind_window_start_ordering(currency_aggregate);
 
   flatfiles.attr("StockTrade") = m.attr("StockTrade");
@@ -900,8 +1014,8 @@ void bind_currency_flatfile_asset(
 }
 
 template <template <typename> class Impl>
-void bind_backend_module(nb::module_& m, const char* alias_prefix) {
-  m.doc() = "Backend-specialized parser bindings.";
+void bind_native_module(nb::module_& m, const char* alias_prefix) {
+  m.doc() = "Native parser bindings.";
   const std::string gzip_iterator_name = std::string(alias_prefix) + "GzipLinesIterator";
   const std::string stock_trade_iterator_name =
       std::string(alias_prefix) + "StockTradeRowsIterator";

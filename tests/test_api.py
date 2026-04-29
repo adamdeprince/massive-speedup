@@ -758,11 +758,92 @@ def test_currency_tickers_are_globally_interned() -> None:
     assert quote.tickers is aggregate.tickers
 
 
-def test_direct_generic_backend_module_exports_api() -> None:
+def test_build_database_parser_is_file_only() -> None:
+    from massive_speedup import build_database
+
+    parser = build_database.build_parser()
+    args = parser.parse_args(
+        [
+            "--input-file",
+            "input.csv.gz",
+            "--database",
+            "db",
+            "--type",
+            "stock_quote",
+        ]
+    )
+
+    assert args.input_file == Path("input.csv.gz")
+    assert args.database == Path("db")
+    assert args.record_type == "stock_quote"
+    assert not hasattr(args, "input_stdin")
+
+
+def test_write_database_groups_records_by_ticker_using_first_record_date(tmp_path: Path) -> None:
+    from massive_speedup import build_database
+
+    class Row:
+        def __init__(self, ticker: str, sip_timestamp: int, payload: bytes) -> None:
+            self.ticker = ticker
+            self.sip_timestamp = sip_timestamp
+            self.participant_timestamp = sip_timestamp
+            self._payload = payload
+
+        def pack(self) -> bytes:
+            return self._payload
+
+    one_day_ns = 86_400_000_000_000
+    rows = [
+        Row("A", 0, b"a1"),
+        Row("A", one_day_ns, b"a2"),
+        Row("B", one_day_ns, b"b1"),
+    ]
+
+    rows_written = build_database.write_database(rows, tmp_path / "db", "stock_trade")
+
+    root = tmp_path / "db" / "stock_trade" / "1970-01-01"
+    assert rows_written == 3
+    assert (root / "A").read_bytes() == b"a1a2"
+    assert (root / "B").read_bytes() == b"b1"
+    assert not (tmp_path / "db" / "stock_trade" / "1970-01-02").exists()
+
+
+def test_write_database_creates_database_root_for_empty_input(tmp_path: Path) -> None:
+    from massive_speedup import build_database
+
+    database = tmp_path / "db"
+
+    rows_written = build_database.write_database([], database, "stock_trade")
+
+    assert rows_written == 0
+    assert database.is_dir()
+
+
+def test_write_database_uses_participant_timestamp_for_currency_quote_date(
+    tmp_path: Path,
+) -> None:
+    from massive_speedup import build_database
+
+    class Row:
+        ticker = "C:AED-AUD"
+        participant_timestamp = 0
+
+        def pack(self) -> bytes:
+            return b"cq"
+
+    rows_written = build_database.write_database([Row()], tmp_path / "db", "currency_quote")
+
+    assert rows_written == 1
+    assert (
+        tmp_path / "db" / "currency_quote" / "1970-01-01" / "C:AED-AUD"
+    ).read_bytes() == b"cq"
+
+
+def test_direct_native_module_exports_api() -> None:
     try:
-        module = import_module("massive_speedup._generic")
+        module = import_module("massive_speedup._native")
     except ImportError:
-        pytest.skip("massive_speedup._generic is not built in this environment")
+        pytest.skip("massive_speedup._native is not built in this environment")
 
     assert hasattr(module, "FlatFiles")
     assert hasattr(module, "WebSocket")
@@ -774,11 +855,11 @@ def test_direct_generic_backend_module_exports_api() -> None:
     assert hasattr(module, "gzip_lines")
 
 
-def test_direct_generic_backend_module_classes_are_callable_when_built() -> None:
+def test_direct_native_module_classes_are_callable_when_built() -> None:
     try:
-        module = import_module("massive_speedup._generic")
+        module = import_module("massive_speedup._native")
     except ImportError:
-        pytest.skip("massive_speedup._generic is not built in this environment")
+        pytest.skip("massive_speedup._native is not built in this environment")
 
     path = Path(__file__).resolve().parent / "data" / "hello_world.txt.gz"
     message_summary = module.WebSocket.Messages.parse_message(b'{"ev":"status"}')
@@ -807,12 +888,120 @@ def test_direct_generic_backend_module_classes_are_callable_when_built() -> None
     assert message_summary["asset_class"] == "messages"
 
 
-def test_parsed_rows_use_instance_lifetime_bitset_cache() -> None:
-    generic_source = Path("src/cpp/backends/generic.hpp").read_text(encoding="utf-8")
+def test_native_row_models_pack_roundtrip_and_extract_timestamps_when_built() -> None:
+    try:
+        module = import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
 
-    assert "class BitsetParseCache" in generic_source
-    assert "detail::BitsetParseCache<96> bitset_cache_;" in generic_source
-    assert "row = Implementation::parse_trade_row(line, bitset_cache_);" in generic_source
-    assert "row = Implementation::parse_quote_row(line, bitset_cache_);" in generic_source
-    assert "result.conditions = bitset_cache.get_or_parse(" in generic_source
-    assert "result.indicators = bitset_cache.get_or_parse(" in generic_source
+    def assert_roundtrip(row_type, fields):
+        row = row_type(fields)
+        packed = row.pack()
+        assert isinstance(packed, bytes)
+        assert len(packed) == row_type.packed_size
+        assert row_type.from_packed(packed) == row
+        assert row_type(packed) == row
+        return row, packed
+
+    trade, packed_trade = assert_roundtrip(
+        module.StockTrade,
+        [
+            "A",
+            "12,37",
+            "0",
+            "12",
+            "62879131135034",
+            "1769161728012624580",
+            "137.73",
+            "4798",
+            "1769161728012983416",
+            "15",
+            "1",
+            "0",
+            "0",
+        ],
+    )
+    quote, packed_quote = assert_roundtrip(
+        module.StockQuote,
+        [
+            "A",
+            "8",
+            "0.0",
+            "0",
+            "8",
+            "0.0",
+            "0",
+            "1,81",
+            "",
+            "1764147540102233000",
+            "322",
+            "1764147540102526248",
+            "1",
+            "0",
+        ],
+    )
+    currency_quote, packed_currency_quote = assert_roundtrip(
+        module.CurrencyQuote,
+        [
+            "C:AED-AUD",
+            "48",
+            "0.412060465749694",
+            "48",
+            "0.411836123587859",
+            "1757552407000000000",
+        ],
+    )
+    assert_roundtrip(
+        module.StockAggregate,
+        ["A", "18218", "138.0", "137.93", "138.36", "137.75", "1769178600000000000", "125"],
+    )
+    assert_roundtrip(
+        module.CurrencyAggregate,
+        [
+            "C:AED-AUD",
+            "1",
+            "0.397700393851942",
+            "0.397700393851942",
+            "0.397700393851942",
+            "0.397700393851942",
+            "1769133600000000000",
+            "1",
+        ],
+    )
+
+    assert (
+        module.StockTrade.participant_timestamp_from_packed(packed_trade)
+        == trade.participant_timestamp
+    )
+    assert module.StockTrade.sip_timestamp_from_packed(packed_trade) == trade.sip_timestamp
+    assert (
+        module.StockQuote.participant_timestamp_from_packed(packed_quote)
+        == quote.participant_timestamp
+    )
+    assert module.StockQuote.sip_timestamp_from_packed(packed_quote) == quote.sip_timestamp
+    assert (
+        module.CurrencyQuote.participant_timestamp_from_packed(packed_currency_quote)
+        == currency_quote.participant_timestamp
+    )
+
+    trade_offset = module.StockTrade.packed_participant_timestamp_offset
+    quote_offset = module.StockQuote.packed_sip_timestamp_offset
+    assert (
+        int.from_bytes(packed_trade[trade_offset:trade_offset + 8], "little")
+        == trade.participant_timestamp
+    )
+    assert (
+        int.from_bytes(packed_quote[quote_offset:quote_offset + 8], "little")
+        == quote.sip_timestamp
+    )
+
+
+def test_parsed_rows_use_instance_lifetime_bitset_cache() -> None:
+    native_source = Path("src/cpp/native.hpp").read_text(encoding="utf-8")
+
+    assert "class BitsetParseCache" in native_source
+    assert "detail::BitsetParseCache<96> bitset_cache_;" in native_source
+    assert "row = Implementation::parse_trade_row(line, bitset_cache_);" in native_source
+    assert "row = Implementation::parse_quote_row(line, bitset_cache_);" in native_source
+    assert "result.conditions = bitset_cache.get_or_parse(" in native_source
+    assert "result.indicators = bitset_cache.get_or_parse(" in native_source

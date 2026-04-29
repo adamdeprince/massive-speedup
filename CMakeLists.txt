@@ -163,11 +163,11 @@ function(configure_massive_speedup_target target_name)
   endif()
 endfunction()
 
-function(add_massive_speedup_backend module_name backend_source)
+function(add_massive_speedup_module module_name module_source)
   nanobind_add_module(
     ${module_name}
     STABLE_ABI
-    ${backend_source}
+    ${module_source}
     ${MASSIVE_SPEEDUP_COMMON_SOURCES}
   )
 
@@ -175,4 +175,4 @@ function(add_massive_speedup_backend module_name backend_source)
   install(TARGETS ${module_name} LIBRARY DESTINATION massive_speedup)
 endfunction()
 
-add_massive_speedup_backend(_generic src/cpp/backends/generic.cpp)
+add_massive_speedup_module(_native src/cpp/native.cpp)

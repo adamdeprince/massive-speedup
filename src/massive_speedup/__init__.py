@@ -1,4 +1,4 @@
-"""Python bootstrap for the generic nanobind module."""
+"""Python bootstrap for the native nanobind module."""
 
 from types import ModuleType
 import sys
@@ -175,7 +175,7 @@ def _install_currency_api(module: ModuleType) -> None:
 
 
 try:
-    from ._generic import *  # noqa: F403
+    from ._native import *  # noqa: F403
 except ImportError:
     from ._fallback import *  # noqa: F403
 

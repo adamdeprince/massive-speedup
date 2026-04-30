@@ -1,6 +1,9 @@
 from pathlib import Path
 from importlib import import_module
+import datetime as dt
 import gzip
+import sys
+import types
 
 import pytest
 from massive_speedup import (
@@ -950,8 +953,11 @@ def test_direct_native_module_exports_api() -> None:
     assert hasattr(module, "StockTrade")
     assert hasattr(module, "StockQuote")
     assert hasattr(module, "StockAggregate")
+    assert hasattr(module, "StockTradeDatabase")
+    assert hasattr(module, "StockQuoteDatabase")
     assert hasattr(module, "CurrencyQuote")
     assert hasattr(module, "CurrencyAggregate")
+    assert hasattr(module, "CurrencyQuoteDatabase")
     assert hasattr(module, "gzip_lines")
     assert hasattr(module, "build_database_file")
 
@@ -1104,6 +1110,370 @@ def test_native_row_models_pack_roundtrip_and_extract_timestamps_when_built() ->
         int.from_bytes(packed_quote[quote_offset:quote_offset + 8], "little")
         == quote.sip_timestamp
     )
+
+
+def test_native_quote_and_trade_aggregators_yield_namedtuple_rows() -> None:
+    try:
+        module = import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
+
+    assert module.FlatFiles.Stock.Trade.Aggregator is module.StockTradeAggregator
+    assert module.FlatFiles.Stock.Quote.Aggregator is module.StockQuoteAggregator
+    assert module.FlatFiles.currency.Quote.Aggregator is module.CurrencyQuoteAggregator
+
+    trade_rows = [
+        module.StockTrade(
+            [
+                "A",
+                "",
+                "0",
+                "8",
+                "1",
+                "1000000000",
+                "10.0",
+                "1",
+                "1000000000",
+                "100",
+                "1",
+                "0",
+                "0",
+            ]
+        ),
+        module.StockTrade(
+            [
+                "A",
+                "",
+                "0",
+                "8",
+                "2",
+                "1500000000",
+                "14.0",
+                "2",
+                "1500000000",
+                "300",
+                "1",
+                "0",
+                "0",
+            ]
+        ),
+        module.StockTrade(
+            [
+                "A",
+                "",
+                "0",
+                "8",
+                "3",
+                "2100000000",
+                "7.0",
+                "3",
+                "2100000000",
+                "50",
+                "1",
+                "0",
+                "0",
+            ]
+        ),
+    ]
+    trade_aggregates = list(module.StockTradeAggregator(trade_rows, interval_seconds=1))
+    assert len(trade_aggregates) == 2
+    first_trade = trade_aggregates[0]
+    assert isinstance(first_trade, tuple)
+    assert first_trade._fields == (
+        "ticker",
+        "open",
+        "close",
+        "high",
+        "low",
+        "avg",
+        "volume_weighted_avg",
+        "volume",
+        "window_start",
+        "transactions",
+        "stddev",
+    )
+    assert first_trade.ticker == "A"
+    assert first_trade.open == 10.0
+    assert first_trade.close == 14.0
+    assert first_trade.high == 14.0
+    assert first_trade.low == 10.0
+    assert first_trade.avg == 12.0
+    assert first_trade.volume_weighted_avg == 13.0
+    assert first_trade.volume == 400
+    assert first_trade.window_start == 1_000_000_000
+    assert first_trade.transactions == 2
+    assert first_trade.stddev == 2.0
+    assert trade_aggregates[1].window_start == 2_000_000_000
+
+    quote_rows = [
+        module.StockQuote(
+            [
+                "A",
+                "8",
+                "10.0",
+                "2",
+                "8",
+                "8.0",
+                "1",
+                "",
+                "",
+                "100000000",
+                "1",
+                "100000000",
+                "1",
+                "0",
+            ]
+        ),
+        module.StockQuote(
+            [
+                "A",
+                "8",
+                "14.0",
+                "6",
+                "8",
+                "10.0",
+                "3",
+                "",
+                "",
+                "900000000",
+                "2",
+                "900000000",
+                "1",
+                "0",
+            ]
+        ),
+    ]
+    quote = next(module.StockQuoteAggregator(quote_rows, interval_seconds=1))
+    assert quote._fields == (
+        "ticker",
+        "ask_open",
+        "ask_close",
+        "ask_high",
+        "ask_low",
+        "ask_avg",
+        "ask_volume_weighted_avg",
+        "ask_volume",
+        "ask_stddev",
+        "bid_open",
+        "bid_close",
+        "bid_high",
+        "bid_low",
+        "bid_avg",
+        "bid_volume_weighted_avg",
+        "bid_volume",
+        "bid_stddev",
+        "window_start",
+        "transactions",
+    )
+    assert quote.ask_avg == 12.0
+    assert quote.ask_volume_weighted_avg == 13.0
+    assert quote.ask_volume == 8
+    assert quote.ask_stddev == 2.0
+    assert quote.bid_avg == 9.0
+    assert quote.bid_volume_weighted_avg == pytest.approx(9.5)
+    assert quote.bid_volume == 4
+    assert quote.bid_stddev == 1.0
+
+    currency_rows = [
+        module.CurrencyQuote(["C:AED-AUD", "48", "1.0", "48", "0.8", "100000000"]),
+        module.CurrencyQuote(["C:AED-AUD", "48", "1.4", "48", "1.0", "900000000"]),
+    ]
+    currency = next(module.CurrencyQuoteAggregator(currency_rows, interval_seconds=1))
+    assert "volume" not in currency._fields
+    assert currency.ticker == "C:AED-AUD"
+    assert currency.ask_avg == pytest.approx(1.2)
+    assert currency.ask_stddev == pytest.approx(0.2)
+    assert currency.bid_avg == pytest.approx(0.9)
+    assert currency.bid_stddev == pytest.approx(0.1)
+    assert currency.window_start == 0
+    assert currency.transactions == 2
+
+
+def test_native_database_record_files_mmap_iter_index_search_and_market_calendar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    try:
+        module = import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
+
+    database = tmp_path / "db"
+    date = "1970-01-01"
+    date_object = dt.date(1970, 1, 1)
+
+    def write_records(record_type: str, ticker: str, rows) -> Path:
+        path = database / record_type / date / ticker
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"".join(row.pack() for row in rows))
+        return path
+
+    trade_rows = [
+        module.StockTrade(
+            [
+                "A",
+                "12",
+                "0",
+                "8",
+                "52983525035849",
+                "1000",
+                "129.79",
+                "6876",
+                "1000",
+                "100",
+                "1",
+                "0",
+                "0",
+            ]
+        ),
+        module.StockTrade(
+            [
+                "A",
+                "37",
+                "0",
+                "8",
+                "52983525035850",
+                "2000",
+                "129.80",
+                "6877",
+                "2000",
+                "100",
+                "1",
+                "0",
+                "0",
+            ]
+        ),
+    ]
+    write_records("stock_trade", "A", trade_rows)
+
+    trade_records = module.StockTradeDatabase(database, date_object, "A")
+    assert len(trade_records) == 2
+    assert trade_records.ticker == "A"
+    assert trade_records.date == date
+    assert trade_records.path == database / "stock_trade" / date / "A"
+    assert trade_records[0] == trade_rows[0]
+    assert trade_records[-1] == trade_rows[1]
+    assert list(trade_records) == trade_rows
+    assert trade_records.index_before_timestamp(999) == -1
+    assert trade_records.index_before_timestamp(1000) == 0
+    assert trade_records.index_before_timestamp(1999) == 0
+    assert trade_records.index_before_timestamp(2000) == 1
+    assert trade_records.index_before_timestamp(2000, galloping=True) == 1
+    assert trade_records.index_before_timestamp(dt.time(0, 0, 0, 1)) == 0
+    assert list(trade_records.iterate_bounded(1000)) == trade_rows
+    assert list(trade_records.iterate_bounded(dt.time(0, 0, 0, 2))) == [trade_rows[1]]
+    assert list(trade_records.iterate_bounded(1000, 1999)) == [trade_rows[0]]
+    assert list(trade_records.iterate_bounded(dt.time(0, 0, 0, 1), dt.time(0, 0, 0, 1))) == [
+        trade_rows[0]
+    ]
+    assert list(trade_records.iterate_bounded(1001, 1999)) == []
+    assert trade_records.find_before_participant_timestamp(1500, 1000) == trade_rows[0]
+    assert trade_records.find_after_participant_timestamp(1500, 1000) == trade_rows[1]
+    assert (
+        trade_records.find_before_participant_timestamp(dt.time(0, 0, 0, 1))
+        == trade_rows[0]
+    )
+    assert (
+        trade_records.find_after_participant_timestamp(1000.0, 1000, on=True)
+        == trade_rows[0]
+    )
+    assert (
+        trade_records.find_after_participant_timestamp(1500, 1000, galloping=True)
+        == trade_rows[1]
+    )
+
+    quote_rows = [
+        module.StockQuote(
+            [
+                "A",
+                "8",
+                "0.0",
+                "0",
+                "8",
+                "0.0",
+                "0",
+                "1",
+                "",
+                "1000",
+                "322",
+                "1000",
+                "1",
+                "0",
+            ]
+        ),
+        module.StockQuote(
+            [
+                "A",
+                "8",
+                "0.0",
+                "0",
+                "8",
+                "0.0",
+                "0",
+                "1",
+                "",
+                "2000",
+                "323",
+                "2000",
+                "1",
+                "0",
+            ]
+        ),
+    ]
+    write_records("stock_quote", "A", quote_rows)
+    quote_records = module.StockQuoteDatabase(database, date, "A")
+    assert quote_records[1] == quote_rows[1]
+    assert quote_records.index_before_timestamp(1999) == 0
+    assert quote_records.index_before_timestamp(dt.time(0, 0, 0, 2), galloping=True) == 1
+    assert list(quote_records.iterate_bounded(1000, 1999)) == [quote_rows[0]]
+    assert list(quote_records.iterate_bounded(dt.time(0, 0, 0, 2))) == [quote_rows[1]]
+    assert quote_records.find_after_participant_timestamp(1500, 1000) == quote_rows[1]
+    assert quote_records.find_before_participant_timestamp(2000, on=False) == quote_rows[0]
+
+    currency_rows = [
+        module.CurrencyQuote(["C:AED-AUD", "48", "0.412", "48", "0.411", "1000"]),
+        module.CurrencyQuote(["C:AED-AUD", "48", "0.413", "48", "0.412", "2000"]),
+    ]
+    write_records("currency_quote", "C:AED-AUD", currency_rows)
+    currency_records = module.CurrencyQuoteDatabase(database, date, "C:AED-AUD")
+    assert currency_records[0] == currency_rows[0]
+    assert currency_records.index_before_timestamp(1999) == 0
+    assert currency_records.index_before_timestamp(dt.time(0, 0, 0, 2), galloping=True) == 1
+    assert list(currency_records.iterate_bounded(1000, 1999)) == [currency_rows[0]]
+    assert list(currency_records.iterate_bounded(dt.time(0, 0, 0, 2))) == [currency_rows[1]]
+    assert currency_records.find_before_participant_timestamp(1500, 1000) == currency_rows[0]
+    assert currency_records.find_after_participant_timestamp(1500, galloping=True) == currency_rows[1]
+
+    class FakeTimestamp:
+        def __init__(self, value: int) -> None:
+            self.value = value
+
+    class FakeRow:
+        def __getitem__(self, key: str) -> FakeTimestamp:
+            return FakeTimestamp({"market_open": 123, "market_close": 456}[key])
+
+    class FakeILoc:
+        def __getitem__(self, index: int) -> FakeRow:
+            assert index == 0
+            return FakeRow()
+
+    class FakeSchedule:
+        empty = False
+        iloc = FakeILoc()
+
+    class FakeCalendar:
+        def schedule(self, *, start_date: str, end_date: str) -> FakeSchedule:
+            assert start_date == date
+            assert end_date == date
+            return FakeSchedule()
+
+    fake_pmc = types.ModuleType("pandas_market_calendars")
+    fake_pmc.get_calendar = lambda name: FakeCalendar()
+    monkeypatch.setitem(sys.modules, "pandas_market_calendars", fake_pmc)
+
+    assert trade_records.market_open == 123
+    assert trade_records.market_close == 456
+    assert quote_records.market_open == 123
 
 
 def test_parsed_rows_use_instance_lifetime_bitset_cache() -> None:

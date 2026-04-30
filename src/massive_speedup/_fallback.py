@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import gzip
 import sys
+from collections import namedtuple
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Iterator
@@ -1024,15 +1025,51 @@ FlatFiles.StockQuotes = StockQuote
 FlatFiles.CurrencyQuote = CurrencyQuote
 FlatFiles.CurrencyAggregate = CurrencyAggregate
 
+StockTradeAggregation = namedtuple(
+    "StockTradeAggregation",
+    "ticker open close high low avg volume_weighted_avg volume window_start "
+    "transactions stddev",
+)
+StockQuoteAggregation = namedtuple(
+    "StockQuoteAggregation",
+    "ticker ask_open ask_close ask_high ask_low ask_avg ask_volume_weighted_avg "
+    "ask_volume ask_stddev bid_open bid_close bid_high bid_low bid_avg "
+    "bid_volume_weighted_avg bid_volume bid_stddev window_start transactions",
+)
+CurrencyQuoteAggregation = namedtuple(
+    "CurrencyQuoteAggregation",
+    "ticker ask_open ask_close ask_high ask_low ask_avg ask_stddev bid_open "
+    "bid_close bid_high bid_low bid_avg bid_stddev window_start transactions",
+)
+
+
+class _NativeOnlyAggregator:
+    def __init__(self, *args, **kwargs):
+        raise RuntimeError("aggregation requires the native massive_speedup extension")
+
+
+class StockTradeAggregator(_NativeOnlyAggregator):
+    pass
+
+
+class StockQuoteAggregator(_NativeOnlyAggregator):
+    pass
+
+
+class CurrencyQuoteAggregator(_NativeOnlyAggregator):
+    pass
+
 FlatFiles.Stock.Trade = SimpleNamespace(
     parse=FlatFileStocksParser.parse_trades,
     parse_raw=FlatFileStocksParser.parse_raw_trades,
     raw_lines=FlatFileStocksParser.raw_lines,
+    Aggregator=StockTradeAggregator,
 )
 FlatFiles.Stock.Quote = SimpleNamespace(
     parse=FlatFileStocksParser.parse_quotes,
     parse_raw=FlatFileStocksParser.parse_raw_quotes,
     raw_lines=FlatFileStocksParser.raw_lines,
+    Aggregator=StockQuoteAggregator,
 )
 FlatFiles.Stock.Aggregate = SimpleNamespace(
     parse=FlatFileStocksParser.parse_minute_aggregates,
@@ -1044,6 +1081,7 @@ FlatFiles.currency.Quote = SimpleNamespace(
     parse=FlatFileCurrenciesParser.parse_quotes,
     parse_raw=FlatFileCurrenciesParser.parse_raw_quotes,
     raw_lines=FlatFileCurrenciesParser.raw_lines,
+    Aggregator=CurrencyQuoteAggregator,
 )
 FlatFiles.currency.Aggregate = SimpleNamespace(
     parse=FlatFileCurrenciesParser.parse_minute_aggregates,
@@ -1054,3 +1092,18 @@ FlatFiles.currency.Aggregate = SimpleNamespace(
 
 def build_database_file(*args, **kwargs):
     raise RuntimeError("build_database_file requires the native massive_speedup extension")
+
+
+class StockTradeDatabase:
+    def __init__(self, *args, **kwargs):
+        raise RuntimeError("StockTradeDatabase requires the native massive_speedup extension")
+
+
+class StockQuoteDatabase:
+    def __init__(self, *args, **kwargs):
+        raise RuntimeError("StockQuoteDatabase requires the native massive_speedup extension")
+
+
+class CurrencyQuoteDatabase:
+    def __init__(self, *args, **kwargs):
+        raise RuntimeError("CurrencyQuoteDatabase requires the native massive_speedup extension")

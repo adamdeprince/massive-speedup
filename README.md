@@ -1,72 +1,204 @@
 # massive-speedup
 
-`massive-speedup` is a Poetry-managed Python package with a nanobind/C++ parser
-module. The native core is centered on:
+Native C++/nanobind readers for Polygon/Massive flat-file market data.
 
-- C++23-native parser and utility code
-- A serializable `Parser` base class implemented in C++
-- Two common parser modules: `FlatFiles` and `WebSocket`
-- A single native extension module, `massive_speedup._native`
-- Native C++ access to `simdjson` and `rapidgzip` so decompression and JSON
-  parsing can stay out of Python bytecode paths
+See [INSTALL.md](INSTALL.md) for installation details and [DEVELOPMENT.md](DEVELOPMENT.md)
+for release and PyPI publishing notes.
 
-## Layout
+## CSV Gzip Files
+
+Install/build the native extension:
+
+```bash
+pip3 install -e .
+```
+
+Iterate parsed records directly from a `.csv.gz` file:
+
+```python
+import massive_speedup
+
+for trade in massive_speedup.FlatFiles.Stock.Trade.parse("trades.csv.gz"):
+    print(trade.ticker, trade.sip_timestamp, trade.price)
+
+for quote in massive_speedup.FlatFiles.Stock.Quote.parse("quotes.csv.gz"):
+    print(quote.ticker, quote.bid_price, quote.ask_price)
+
+for quote in massive_speedup.FlatFiles.currency.Quote.parse("currency_quotes.csv.gz"):
+    print(quote.ticker, quote.participant_timestamp)
+```
+
+You can also iterate raw CSV fields as `bytes` tuples:
+
+```python
+for row in massive_speedup.FlatFiles.Stock.Trade.parse_raw("trades.csv.gz"):
+    print(row[0], row[8])
+```
+
+Example scripts:
+
+- [examples/howto_csv_gzip_daily_vwap.py](examples/howto_csv_gzip_daily_vwap.py) computes daily stock-trade VWAP using `gzip` and `csv.DictReader`.
+- [examples/howto_database_daily_vwap.py](examples/howto_database_daily_vwap.py) computes the same value from a `massive-speedup` binary database file using mmap and the native C++ aggregator.
+
+## Record Access
+
+Parsed records expose read-only attributes and are iterable in CSV field order:
+
+```python
+trade = next(massive_speedup.FlatFiles.Stock.Trade.parse("trades.csv.gz"))
+
+print(trade.ticker)
+print(trade.conditions)
+print(trade.sip_timestamp)
+print(trade.pack())
+print(list(trade))
+```
+
+Packed records do not include the ticker. Reconstruct with the ticker from the file name:
+
+```python
+packed = trade.pack()
+trade2 = massive_speedup.StockTrade.from_packed(packed, trade.ticker)
+```
+
+## Window Aggregation
+
+The native aggregators consume iterables of parsed records and yield Python
+namedtuple rows. The aggregation interval and offset are expressed in seconds;
+the returned `window_start` is still nanoseconds since epoch.
+
+```python
+import massive_speedup
+
+trades = massive_speedup.FlatFiles.Stock.Trade.parse("trades.csv.gz")
+
+for bar in massive_speedup.FlatFiles.Stock.Trade.Aggregator(
+    trades,
+    interval_seconds=60,
+):
+    print(
+        bar.ticker,
+        bar.window_start,
+        bar.open,
+        bar.close,
+        bar.high,
+        bar.low,
+        bar.avg,
+        bar.volume_weighted_avg,
+        bar.volume,
+        bar.transactions,
+        bar.stddev,
+    )
+```
+
+Available aggregators:
+
+- `massive_speedup.StockTradeAggregator` / `FlatFiles.Stock.Trade.Aggregator`
+- `massive_speedup.StockQuoteAggregator` / `FlatFiles.Stock.Quote.Aggregator`
+- `massive_speedup.CurrencyQuoteAggregator` / `FlatFiles.currency.Quote.Aggregator`
+
+Stock trades aggregate `price` and use `size` for `volume` and
+`volume_weighted_avg`. Stock quotes aggregate ask and bid prices separately and
+use ask/bid sizes for ask/bid volume-weighted averages. Currency quotes aggregate
+ask and bid prices separately and omit volume and volume-weighted averages
+because the source rows have no size field.
+
+```python
+quotes = massive_speedup.StockQuoteDatabase("/data/massive-db", "2026-01-23", "A")
+
+for quote_bar in massive_speedup.StockQuoteAggregator(
+    quotes,
+    interval_seconds=1,
+    offset_seconds=0,
+):
+    print(quote_bar.ask_open, quote_bar.ask_close, quote_bar.bid_avg)
+```
+
+Aggregators stream consecutive `(ticker, window_start)` groups. Use input ordered
+by ticker and timestamp, such as the native database iterators or default
+Massive/Polygon flat-file order. `stddev` is population standard deviation.
+
+## Build Database Files
+
+Build fixed-length binary database files from one or more input `.csv.gz` files:
+
+```bash
+massive-speedup-build-database --database /data/massive-db 2026-01-23.csv.gz
+```
+
+The input type is inferred from the CSV header. Output layout is:
 
 ```text
-.
-|-- CMakeLists.txt
-|-- include/massive_speedup/
-|-- pyproject.toml
-|-- src/
-|   |-- cpp/
-|   |   |-- flatfiles.cpp
-|   |   |-- module_bindings.hpp
-|   |   |-- native.cpp
-|   |   |-- native.hpp
-|   |   |-- parser_common.cpp
-|   |   `-- websocket.cpp
-|   `-- massive_speedup/
-`-- tests/
+{database}/{stock_trade|stock_quote|currency_quote}/{YYYY-MM-DD}/{ticker}
 ```
 
-## Development
+Use `--benchmark` to print throughput:
 
 ```bash
-poetry install
-poetry run pip install -e .
-poetry run pytest
+massive-speedup-build-database --benchmark --database /data/massive-db *.csv.gz
 ```
 
-`poetry install` creates the development environment and installs Python-side
-dependencies. `poetry run pip install -e .` builds the editable nanobind/C++
-extension inside that environment. Wheel builds are driven by `scikit-build-core`
-and `CMake`, while Poetry manages the project environment and lockfile.
+## Database Files
 
-The C++ build now vendors `simdjson` and `rapidgzip` by default using
-`FetchContent`. If you already have them locally, you can switch to local/system
-resolution with:
+Open a fixed-length binary file through mmap and iterate records:
 
-```bash
-cmake -S . -B build \
-  -DMASSIVE_SPEEDUP_USE_SYSTEM_SIMDJSON=ON \
-  -DMASSIVE_SPEEDUP_USE_SYSTEM_RAPIDGZIP=ON \
-  -DMASSIVE_SPEEDUP_RAPIDGZIP_SOURCE_DIR=/path/to/rapidgzip
+```python
+records = massive_speedup.StockTradeDatabase(
+    "/data/massive-db",
+    "2026-01-23",
+    "A",
+)
+
+for trade in records:
+    print(trade.sip_timestamp, trade.price)
 ```
 
-This is intended for direct native use from your parser implementations, so
-gzip decompression and JSON parsing can happen entirely in C++.
+Database files support indexing and timestamp search:
 
-The shared native layer also exposes a C++23 line-streaming helper,
-`read_gzip_lines(...)`, which is intended to open a gzip file with rapidgzip
-and yield one decoded line at a time through `std::generator<std::string>`.
+```python
+first = records[0]
+last = records[-1]
 
-## API Direction
+index = records.index_before_timestamp(1769161728012983416)
+near_open = records.index_before_timestamp(1769161728012983416, galloping=True)
+```
 
-`massive_speedup.FlatFiles` and `massive_speedup.WebSocket` are exposed from the
-single native module, `massive_speedup._native`. The top-level package imports
-that module directly and falls back to the pure Python compatibility layer only
-when the native extension is unavailable.
+Timestamp arguments are nanoseconds since epoch. Database readers also accept
+`datetime.time` values, which are resolved using the reader's date:
 
+```python
+import datetime as dt
 
-sudo apt install cmake g++ libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev libgflags-dev protobuf-compiler-grpc
+index = records.index_before_timestamp(dt.time(9, 30))
+```
 
+Find the closest record before or after a participant timestamp:
+
+```python
+before = records.find_before_participant_timestamp(
+    1769161728012624580,
+)
+after = records.find_after_participant_timestamp(
+    1769161728012624580,
+    fuzz=250_000_000,
+    galloping=True,
+)
+strict_before = records.find_before_participant_timestamp(
+    1769161728012624580,
+    on=False,
+)
+```
+
+`find_before_participant_timestamp` returns the record with the highest
+participant timestamp less than or equal to the target. `find_after_participant_timestamp`
+returns the record with the lowest participant timestamp greater than or equal
+to the target. Set `on=False` for strict `<` or `>` comparisons. `fuzz` is a
+nanosecond scan window around the searched timestamp and defaults to one second
+(`1_000_000_000`). Both methods return records, not indexes.
+
+Stock database readers also expose NYSE market session timestamps in nanoseconds:
+
+```python
+print(records.market_open)
+print(records.market_close)
+```

@@ -7,8 +7,11 @@
 #include <nanobind/stl/unordered_map.h>
 #include <nanobind/stl/vector.h>
 
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -125,6 +128,283 @@ void bind_iterator_type(nb::module_& m, const char* iterator_name) {
           [](IteratorType& self) -> IteratorType& { return self.iter(); },
           nb::rv_policy::reference_internal)
       .def("__next__", &IteratorType::next);
+}
+
+inline std::string date_argument_to_string(nb::handle date) {
+  if (PyUnicode_Check(date.ptr())) {
+    return nb::cast<std::string>(date);
+  }
+
+  if (!PyObject_HasAttrString(date.ptr(), "isoformat")) {
+    throw std::invalid_argument("date must be an ISO date string or datetime.date");
+  }
+
+  nb::object isoformat = nb::borrow<nb::object>(date).attr("isoformat")();
+  return nb::cast<std::string>(isoformat);
+}
+
+inline std::uint64_t nanoseconds_argument_to_uint64(
+    nb::handle value,
+    const char* argument_name) {
+  if (PyLong_Check(value.ptr())) {
+    return nb::cast<std::uint64_t>(value);
+  }
+
+  if (PyFloat_Check(value.ptr())) {
+    const double parsed = PyFloat_AsDouble(value.ptr());
+    if (PyErr_Occurred()) {
+      throw nb::python_error();
+    }
+
+    const long double parsed_value = static_cast<long double>(parsed);
+    const long double maximum_value =
+        static_cast<long double>(std::numeric_limits<std::uint64_t>::max());
+    if (!std::isfinite(parsed) || parsed_value < 0 || parsed_value > maximum_value) {
+      std::ostringstream message;
+      message << argument_name << " must be finite non-negative nanoseconds";
+      throw std::invalid_argument(message.str());
+    }
+
+    return static_cast<std::uint64_t>(parsed);
+  }
+
+  std::ostringstream message;
+  message << argument_name << " must be integer or float nanoseconds";
+  throw std::invalid_argument(message.str());
+}
+
+template <typename DatabaseType>
+std::uint64_t timestamp_argument_to_ns(
+    const DatabaseType& database,
+    nb::handle timestamp) {
+  if (PyLong_Check(timestamp.ptr()) || PyFloat_Check(timestamp.ptr())) {
+    return nanoseconds_argument_to_uint64(timestamp, "timestamp");
+  }
+
+  if (!PyObject_HasAttrString(timestamp.ptr(), "hour") ||
+      !PyObject_HasAttrString(timestamp.ptr(), "minute") ||
+      !PyObject_HasAttrString(timestamp.ptr(), "second")) {
+    throw std::invalid_argument(
+        "timestamp must be integer/float nanoseconds or datetime.time");
+  }
+
+  nb::module_ datetime_module = nb::module_::import_("datetime");
+  nb::object timezone = datetime_module.attr("timezone");
+  nb::object time_object = nb::borrow<nb::object>(timestamp);
+  nb::object tzinfo = time_object.attr("tzinfo");
+  if (tzinfo.ptr() == Py_None) {
+    time_object = time_object.attr("replace")(nb::arg("tzinfo") = timezone.attr("utc"));
+  }
+
+  nb::object date_object =
+      datetime_module.attr("date").attr("fromisoformat")(database.date());
+  nb::object datetime_object =
+      datetime_module.attr("datetime").attr("combine")(date_object, time_object);
+  nb::object epoch = datetime_module.attr("datetime")(
+      1970,
+      1,
+      1,
+      nb::arg("tzinfo") = timezone.attr("utc"));
+
+  PyObject* delta_ptr = PyNumber_Subtract(datetime_object.ptr(), epoch.ptr());
+  if (delta_ptr == nullptr) {
+    throw nb::python_error();
+  }
+  nb::object delta = nb::steal<nb::object>(delta_ptr);
+
+  const auto days = nb::cast<long long>(delta.attr("days"));
+  const auto seconds = nb::cast<long long>(delta.attr("seconds"));
+  const auto microseconds = nb::cast<long long>(delta.attr("microseconds"));
+  const __int128 total_ns =
+      static_cast<__int128>(days) * 86'400'000'000'000LL +
+      static_cast<__int128>(seconds) * 1'000'000'000LL +
+      static_cast<__int128>(microseconds) * 1'000LL;
+  if (total_ns < 0) {
+    throw std::invalid_argument("datetime.time resolved to a timestamp before epoch");
+  }
+  if (total_ns > static_cast<__int128>(std::numeric_limits<std::uint64_t>::max())) {
+    throw std::invalid_argument("datetime.time resolved to a timestamp out of range");
+  }
+  return static_cast<std::uint64_t>(total_ns);
+}
+
+template <typename DatabaseType>
+void bind_database_record_file(
+    nb::module_& m,
+    const char* name,
+    const char* iterator_name) {
+  using IteratorType = typename DatabaseType::Iterator;
+
+  bind_iterator_type<IteratorType>(m, iterator_name);
+
+  auto class_ = nb::class_<DatabaseType>(m, name)
+      .def(
+          "__init__",
+          [](DatabaseType* self,
+             const std::filesystem::path& database_path,
+             nb::handle date,
+             const std::string& ticker) {
+            new (self) DatabaseType(database_path, date_argument_to_string(date), ticker);
+          },
+          nb::arg("database_path"),
+          nb::arg("date"),
+          nb::arg("ticker"))
+      .def_prop_ro("ticker", &DatabaseType::ticker)
+      .def_prop_ro("date", &DatabaseType::date)
+      .def_prop_ro("database_path", &DatabaseType::database_path)
+      .def_prop_ro("path", &DatabaseType::path)
+      .def("__len__", &DatabaseType::size)
+      .def("__getitem__", &DatabaseType::get_item, nb::arg("index"))
+      .def(
+          "__iter__",
+          [](const DatabaseType& self) { return self.iter(); },
+          nb::keep_alive<0, 1>())
+      .def(
+          "index_before_timestamp",
+          [](const DatabaseType& self, nb::handle timestamp, bool galloping) {
+            return self.index_before_timestamp(
+                timestamp_argument_to_ns(self, timestamp),
+                galloping);
+          },
+          nb::arg("timestamp"),
+          nb::kw_only(),
+          nb::arg("galloping") = false)
+      .def(
+          "find_before_participant_timestamp",
+          [](const DatabaseType& self,
+             nb::handle timestamp,
+             nb::handle fuzz,
+             bool galloping,
+             bool on) {
+            return self.find_before_participant_timestamp(
+                timestamp_argument_to_ns(self, timestamp),
+                nanoseconds_argument_to_uint64(fuzz, "fuzz"),
+                galloping,
+                on);
+          },
+          nb::arg("timestamp"),
+          nb::arg("fuzz") = 1'000'000'000ULL,
+          nb::kw_only(),
+          nb::arg("galloping") = false,
+          nb::arg("on") = true)
+      .def(
+          "find_after_participant_timestamp",
+          [](const DatabaseType& self,
+             nb::handle timestamp,
+             nb::handle fuzz,
+             bool galloping,
+             bool on) {
+            return self.find_after_participant_timestamp(
+                timestamp_argument_to_ns(self, timestamp),
+                nanoseconds_argument_to_uint64(fuzz, "fuzz"),
+                galloping,
+                on);
+          },
+          nb::arg("timestamp"),
+          nb::arg("fuzz") = 1'000'000'000ULL,
+          nb::kw_only(),
+          nb::arg("galloping") = false,
+          nb::arg("on") = true)
+      .def(
+          "iterate_bounded",
+          [](const DatabaseType& self, nb::handle start_timestamp) {
+            return self.iterate_bounded(timestamp_argument_to_ns(self, start_timestamp));
+          },
+          nb::arg("start_timestamp"),
+          nb::keep_alive<0, 1>())
+      .def(
+          "iterate_bounded",
+          [](const DatabaseType& self,
+             nb::handle start_timestamp,
+             nb::handle stop_timestamp) {
+            return self.iterate_bounded(
+                timestamp_argument_to_ns(self, start_timestamp),
+                timestamp_argument_to_ns(self, stop_timestamp));
+          },
+          nb::arg("start_timestamp"),
+          nb::arg("stop_timestamp"),
+          nb::keep_alive<0, 1>());
+
+  if constexpr (
+      std::is_same_v<DatabaseType, native::StockTradeDatabase> ||
+      std::is_same_v<DatabaseType, native::StockQuoteDatabase>) {
+    class_
+        .def_prop_ro("market_open", &DatabaseType::market_open)
+        .def_prop_ro("market_close", &DatabaseType::market_close);
+  }
+}
+
+inline nb::object bind_namedtuple_type(
+    nb::module_& m,
+    const char* name,
+    const char* fields) {
+  nb::module_ collections = nb::module_::import_("collections");
+  nb::object type = collections.attr("namedtuple")(name, fields);
+  type.attr("__module__") = m.attr("__name__");
+  m.attr(name) = type;
+  return type;
+}
+
+template <typename AggregatorType>
+void bind_window_aggregator(
+    nb::module_& m,
+    const char* name,
+    const nb::object& output_type) {
+  nb::class_<AggregatorType>(m, name)
+      .def(
+          "__init__",
+          [output_type](
+              AggregatorType* self,
+              nb::handle rows,
+              std::uint64_t interval_seconds,
+              std::uint64_t offset_seconds) {
+            new (self) AggregatorType(
+                rows,
+                interval_seconds,
+                offset_seconds,
+                output_type);
+          },
+          nb::arg("rows"),
+          nb::arg("interval_seconds"),
+          nb::arg("offset_seconds") = 0)
+      .def(
+          "__iter__",
+          [](AggregatorType& self) -> AggregatorType& { return self.iter(); },
+          nb::rv_policy::reference_internal)
+      .def("__next__", &AggregatorType::next);
+}
+
+inline void bind_window_aggregators(nb::module_& m) {
+  nb::object stock_trade_aggregation = bind_namedtuple_type(
+      m,
+      "StockTradeAggregation",
+      "ticker open close high low avg volume_weighted_avg volume window_start "
+      "transactions stddev");
+  nb::object stock_quote_aggregation = bind_namedtuple_type(
+      m,
+      "StockQuoteAggregation",
+      "ticker ask_open ask_close ask_high ask_low ask_avg "
+      "ask_volume_weighted_avg ask_volume ask_stddev bid_open bid_close "
+      "bid_high bid_low bid_avg bid_volume_weighted_avg bid_volume bid_stddev "
+      "window_start transactions");
+  nb::object currency_quote_aggregation = bind_namedtuple_type(
+      m,
+      "CurrencyQuoteAggregation",
+      "ticker ask_open ask_close ask_high ask_low ask_avg ask_stddev bid_open "
+      "bid_close bid_high bid_low bid_avg bid_stddev window_start transactions");
+
+  bind_window_aggregator<native::StockTradeAggregator>(
+      m,
+      "StockTradeAggregator",
+      stock_trade_aggregation);
+  bind_window_aggregator<native::StockQuoteAggregator>(
+      m,
+      "StockQuoteAggregator",
+      stock_quote_aggregation);
+  bind_window_aggregator<native::CurrencyQuoteAggregator>(
+      m,
+      "CurrencyQuoteAggregator",
+      currency_quote_aggregation);
 }
 
 template <typename ParserType>
@@ -1062,6 +1342,12 @@ void bind_native_module(nb::module_& m, const char* alias_prefix) {
       std::string(alias_prefix) + "CurrencyQuoteApi";
   const std::string currency_aggregate_api_name =
       std::string(alias_prefix) + "CurrencyAggregateApi";
+  const std::string stock_trade_database_iterator_name =
+      std::string(alias_prefix) + "StockTradeDatabaseIterator";
+  const std::string stock_quote_database_iterator_name =
+      std::string(alias_prefix) + "StockQuoteDatabaseIterator";
+  const std::string currency_quote_database_iterator_name =
+      std::string(alias_prefix) + "CurrencyQuoteDatabaseIterator";
 
   m.def(
       "read_gzip_lines_bytes",
@@ -1087,6 +1373,18 @@ void bind_native_module(nb::module_& m, const char* alias_prefix) {
 
   bind_gzip_lines<Impl<FlatFileStocksParser>>(m, gzip_iterator_name.c_str());
   bind_common_bases(m);
+  bind_database_record_file<native::StockTradeDatabase>(
+      m,
+      "StockTradeDatabase",
+      stock_trade_database_iterator_name.c_str());
+  bind_database_record_file<native::StockQuoteDatabase>(
+      m,
+      "StockQuoteDatabase",
+      stock_quote_database_iterator_name.c_str());
+  bind_database_record_file<native::CurrencyQuoteDatabase>(
+      m,
+      "CurrencyQuoteDatabase",
+      currency_quote_database_iterator_name.c_str());
 
   auto flatfiles = m.def_submodule("FlatFiles", "Flat-file parser classes.");
   bind_stock_flatfile_asset<FlatFileStocksParser, Impl<FlatFileStocksParser>>(
@@ -1128,6 +1426,14 @@ void bind_native_module(nb::module_& m, const char* alias_prefix) {
   bind_websocket_asset<WebSocketCryptoParser, Impl<WebSocketCryptoParser>>(websocket, "Crypto");
 
   bind_row_models<typename Impl<FlatFileStocksParser>::specialization_type>(m, flatfiles);
+  bind_window_aggregators(m);
+
+  flatfiles.attr("Stock").attr("Trade").attr("Aggregator") =
+      m.attr("StockTradeAggregator");
+  flatfiles.attr("Stock").attr("Quote").attr("Aggregator") =
+      m.attr("StockQuoteAggregator");
+  flatfiles.attr("currency").attr("Quote").attr("Aggregator") =
+      m.attr("CurrencyQuoteAggregator");
 }
 
 }  // namespace massive_speedup::bindings

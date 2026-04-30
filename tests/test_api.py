@@ -758,25 +758,125 @@ def test_currency_tickers_are_globally_interned() -> None:
     assert quote.tickers is aggregate.tickers
 
 
-def test_build_database_parser_is_file_only() -> None:
+def test_build_database_parser_accepts_positional_files() -> None:
     from massive_speedup import build_database
 
     parser = build_database.build_parser()
     args = parser.parse_args(
         [
-            "--input-file",
-            "input.csv.gz",
             "--database",
             "db",
-            "--type",
-            "stock_quote",
+            "stock_quotes.csv.gz",
+            "currency_quotes.csv.gz",
         ]
     )
 
-    assert args.input_file == Path("input.csv.gz")
+    assert args.input_files == [Path("stock_quotes.csv.gz"), Path("currency_quotes.csv.gz")]
     assert args.database == Path("db")
-    assert args.record_type == "stock_quote"
+    assert args.benchmark is False
+    assert not hasattr(args, "record_type")
     assert not hasattr(args, "input_stdin")
+    assert not hasattr(args, "input_file")
+
+
+def test_build_database_infers_record_type_from_header(tmp_path: Path) -> None:
+    from massive_speedup import build_database
+
+    cases = {
+        build_database.STOCK_TRADE_HEADER: "stock_trade",
+        build_database.STOCK_QUOTE_HEADER: "stock_quote",
+        build_database.CURRENCY_QUOTE_HEADER: "currency_quote",
+    }
+
+    for index, (header, expected_type) in enumerate(cases.items()):
+        path = tmp_path / f"{index}.csv.gz"
+        with gzip.open(path, "wt", encoding="utf-8", newline="") as handle:
+            handle.write(header + "\n")
+
+        assert build_database.infer_record_type(path) == expected_type
+
+
+def test_build_database_main_processes_mixed_positional_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from massive_speedup import build_database
+
+    stock_path = tmp_path / "stock_quotes.csv.gz"
+    currency_path = tmp_path / "currency_quotes.csv.gz"
+    with gzip.open(stock_path, "wt", encoding="utf-8", newline="") as handle:
+        handle.write(build_database.STOCK_QUOTE_HEADER + "\n")
+    with gzip.open(currency_path, "wt", encoding="utf-8", newline="") as handle:
+        handle.write(build_database.CURRENCY_QUOTE_HEADER + "\n")
+
+    calls = []
+
+    def fake_iter_input_rows(record_type: str, input_path: Path):
+        calls.append(("iter", record_type, input_path))
+        return [(record_type, input_path.name)]
+
+    def fake_write_database(rows, database: Path, record_type: str) -> int:
+        calls.append(("write", record_type, database, list(rows)))
+        return 1
+
+    monkeypatch.setattr(build_database, "_iter_input_rows", fake_iter_input_rows)
+    monkeypatch.setattr(build_database, "write_database", fake_write_database)
+
+    result = build_database.main(
+        [
+            "--database",
+            str(tmp_path / "db"),
+            str(stock_path),
+            str(currency_path),
+        ]
+    )
+
+    assert result == 0
+    assert calls == [
+        ("iter", "stock_quote", stock_path),
+        ("write", "stock_quote", tmp_path / "db", [("stock_quote", stock_path.name)]),
+        ("iter", "currency_quote", currency_path),
+        ("write", "currency_quote", tmp_path / "db", [("currency_quote", currency_path.name)]),
+    ]
+
+
+def test_build_database_main_benchmark_prints_metrics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from massive_speedup import build_database
+
+    stock_path = tmp_path / "stock_quotes.csv.gz"
+    with gzip.open(stock_path, "wt", encoding="utf-8", newline="") as handle:
+        handle.write(build_database.STOCK_QUOTE_HEADER + "\n")
+
+    timer_values = iter([10.0, 12.0])
+
+    monkeypatch.setattr(
+        build_database,
+        "_iter_input_rows",
+        lambda record_type, input_path: [(record_type, input_path.name)],
+    )
+    monkeypatch.setattr(build_database, "write_database", lambda rows, database, record_type: 2)
+    monkeypatch.setattr(build_database.time, "perf_counter", lambda: next(timer_values))
+
+    result = build_database.main(
+        [
+            "--benchmark",
+            "--database",
+            str(tmp_path / "db"),
+            str(stock_path),
+        ]
+    )
+
+    assert result == 0
+    stderr = capsys.readouterr().err
+    assert f"file={stock_path}" in stderr
+    assert "type=stock_quote" in stderr
+    assert "lines=2 lines" in stderr
+    assert "seconds=2.000000 s" in stderr
+    assert "throughput=0.000001 Mlines/s" in stderr
 
 
 def test_write_database_groups_records_by_ticker_using_first_record_date(tmp_path: Path) -> None:
@@ -906,7 +1006,7 @@ def test_native_row_models_pack_roundtrip_and_extract_timestamps_when_built() ->
     trade, packed_trade = assert_roundtrip(
         module.StockTrade,
         [
-            "A",
+            "Brk.bBb",
             "12,37",
             "0",
             "12",
@@ -924,7 +1024,7 @@ def test_native_row_models_pack_roundtrip_and_extract_timestamps_when_built() ->
     quote, packed_quote = assert_roundtrip(
         module.StockQuote,
         [
-            "A",
+            "Brk.bBb",
             "8",
             "0.0",
             "0",
@@ -953,7 +1053,16 @@ def test_native_row_models_pack_roundtrip_and_extract_timestamps_when_built() ->
     )
     assert_roundtrip(
         module.StockAggregate,
-        ["A", "18218", "138.0", "137.93", "138.36", "137.75", "1769178600000000000", "125"],
+        [
+            "Brk.bBb",
+            "18218",
+            "138.0",
+            "137.93",
+            "138.36",
+            "137.75",
+            "1769178600000000000",
+            "125",
+        ],
     )
     assert_roundtrip(
         module.CurrencyAggregate,

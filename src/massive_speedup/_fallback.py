@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import csv
 import gzip
-import heapq
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -614,49 +613,16 @@ class FlatFileStocksParser(FlatFileParser):
                     yield tuple(field.encode("utf-8") for field in row)
                 return
 
-            buckets: list[list[tuple[str, ...]]] = []
-            for fields in reader:
-                if not any(fields):
-                    continue
-
-                row = tuple(fields)
-                if not buckets or buckets[-1][-1][0] != row[0]:
-                    buckets.append([])
-                buckets[-1].append(row)
-
-            heap: list[tuple[int, str, int, int]] = []
-            for bucket_index, bucket in enumerate(buckets):
-                if bucket:
-                    row = bucket[0]
-                    heapq.heappush(
-                        heap,
-                        (
-                            _parse_int(row[sip_timestamp_index]),
-                            row[0],
-                            _parse_int(row[participant_timestamp_index]),
-                            bucket_index,
-                        ),
-                    )
-
-            offsets = [0] * len(buckets)
-            while heap:
-                _, _, _, bucket_index = heapq.heappop(heap)
-                row_index = offsets[bucket_index]
-                row = buckets[bucket_index][row_index]
+            rows = [tuple(fields) for fields in reader if any(fields)]
+            rows.sort(
+                key=lambda row: (
+                    _parse_int(row[sip_timestamp_index]),
+                    row[0],
+                    _parse_int(row[participant_timestamp_index]),
+                )
+            )
+            for row in rows:
                 yield tuple(field.encode("utf-8") for field in row)
-
-                offsets[bucket_index] += 1
-                if offsets[bucket_index] < len(buckets[bucket_index]):
-                    next_row = buckets[bucket_index][offsets[bucket_index]]
-                    heapq.heappush(
-                        heap,
-                        (
-                            _parse_int(next_row[sip_timestamp_index]),
-                            next_row[0],
-                            _parse_int(next_row[participant_timestamp_index]),
-                            bucket_index,
-                        ),
-                    )
 
     @staticmethod
     def _iter_rows(
@@ -686,44 +652,9 @@ class FlatFileStocksParser(FlatFileParser):
                 yield from rows
                 return
 
-            buckets: list[list[object]] = []
-            for fields in reader:
-                if not any(fields):
-                    continue
-
-                row = row_type(fields)
-                if not buckets or buckets[-1][-1].ticker != row.ticker:
-                    buckets.append([])
-                buckets[-1].append(row)
-
-            heap: list[tuple[int, str, int, int]] = []
-            for bucket_index, bucket in enumerate(buckets):
-                if bucket:
-                    row = bucket[0]
-                    heapq.heappush(
-                        heap,
-                        (row.sip_timestamp, row.ticker, row.participant_timestamp, bucket_index),
-                    )
-
-            offsets = [0] * len(buckets)
-            while heap:
-                _, _, _, bucket_index = heapq.heappop(heap)
-                row_index = offsets[bucket_index]
-                row = buckets[bucket_index][row_index]
-                yield row
-
-                offsets[bucket_index] += 1
-                if offsets[bucket_index] < len(buckets[bucket_index]):
-                    next_row = buckets[bucket_index][offsets[bucket_index]]
-                    heapq.heappush(
-                        heap,
-                        (
-                            next_row.sip_timestamp,
-                            next_row.ticker,
-                            next_row.participant_timestamp,
-                            bucket_index,
-                        ),
-                    )
+            rows = [row_type(fields) for fields in reader if any(fields)]
+            rows.sort(key=lambda row: (row.sip_timestamp, row.ticker, row.participant_timestamp))
+            yield from rows
 
     @staticmethod
     def _iter_aggregate_rows(

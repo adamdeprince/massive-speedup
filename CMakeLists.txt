@@ -31,6 +31,36 @@ set(MASSIVE_SPEEDUP_HAS_SIMDJSON_VALUE 1)
 set(MASSIVE_SPEEDUP_HAS_RAPIDGZIP_VALUE 1)
 set(MASSIVE_SPEEDUP_DEPS_DIR "${CMAKE_BINARY_DIR}/_deps")
 
+function(massive_speedup_clear_stale_fetchcontent_subbuild dependency_name)
+  set(subbuild_dir "${MASSIVE_SPEEDUP_DEPS_DIR}/${dependency_name}-subbuild")
+  set(cache_file "${subbuild_dir}/CMakeCache.txt")
+
+  if(NOT EXISTS "${cache_file}")
+    return()
+  endif()
+
+  file(STRINGS "${cache_file}" cached_generator_line REGEX "^CMAKE_GENERATOR:INTERNAL=")
+  string(
+    REGEX REPLACE
+    "^CMAKE_GENERATOR:INTERNAL="
+    ""
+    cached_generator
+    "${cached_generator_line}"
+  )
+
+  if(cached_generator AND NOT cached_generator STREQUAL CMAKE_GENERATOR)
+    message(
+      STATUS
+      "Removing stale FetchContent subbuild for ${dependency_name}: "
+      "cached generator '${cached_generator}' != current generator '${CMAKE_GENERATOR}'."
+    )
+    file(REMOVE_RECURSE "${subbuild_dir}")
+  endif()
+endfunction()
+
+massive_speedup_clear_stale_fetchcontent_subbuild(simdjson)
+massive_speedup_clear_stale_fetchcontent_subbuild(rapidgzip)
+
 if(MASSIVE_SPEEDUP_USE_SYSTEM_SIMDJSON)
   find_package(simdjson REQUIRED)
 elseif(EXISTS "${MASSIVE_SPEEDUP_DEPS_DIR}/simdjson-src/CMakeLists.txt")

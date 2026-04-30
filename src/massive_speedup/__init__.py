@@ -203,4 +203,5 @@ __all__ = [
     "WebSocket",
     "gzip_lines",
     "read_gzip_lines",
+    "build_database_file",
 ]

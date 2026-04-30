@@ -268,13 +268,16 @@ inline std::string_view bytes_view(nb::bytes value) {
 }
 
 template <typename RowType>
-void construct_row_from_packed(RowType* self, nb::bytes packed) {
-  new (self) RowType(bytes_view(packed));
+void construct_row_from_packed_with_ticker(
+    RowType* self,
+    nb::bytes packed,
+    const std::string& ticker) {
+  new (self) RowType(bytes_view(packed), ticker);
 }
 
 template <typename RowType>
-RowType row_from_packed(nb::bytes packed) {
-  return RowType::from_packed(bytes_view(packed));
+RowType row_from_packed(nb::bytes packed, const std::string& ticker) {
+  return RowType::from_packed(bytes_view(packed), ticker);
 }
 
 template <typename RowType>
@@ -305,8 +308,9 @@ inline void bind_row_models(nb::module_& m, nb::module_& flatfiles) {
               nb::arg("fields"))
           .def(
               "__init__",
-              &construct_row_from_packed<native::StockTrade>,
-              nb::arg("packed"))
+              &construct_row_from_packed_with_ticker<native::StockTrade>,
+              nb::arg("packed"),
+              nb::arg("ticker"))
           .def_ro("ticker", &native::StockTrade::ticker)
           .def_prop_ro("conditions", &native::StockTrade::conditions_object)
           .def_ro("correction", &native::StockTrade::correction)
@@ -333,7 +337,8 @@ inline void bind_row_models(nb::module_& m, nb::module_& flatfiles) {
           .def_static(
               "from_packed",
               &row_from_packed<native::StockTrade>,
-              nb::arg("packed"))
+              nb::arg("packed"),
+              nb::arg("ticker"))
           .def_static(
               "participant_timestamp_from_packed",
               &participant_timestamp_from_packed<native::StockTrade>,
@@ -369,8 +374,9 @@ inline void bind_row_models(nb::module_& m, nb::module_& flatfiles) {
               nb::arg("fields"))
           .def(
               "__init__",
-              &construct_row_from_packed<native::StockQuote>,
-              nb::arg("packed"))
+              &construct_row_from_packed_with_ticker<native::StockQuote>,
+              nb::arg("packed"),
+              nb::arg("ticker"))
           .def_ro("ticker", &native::StockQuote::ticker)
           .def_ro("ask_exchange", &native::StockQuote::ask_exchange)
           .def_ro("ask_price", &native::StockQuote::ask_price)
@@ -398,7 +404,8 @@ inline void bind_row_models(nb::module_& m, nb::module_& flatfiles) {
           .def_static(
               "from_packed",
               &row_from_packed<native::StockQuote>,
-              nb::arg("packed"))
+              nb::arg("packed"),
+              nb::arg("ticker"))
           .def_static(
               "participant_timestamp_from_packed",
               &participant_timestamp_from_packed<native::StockQuote>,
@@ -434,8 +441,9 @@ inline void bind_row_models(nb::module_& m, nb::module_& flatfiles) {
               nb::arg("fields"))
           .def(
               "__init__",
-              &construct_row_from_packed<native::CurrencyQuote>,
-              nb::arg("packed"))
+              &construct_row_from_packed_with_ticker<native::CurrencyQuote>,
+              nb::arg("packed"),
+              nb::arg("ticker"))
           .def_ro("ticker", &native::CurrencyQuote::ticker)
           .def_ro("ask_exchange", &native::CurrencyQuote::ask_exchange)
           .def_ro("ask_price", &native::CurrencyQuote::ask_price)
@@ -454,7 +462,8 @@ inline void bind_row_models(nb::module_& m, nb::module_& flatfiles) {
           .def_static(
               "from_packed",
               &row_from_packed<native::CurrencyQuote>,
-              nb::arg("packed"))
+              nb::arg("packed"),
+              nb::arg("ticker"))
           .def_static(
               "participant_timestamp_from_packed",
               &participant_timestamp_from_packed<native::CurrencyQuote>,
@@ -484,8 +493,9 @@ inline void bind_row_models(nb::module_& m, nb::module_& flatfiles) {
               nb::arg("fields"))
           .def(
               "__init__",
-              &construct_row_from_packed<native::StockAggregate>,
-              nb::arg("packed"))
+              &construct_row_from_packed_with_ticker<native::StockAggregate>,
+              nb::arg("packed"),
+              nb::arg("ticker"))
           .def_ro("ticker", &native::StockAggregate::ticker)
           .def_ro("volume", &native::StockAggregate::volume)
           .def_ro("open", &native::StockAggregate::open)
@@ -503,7 +513,8 @@ inline void bind_row_models(nb::module_& m, nb::module_& flatfiles) {
           .def_static(
               "from_packed",
               &row_from_packed<native::StockAggregate>,
-              nb::arg("packed"))
+              nb::arg("packed"),
+              nb::arg("ticker"))
           .def("__hash__", &native::StockAggregate::hash_value)
           .def("__str__", &native::StockAggregate::repr)
           .def("__repr__", &native::StockAggregate::repr)
@@ -527,8 +538,9 @@ inline void bind_row_models(nb::module_& m, nb::module_& flatfiles) {
               nb::arg("fields"))
           .def(
               "__init__",
-              &construct_row_from_packed<native::CurrencyAggregate>,
-              nb::arg("packed"))
+              &construct_row_from_packed_with_ticker<native::CurrencyAggregate>,
+              nb::arg("packed"),
+              nb::arg("ticker"))
           .def_ro("ticker", &native::CurrencyAggregate::ticker)
           .def_ro("volume", &native::CurrencyAggregate::volume)
           .def_ro("open", &native::CurrencyAggregate::open)
@@ -547,7 +559,8 @@ inline void bind_row_models(nb::module_& m, nb::module_& flatfiles) {
           .def_static(
               "from_packed",
               &row_from_packed<native::CurrencyAggregate>,
-              nb::arg("packed"))
+              nb::arg("packed"),
+              nb::arg("ticker"))
           .def("__hash__", &native::CurrencyAggregate::hash_value)
           .def("__str__", &native::CurrencyAggregate::repr)
           .def("__repr__", &native::CurrencyAggregate::repr)
@@ -1056,6 +1069,20 @@ void bind_native_module(nb::module_& m, const char* alias_prefix) {
       nb::arg("path"),
       nb::arg("parallelization") = 0,
       nb::arg("chunk_size") = 1U << 20);
+  m.def(
+      "build_database_file",
+      [](const std::filesystem::path& input_path,
+         const std::filesystem::path& database_path,
+         const std::string& record_type) {
+        return Impl<FlatFileStocksParser>::build_database_file(
+            input_path,
+            database_path,
+            record_type);
+      },
+      nb::arg("input_path"),
+      nb::arg("database_path"),
+      nb::arg("record_type"),
+      nb::call_guard<nb::gil_scoped_release>());
   static_cast<void>(alias_prefix);
 
   bind_gzip_lines<Impl<FlatFileStocksParser>>(m, gzip_iterator_name.c_str());

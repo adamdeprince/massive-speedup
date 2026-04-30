@@ -811,16 +811,11 @@ def test_build_database_main_processes_mixed_positional_files(
 
     calls = []
 
-    def fake_iter_input_rows(record_type: str, input_path: Path):
-        calls.append(("iter", record_type, input_path))
-        return [(record_type, input_path.name)]
-
-    def fake_write_database(rows, database: Path, record_type: str) -> int:
-        calls.append(("write", record_type, database, list(rows)))
+    def fake_write_database_file(input_path: Path, database: Path, record_type: str) -> int:
+        calls.append(("write", input_path, database, record_type))
         return 1
 
-    monkeypatch.setattr(build_database, "_iter_input_rows", fake_iter_input_rows)
-    monkeypatch.setattr(build_database, "write_database", fake_write_database)
+    monkeypatch.setattr(build_database, "write_database_file", fake_write_database_file)
 
     result = build_database.main(
         [
@@ -833,10 +828,8 @@ def test_build_database_main_processes_mixed_positional_files(
 
     assert result == 0
     assert calls == [
-        ("iter", "stock_quote", stock_path),
-        ("write", "stock_quote", tmp_path / "db", [("stock_quote", stock_path.name)]),
-        ("iter", "currency_quote", currency_path),
-        ("write", "currency_quote", tmp_path / "db", [("currency_quote", currency_path.name)]),
+        ("write", stock_path, tmp_path / "db", "stock_quote"),
+        ("write", currency_path, tmp_path / "db", "currency_quote"),
     ]
 
 
@@ -855,10 +848,9 @@ def test_build_database_main_benchmark_prints_metrics(
 
     monkeypatch.setattr(
         build_database,
-        "_iter_input_rows",
-        lambda record_type, input_path: [(record_type, input_path.name)],
+        "write_database_file",
+        lambda input_path, database, record_type: 2,
     )
-    monkeypatch.setattr(build_database, "write_database", lambda rows, database, record_type: 2)
     monkeypatch.setattr(build_database.time, "perf_counter", lambda: next(timer_values))
 
     result = build_database.main(
@@ -879,64 +871,72 @@ def test_build_database_main_benchmark_prints_metrics(
     assert "throughput=0.000001 Mlines/s" in stderr
 
 
-def test_write_database_groups_records_by_ticker_using_first_record_date(tmp_path: Path) -> None:
+def test_build_database_file_native_groups_records_by_ticker_using_first_record_date(
+    tmp_path: Path,
+) -> None:
     from massive_speedup import build_database
-
-    class Row:
-        def __init__(self, ticker: str, sip_timestamp: int, payload: bytes) -> None:
-            self.ticker = ticker
-            self.sip_timestamp = sip_timestamp
-            self.participant_timestamp = sip_timestamp
-            self._payload = payload
-
-        def pack(self) -> bytes:
-            return self._payload
+    try:
+        module = import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
 
     one_day_ns = 86_400_000_000_000
-    rows = [
-        Row("A", 0, b"a1"),
-        Row("A", one_day_ns, b"a2"),
-        Row("B", one_day_ns, b"b1"),
-    ]
+    path = tmp_path / "trades.csv.gz"
+    with gzip.open(path, "wt", encoding="utf-8", newline="") as handle:
+        handle.write(build_database.STOCK_TRADE_HEADER + "\n")
+        handle.write("A,12,0,8,52983525035849,0,129.79,6876,0,100,1,0,0\n")
+        handle.write(
+            f"B,37,0,8,52983525035850,{one_day_ns},129.80,6877,{one_day_ns},100,1,0,0\n"
+        )
 
-    rows_written = build_database.write_database(rows, tmp_path / "db", "stock_trade")
+    rows_written = build_database.write_database_file(path, tmp_path / "db", "stock_trade")
 
     root = tmp_path / "db" / "stock_trade" / "1970-01-01"
-    assert rows_written == 3
-    assert (root / "A").read_bytes() == b"a1a2"
-    assert (root / "B").read_bytes() == b"b1"
+    assert rows_written == 2
+    assert len((root / "A").read_bytes()) == module.StockTrade.packed_size
+    assert len((root / "B").read_bytes()) == module.StockTrade.packed_size
+    assert module.StockTrade.from_packed((root / "A").read_bytes(), "A").ticker == "A"
+    assert module.StockTrade.from_packed((root / "B").read_bytes(), "B").ticker == "B"
     assert not (tmp_path / "db" / "stock_trade" / "1970-01-02").exists()
 
 
-def test_write_database_creates_database_root_for_empty_input(tmp_path: Path) -> None:
+def test_build_database_file_native_creates_database_root_for_empty_input(tmp_path: Path) -> None:
     from massive_speedup import build_database
+    try:
+        import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
 
     database = tmp_path / "db"
+    path = tmp_path / "trades.csv.gz"
+    with gzip.open(path, "wt", encoding="utf-8", newline="") as handle:
+        handle.write(build_database.STOCK_TRADE_HEADER + "\n")
 
-    rows_written = build_database.write_database([], database, "stock_trade")
+    rows_written = build_database.write_database_file(path, database, "stock_trade")
 
     assert rows_written == 0
     assert database.is_dir()
 
 
-def test_write_database_uses_participant_timestamp_for_currency_quote_date(
+def test_build_database_file_native_uses_participant_timestamp_for_currency_quote_date(
     tmp_path: Path,
 ) -> None:
     from massive_speedup import build_database
+    try:
+        module = import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
 
-    class Row:
-        ticker = "C:AED-AUD"
-        participant_timestamp = 0
+    path = tmp_path / "currency_quotes.csv.gz"
+    with gzip.open(path, "wt", encoding="utf-8", newline="") as handle:
+        handle.write(build_database.CURRENCY_QUOTE_HEADER + "\n")
+        handle.write("C:AED-AUD,48,0.412060465749694,48,0.411836123587859,0\n")
 
-        def pack(self) -> bytes:
-            return b"cq"
-
-    rows_written = build_database.write_database([Row()], tmp_path / "db", "currency_quote")
+    rows_written = build_database.write_database_file(path, tmp_path / "db", "currency_quote")
 
     assert rows_written == 1
-    assert (
-        tmp_path / "db" / "currency_quote" / "1970-01-01" / "C:AED-AUD"
-    ).read_bytes() == b"cq"
+    output = tmp_path / "db" / "currency_quote" / "1970-01-01" / "C:AED-AUD"
+    assert len(output.read_bytes()) == module.CurrencyQuote.packed_size
 
 
 def test_direct_native_module_exports_api() -> None:
@@ -953,6 +953,7 @@ def test_direct_native_module_exports_api() -> None:
     assert hasattr(module, "CurrencyQuote")
     assert hasattr(module, "CurrencyAggregate")
     assert hasattr(module, "gzip_lines")
+    assert hasattr(module, "build_database_file")
 
 
 def test_direct_native_module_classes_are_callable_when_built() -> None:
@@ -999,8 +1000,8 @@ def test_native_row_models_pack_roundtrip_and_extract_timestamps_when_built() ->
         packed = row.pack()
         assert isinstance(packed, bytes)
         assert len(packed) == row_type.packed_size
-        assert row_type.from_packed(packed) == row
-        assert row_type(packed) == row
+        assert row_type.from_packed(packed, row.ticker) == row
+        assert row_type(packed, row.ticker) == row
         return row, packed
 
     trade, packed_trade = assert_roundtrip(

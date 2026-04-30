@@ -1050,3 +1050,7 @@ FlatFiles.currency.Aggregate = SimpleNamespace(
     parse_raw=FlatFileCurrenciesParser.parse_raw_minute_aggregates,
     raw_lines=FlatFileCurrenciesParser.raw_lines,
 )
+
+
+def build_database_file(*args, **kwargs):
+    raise RuntimeError("build_database_file requires the native massive_speedup extension")

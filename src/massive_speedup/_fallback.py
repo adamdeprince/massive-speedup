@@ -5,7 +5,6 @@ from __future__ import annotations
 import csv
 import gzip
 import sys
-from collections import namedtuple
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Iterator
@@ -1025,22 +1024,16 @@ FlatFiles.StockQuotes = StockQuote
 FlatFiles.CurrencyQuote = CurrencyQuote
 FlatFiles.CurrencyAggregate = CurrencyAggregate
 
-StockTradeAggregation = namedtuple(
-    "StockTradeAggregation",
-    "ticker open close high low avg volume_weighted_avg volume window_start "
-    "transactions stddev",
-)
-StockQuoteAggregation = namedtuple(
-    "StockQuoteAggregation",
-    "ticker ask_open ask_close ask_high ask_low ask_avg ask_volume_weighted_avg "
-    "ask_volume ask_stddev bid_open bid_close bid_high bid_low bid_avg "
-    "bid_volume_weighted_avg bid_volume bid_stddev window_start transactions",
-)
-CurrencyQuoteAggregation = namedtuple(
-    "CurrencyQuoteAggregation",
-    "ticker ask_open ask_close ask_high ask_low ask_avg ask_stddev bid_open "
-    "bid_close bid_high bid_low bid_avg bid_stddev window_start transactions",
-)
+class StockTradeAggregation:
+    __slots__ = ()
+
+
+class StockQuoteAggregation:
+    __slots__ = ()
+
+
+class CurrencyQuoteAggregation:
+    __slots__ = ()
 
 
 class _NativeOnlyAggregator:

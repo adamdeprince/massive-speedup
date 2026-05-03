@@ -334,35 +334,22 @@ void bind_database_record_file(
   }
 }
 
-inline nb::object bind_namedtuple_type(
-    nb::module_& m,
-    const char* name,
-    const char* fields) {
-  nb::module_ collections = nb::module_::import_("collections");
-  nb::object type = collections.attr("namedtuple")(name, fields);
-  type.attr("__module__") = m.attr("__name__");
-  m.attr(name) = type;
-  return type;
-}
-
 template <typename AggregatorType>
 void bind_window_aggregator(
     nb::module_& m,
-    const char* name,
-    const nb::object& output_type) {
+    const char* name) {
   nb::class_<AggregatorType>(m, name)
       .def(
           "__init__",
-          [output_type](
-              AggregatorType* self,
-              nb::handle rows,
-              std::uint64_t interval_seconds,
-              std::uint64_t offset_seconds) {
+          [](
+             AggregatorType* self,
+             nb::handle rows,
+             std::uint64_t interval_seconds,
+             std::uint64_t offset_seconds) {
             new (self) AggregatorType(
                 rows,
                 interval_seconds,
-                offset_seconds,
-                output_type);
+                offset_seconds);
           },
           nb::arg("rows"),
           nb::arg("interval_seconds"),
@@ -374,37 +361,318 @@ void bind_window_aggregator(
       .def("__next__", &AggregatorType::next);
 }
 
+#define MASSIVE_SPEEDUP_BIND_AGG_STRING(class_, type, field) \
+  class_.def_prop_ro(#field, [](const type& self) { \
+    return self.cached_string(type::field##_attribute, self.field); \
+  })
+
+#define MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(class_, type, field) \
+  class_.def_prop_ro(#field, [](const type& self) { \
+    return self.cached_double(type::field##_attribute, self.field); \
+  })
+
+#define MASSIVE_SPEEDUP_BIND_AGG_UINT64(class_, type, field) \
+  class_.def_prop_ro(#field, [](const type& self) { \
+    return self.cached_uint64(type::field##_attribute, self.field); \
+  })
+
+inline void bind_aggregation_results(nb::module_& m) {
+  auto stock_trade_aggregation =
+      nb::class_<native::StockTradeAggregation>(m, "StockTradeAggregation");
+  MASSIVE_SPEEDUP_BIND_AGG_STRING(
+      stock_trade_aggregation, native::StockTradeAggregation, ticker);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_trade_aggregation, native::StockTradeAggregation, open);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_trade_aggregation, native::StockTradeAggregation, close);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_trade_aggregation, native::StockTradeAggregation, high);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_trade_aggregation, native::StockTradeAggregation, low);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_trade_aggregation, native::StockTradeAggregation, avg);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_trade_aggregation, native::StockTradeAggregation, volume_weighted_avg);
+  MASSIVE_SPEEDUP_BIND_AGG_UINT64(
+      stock_trade_aggregation, native::StockTradeAggregation, volume);
+  MASSIVE_SPEEDUP_BIND_AGG_UINT64(
+      stock_trade_aggregation, native::StockTradeAggregation, window_start);
+  MASSIVE_SPEEDUP_BIND_AGG_UINT64(
+      stock_trade_aggregation, native::StockTradeAggregation, transactions);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_trade_aggregation, native::StockTradeAggregation, stddev);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_trade_aggregation, native::StockTradeAggregation, dollar_volume);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_trade_aggregation, native::StockTradeAggregation, avg_trade_size);
+  MASSIVE_SPEEDUP_BIND_AGG_UINT64(
+      stock_trade_aggregation, native::StockTradeAggregation, min_trade_size);
+  MASSIVE_SPEEDUP_BIND_AGG_UINT64(
+      stock_trade_aggregation, native::StockTradeAggregation, max_trade_size);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_trade_aggregation, native::StockTradeAggregation, price_change);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_trade_aggregation, native::StockTradeAggregation, return_bps);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_trade_aggregation, native::StockTradeAggregation, price_range);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_trade_aggregation, native::StockTradeAggregation, range_bps);
+  MASSIVE_SPEEDUP_BIND_AGG_UINT64(
+      stock_trade_aggregation, native::StockTradeAggregation, first_timestamp);
+  MASSIVE_SPEEDUP_BIND_AGG_UINT64(
+      stock_trade_aggregation, native::StockTradeAggregation, last_timestamp);
+  MASSIVE_SPEEDUP_BIND_AGG_UINT64(
+      stock_trade_aggregation, native::StockTradeAggregation, duration_ns);
+
+  auto stock_quote_aggregation =
+      nb::class_<native::StockQuoteAggregation>(m, "StockQuoteAggregation");
+  MASSIVE_SPEEDUP_BIND_AGG_STRING(
+      stock_quote_aggregation, native::StockQuoteAggregation, ticker);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, ask_open);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, ask_close);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, ask_high);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, ask_low);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, ask_avg);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, ask_volume_weighted_avg);
+  MASSIVE_SPEEDUP_BIND_AGG_UINT64(
+      stock_quote_aggregation, native::StockQuoteAggregation, ask_volume);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, ask_stddev);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, bid_open);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, bid_close);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, bid_high);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, bid_low);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, bid_avg);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, bid_volume_weighted_avg);
+  MASSIVE_SPEEDUP_BIND_AGG_UINT64(
+      stock_quote_aggregation, native::StockQuoteAggregation, bid_volume);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, bid_stddev);
+  MASSIVE_SPEEDUP_BIND_AGG_UINT64(
+      stock_quote_aggregation, native::StockQuoteAggregation, window_start);
+  MASSIVE_SPEEDUP_BIND_AGG_UINT64(
+      stock_quote_aggregation, native::StockQuoteAggregation, transactions);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, ask_change);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, ask_return_bps);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, ask_range);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, ask_range_bps);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, bid_change);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, bid_return_bps);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, bid_range);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, bid_range_bps);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, spread_open);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, spread_close);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, spread_high);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, spread_low);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, spread_avg);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, spread_stddev);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, spread_change);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, spread_return_bps);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, spread_range);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, spread_range_bps);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, mid_open);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, mid_close);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, mid_high);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, mid_low);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, mid_avg);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, mid_stddev);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, mid_change);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, mid_return_bps);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, mid_range);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, mid_range_bps);
+  MASSIVE_SPEEDUP_BIND_AGG_UINT64(
+      stock_quote_aggregation, native::StockQuoteAggregation, locked_count);
+  MASSIVE_SPEEDUP_BIND_AGG_UINT64(
+      stock_quote_aggregation, native::StockQuoteAggregation, crossed_count);
+  MASSIVE_SPEEDUP_BIND_AGG_UINT64(
+      stock_quote_aggregation, native::StockQuoteAggregation, zero_ask_size_count);
+  MASSIVE_SPEEDUP_BIND_AGG_UINT64(
+      stock_quote_aggregation, native::StockQuoteAggregation, zero_bid_size_count);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, size_imbalance_avg);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, microprice_avg);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, time_weighted_ask_avg);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, time_weighted_bid_avg);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, time_weighted_mid_avg);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      stock_quote_aggregation, native::StockQuoteAggregation, time_weighted_spread_avg);
+  MASSIVE_SPEEDUP_BIND_AGG_UINT64(
+      stock_quote_aggregation, native::StockQuoteAggregation, first_timestamp);
+  MASSIVE_SPEEDUP_BIND_AGG_UINT64(
+      stock_quote_aggregation, native::StockQuoteAggregation, last_timestamp);
+  MASSIVE_SPEEDUP_BIND_AGG_UINT64(
+      stock_quote_aggregation, native::StockQuoteAggregation, duration_ns);
+
+  auto currency_quote_aggregation =
+      nb::class_<native::CurrencyQuoteAggregation>(m, "CurrencyQuoteAggregation");
+  MASSIVE_SPEEDUP_BIND_AGG_STRING(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, ticker);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, ask_open);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, ask_close);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, ask_high);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, ask_low);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, ask_avg);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, ask_stddev);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, bid_open);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, bid_close);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, bid_high);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, bid_low);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, bid_avg);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, bid_stddev);
+  MASSIVE_SPEEDUP_BIND_AGG_UINT64(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, window_start);
+  MASSIVE_SPEEDUP_BIND_AGG_UINT64(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, transactions);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, ask_change);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, ask_return_bps);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, ask_range);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, ask_range_bps);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, bid_change);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, bid_return_bps);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, bid_range);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, bid_range_bps);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, spread_open);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, spread_close);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, spread_high);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, spread_low);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, spread_avg);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, spread_stddev);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, spread_change);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, spread_return_bps);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, spread_range);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, spread_range_bps);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, mid_open);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, mid_close);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, mid_high);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, mid_low);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, mid_avg);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, mid_stddev);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, mid_change);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, mid_return_bps);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, mid_range);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, mid_range_bps);
+  MASSIVE_SPEEDUP_BIND_AGG_UINT64(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, locked_count);
+  MASSIVE_SPEEDUP_BIND_AGG_UINT64(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, crossed_count);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, time_weighted_ask_avg);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, time_weighted_bid_avg);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, time_weighted_mid_avg);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      currency_quote_aggregation,
+      native::CurrencyQuoteAggregation,
+      time_weighted_spread_avg);
+  MASSIVE_SPEEDUP_BIND_AGG_UINT64(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, first_timestamp);
+  MASSIVE_SPEEDUP_BIND_AGG_UINT64(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, last_timestamp);
+  MASSIVE_SPEEDUP_BIND_AGG_UINT64(
+      currency_quote_aggregation, native::CurrencyQuoteAggregation, duration_ns);
+}
+
+#undef MASSIVE_SPEEDUP_BIND_AGG_STRING
+#undef MASSIVE_SPEEDUP_BIND_AGG_DOUBLE
+#undef MASSIVE_SPEEDUP_BIND_AGG_UINT64
+
 inline void bind_window_aggregators(nb::module_& m) {
-  nb::object stock_trade_aggregation = bind_namedtuple_type(
-      m,
-      "StockTradeAggregation",
-      "ticker open close high low avg volume_weighted_avg volume window_start "
-      "transactions stddev");
-  nb::object stock_quote_aggregation = bind_namedtuple_type(
-      m,
-      "StockQuoteAggregation",
-      "ticker ask_open ask_close ask_high ask_low ask_avg "
-      "ask_volume_weighted_avg ask_volume ask_stddev bid_open bid_close "
-      "bid_high bid_low bid_avg bid_volume_weighted_avg bid_volume bid_stddev "
-      "window_start transactions");
-  nb::object currency_quote_aggregation = bind_namedtuple_type(
-      m,
-      "CurrencyQuoteAggregation",
-      "ticker ask_open ask_close ask_high ask_low ask_avg ask_stddev bid_open "
-      "bid_close bid_high bid_low bid_avg bid_stddev window_start transactions");
+  bind_aggregation_results(m);
 
   bind_window_aggregator<native::StockTradeAggregator>(
       m,
-      "StockTradeAggregator",
-      stock_trade_aggregation);
+      "StockTradeAggregator");
   bind_window_aggregator<native::StockQuoteAggregator>(
       m,
-      "StockQuoteAggregator",
-      stock_quote_aggregation);
+      "StockQuoteAggregator");
   bind_window_aggregator<native::CurrencyQuoteAggregator>(
       m,
-      "CurrencyQuoteAggregator",
-      currency_quote_aggregation);
+      "CurrencyQuoteAggregator");
 }
 
 template <typename ParserType>
@@ -591,23 +859,23 @@ inline void bind_row_models(nb::module_& m, nb::module_& flatfiles) {
               &construct_row_from_packed_with_ticker<native::StockTrade>,
               nb::arg("packed"),
               nb::arg("ticker"))
-          .def_ro("ticker", &native::StockTrade::ticker)
+          .def_prop_ro("ticker", &native::StockTrade::ticker_object)
           .def_prop_ro("conditions", &native::StockTrade::conditions_object)
-          .def_ro("correction", &native::StockTrade::correction)
-          .def_ro("exchange", &native::StockTrade::exchange)
-          .def_ro("id", &native::StockTrade::id)
-          .def_ro(
+          .def_prop_ro("correction", &native::StockTrade::correction_object)
+          .def_prop_ro("exchange", &native::StockTrade::exchange_object)
+          .def_prop_ro("id", &native::StockTrade::id_object)
+          .def_prop_ro(
               "participant_timestamp",
-              &native::StockTrade::participant_timestamp)
-          .def_ro("price", &native::StockTrade::price)
-          .def_ro(
+              &native::StockTrade::participant_timestamp_object)
+          .def_prop_ro("price", &native::StockTrade::price_object)
+          .def_prop_ro(
               "sequence_number",
-              &native::StockTrade::sequence_number)
-          .def_ro("sip_timestamp", &native::StockTrade::sip_timestamp)
-          .def_ro("size", &native::StockTrade::size)
-          .def_ro("tape", &native::StockTrade::tape)
-          .def_ro("trf_id", &native::StockTrade::trf_id)
-          .def_ro("trf_timestamp", &native::StockTrade::trf_timestamp)
+              &native::StockTrade::sequence_number_object)
+          .def_prop_ro("sip_timestamp", &native::StockTrade::sip_timestamp_object)
+          .def_prop_ro("size", &native::StockTrade::size_object)
+          .def_prop_ro("tape", &native::StockTrade::tape_object)
+          .def_prop_ro("trf_id", &native::StockTrade::trf_id_object)
+          .def_prop_ro("trf_timestamp", &native::StockTrade::trf_timestamp_object)
           .def(
               "__iter__",
               [](const native::StockTrade& self) {
@@ -657,24 +925,24 @@ inline void bind_row_models(nb::module_& m, nb::module_& flatfiles) {
               &construct_row_from_packed_with_ticker<native::StockQuote>,
               nb::arg("packed"),
               nb::arg("ticker"))
-          .def_ro("ticker", &native::StockQuote::ticker)
-          .def_ro("ask_exchange", &native::StockQuote::ask_exchange)
-          .def_ro("ask_price", &native::StockQuote::ask_price)
-          .def_ro("ask_size", &native::StockQuote::ask_size)
-          .def_ro("bid_exchange", &native::StockQuote::bid_exchange)
-          .def_ro("bid_price", &native::StockQuote::bid_price)
-          .def_ro("bid_size", &native::StockQuote::bid_size)
+          .def_prop_ro("ticker", &native::StockQuote::ticker_object)
+          .def_prop_ro("ask_exchange", &native::StockQuote::ask_exchange_object)
+          .def_prop_ro("ask_price", &native::StockQuote::ask_price_object)
+          .def_prop_ro("ask_size", &native::StockQuote::ask_size_object)
+          .def_prop_ro("bid_exchange", &native::StockQuote::bid_exchange_object)
+          .def_prop_ro("bid_price", &native::StockQuote::bid_price_object)
+          .def_prop_ro("bid_size", &native::StockQuote::bid_size_object)
           .def_prop_ro("conditions", &native::StockQuote::conditions_object)
           .def_prop_ro("indicators", &native::StockQuote::indicators_object)
-          .def_ro(
+          .def_prop_ro(
               "participant_timestamp",
-              &native::StockQuote::participant_timestamp)
-          .def_ro(
+              &native::StockQuote::participant_timestamp_object)
+          .def_prop_ro(
               "sequence_number",
-              &native::StockQuote::sequence_number)
-          .def_ro("sip_timestamp", &native::StockQuote::sip_timestamp)
-          .def_ro("tape", &native::StockQuote::tape)
-          .def_ro("trf_timestamp", &native::StockQuote::trf_timestamp)
+              &native::StockQuote::sequence_number_object)
+          .def_prop_ro("sip_timestamp", &native::StockQuote::sip_timestamp_object)
+          .def_prop_ro("tape", &native::StockQuote::tape_object)
+          .def_prop_ro("trf_timestamp", &native::StockQuote::trf_timestamp_object)
           .def(
               "__iter__",
               [](const native::StockQuote& self) {
@@ -724,15 +992,15 @@ inline void bind_row_models(nb::module_& m, nb::module_& flatfiles) {
               &construct_row_from_packed_with_ticker<native::CurrencyQuote>,
               nb::arg("packed"),
               nb::arg("ticker"))
-          .def_ro("ticker", &native::CurrencyQuote::ticker)
-          .def_ro("ask_exchange", &native::CurrencyQuote::ask_exchange)
-          .def_ro("ask_price", &native::CurrencyQuote::ask_price)
-          .def_ro("bid_exchange", &native::CurrencyQuote::bid_exchange)
-          .def_ro("bid_price", &native::CurrencyQuote::bid_price)
+          .def_prop_ro("ticker", &native::CurrencyQuote::ticker_object)
+          .def_prop_ro("ask_exchange", &native::CurrencyQuote::ask_exchange_object)
+          .def_prop_ro("ask_price", &native::CurrencyQuote::ask_price_object)
+          .def_prop_ro("bid_exchange", &native::CurrencyQuote::bid_exchange_object)
+          .def_prop_ro("bid_price", &native::CurrencyQuote::bid_price_object)
           .def_prop_ro("tickers", &native::CurrencyQuote::tickers_object)
-          .def_ro(
+          .def_prop_ro(
               "participant_timestamp",
-              &native::CurrencyQuote::participant_timestamp)
+              &native::CurrencyQuote::participant_timestamp_object)
           .def(
               "__iter__",
               [](const native::CurrencyQuote& self) {
@@ -776,14 +1044,14 @@ inline void bind_row_models(nb::module_& m, nb::module_& flatfiles) {
               &construct_row_from_packed_with_ticker<native::StockAggregate>,
               nb::arg("packed"),
               nb::arg("ticker"))
-          .def_ro("ticker", &native::StockAggregate::ticker)
-          .def_ro("volume", &native::StockAggregate::volume)
-          .def_ro("open", &native::StockAggregate::open)
-          .def_ro("close", &native::StockAggregate::close)
-          .def_ro("high", &native::StockAggregate::high)
-          .def_ro("low", &native::StockAggregate::low)
-          .def_ro("window_start", &native::StockAggregate::window_start)
-          .def_ro("transactions", &native::StockAggregate::transactions)
+          .def_prop_ro("ticker", &native::StockAggregate::ticker_object)
+          .def_prop_ro("volume", &native::StockAggregate::volume_object)
+          .def_prop_ro("open", &native::StockAggregate::open_object)
+          .def_prop_ro("close", &native::StockAggregate::close_object)
+          .def_prop_ro("high", &native::StockAggregate::high_object)
+          .def_prop_ro("low", &native::StockAggregate::low_object)
+          .def_prop_ro("window_start", &native::StockAggregate::window_start_object)
+          .def_prop_ro("transactions", &native::StockAggregate::transactions_object)
           .def(
               "__iter__",
               [](const native::StockAggregate& self) {
@@ -821,14 +1089,14 @@ inline void bind_row_models(nb::module_& m, nb::module_& flatfiles) {
               &construct_row_from_packed_with_ticker<native::CurrencyAggregate>,
               nb::arg("packed"),
               nb::arg("ticker"))
-          .def_ro("ticker", &native::CurrencyAggregate::ticker)
-          .def_ro("volume", &native::CurrencyAggregate::volume)
-          .def_ro("open", &native::CurrencyAggregate::open)
-          .def_ro("close", &native::CurrencyAggregate::close)
-          .def_ro("high", &native::CurrencyAggregate::high)
-          .def_ro("low", &native::CurrencyAggregate::low)
-          .def_ro("window_start", &native::CurrencyAggregate::window_start)
-          .def_ro("transactions", &native::CurrencyAggregate::transactions)
+          .def_prop_ro("ticker", &native::CurrencyAggregate::ticker_object)
+          .def_prop_ro("volume", &native::CurrencyAggregate::volume_object)
+          .def_prop_ro("open", &native::CurrencyAggregate::open_object)
+          .def_prop_ro("close", &native::CurrencyAggregate::close_object)
+          .def_prop_ro("high", &native::CurrencyAggregate::high_object)
+          .def_prop_ro("low", &native::CurrencyAggregate::low_object)
+          .def_prop_ro("window_start", &native::CurrencyAggregate::window_start_object)
+          .def_prop_ro("transactions", &native::CurrencyAggregate::transactions_object)
           .def_prop_ro("tickers", &native::CurrencyAggregate::tickers_object)
           .def(
               "__iter__",

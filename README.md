@@ -63,9 +63,11 @@ trade2 = massive_speedup.StockTrade.from_packed(packed, trade.ticker)
 
 ## Window Aggregation
 
-The native aggregators consume iterables of parsed records and yield Python
-namedtuple rows. The aggregation interval and offset are expressed in seconds;
-the returned `window_start` is still nanoseconds since epoch.
+The native aggregators consume iterables of parsed records and yield C++ result
+objects exposed through nanobind. Result attributes are read-only and lazily
+converted to Python objects on first access. The aggregation interval and offset
+are expressed in seconds; the returned `window_start` is still nanoseconds since
+epoch.
 
 ```python
 import massive_speedup

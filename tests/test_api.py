@@ -1112,7 +1112,78 @@ def test_native_row_models_pack_roundtrip_and_extract_timestamps_when_built() ->
     )
 
 
-def test_native_quote_and_trade_aggregators_yield_namedtuple_rows() -> None:
+def test_native_row_attributes_are_immutable_and_cached_when_built() -> None:
+    try:
+        module = import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
+
+    trade = module.StockTrade(
+        [
+            "A",
+            "12",
+            "0",
+            "8",
+            "52983525035849",
+            "1770810300032981000",
+            "129.79",
+            "6876",
+            "1770810300033243132",
+            "100",
+            "1",
+            "0",
+            "0",
+        ]
+    )
+    assert trade.price is trade.price
+    assert trade.id is trade.id
+    assert trade.conditions is trade.conditions
+    assert list(trade)[6] is trade.price
+    with pytest.raises(AttributeError):
+        trade.price = 1.0
+
+    quote = module.StockQuote(
+        [
+            "A",
+            "8",
+            "0.0",
+            "0",
+            "8",
+            "0.0",
+            "0",
+            "1",
+            "",
+            "1764147540102233000",
+            "322",
+            "1764147540102526248",
+            "1",
+            "0",
+        ]
+    )
+    assert quote.ask_price is quote.ask_price
+    assert quote.participant_timestamp is quote.participant_timestamp
+    assert quote.indicators is quote.indicators
+
+    currency_quote = module.CurrencyQuote(
+        ["C:AED-AUD", "48", "0.412", "48", "0.411", "1000"]
+    )
+    assert currency_quote.ask_price is currency_quote.ask_price
+    assert currency_quote.tickers is currency_quote.tickers
+
+    aggregate = module.StockAggregate(
+        ["A", "18218", "138.0", "137.93", "138.36", "137.75", "1", "125"]
+    )
+    assert aggregate.volume is aggregate.volume
+    assert aggregate.open is aggregate.open
+
+    currency_aggregate = module.CurrencyAggregate(
+        ["C:AED-AUD", "1", "0.3977", "0.3977", "0.3977", "0.3977", "1", "1"]
+    )
+    assert currency_aggregate.tickers is currency_aggregate.tickers
+    assert currency_aggregate.volume is currency_aggregate.volume
+
+
+def test_native_quote_and_trade_aggregators_yield_native_result_objects() -> None:
     try:
         module = import_module("massive_speedup._native")
     except ImportError:
@@ -1178,20 +1249,9 @@ def test_native_quote_and_trade_aggregators_yield_namedtuple_rows() -> None:
     trade_aggregates = list(module.StockTradeAggregator(trade_rows, interval_seconds=1))
     assert len(trade_aggregates) == 2
     first_trade = trade_aggregates[0]
-    assert isinstance(first_trade, tuple)
-    assert first_trade._fields == (
-        "ticker",
-        "open",
-        "close",
-        "high",
-        "low",
-        "avg",
-        "volume_weighted_avg",
-        "volume",
-        "window_start",
-        "transactions",
-        "stddev",
-    )
+    assert isinstance(first_trade, module.StockTradeAggregation)
+    assert first_trade.open is first_trade.open
+    assert first_trade.ticker is first_trade.ticker
     assert first_trade.ticker == "A"
     assert first_trade.open == 10.0
     assert first_trade.close == 14.0
@@ -1203,6 +1263,17 @@ def test_native_quote_and_trade_aggregators_yield_namedtuple_rows() -> None:
     assert first_trade.window_start == 1_000_000_000
     assert first_trade.transactions == 2
     assert first_trade.stddev == 2.0
+    assert first_trade.dollar_volume == 5200.0
+    assert first_trade.avg_trade_size == 200.0
+    assert first_trade.min_trade_size == 100
+    assert first_trade.max_trade_size == 300
+    assert first_trade.price_change == 4.0
+    assert first_trade.return_bps == pytest.approx(4000.0)
+    assert first_trade.price_range == 4.0
+    assert first_trade.range_bps == pytest.approx(4000.0)
+    assert first_trade.first_timestamp == 1_000_000_000
+    assert first_trade.last_timestamp == 1_500_000_000
+    assert first_trade.duration_ns == 500_000_000
     assert trade_aggregates[1].window_start == 2_000_000_000
 
     quote_rows = [
@@ -1244,27 +1315,9 @@ def test_native_quote_and_trade_aggregators_yield_namedtuple_rows() -> None:
         ),
     ]
     quote = next(module.StockQuoteAggregator(quote_rows, interval_seconds=1))
-    assert quote._fields == (
-        "ticker",
-        "ask_open",
-        "ask_close",
-        "ask_high",
-        "ask_low",
-        "ask_avg",
-        "ask_volume_weighted_avg",
-        "ask_volume",
-        "ask_stddev",
-        "bid_open",
-        "bid_close",
-        "bid_high",
-        "bid_low",
-        "bid_avg",
-        "bid_volume_weighted_avg",
-        "bid_volume",
-        "bid_stddev",
-        "window_start",
-        "transactions",
-    )
+    assert isinstance(quote, module.StockQuoteAggregation)
+    assert quote.ask_avg is quote.ask_avg
+    assert quote.microprice_avg is quote.microprice_avg
     assert quote.ask_avg == 12.0
     assert quote.ask_volume_weighted_avg == 13.0
     assert quote.ask_volume == 8
@@ -1273,13 +1326,45 @@ def test_native_quote_and_trade_aggregators_yield_namedtuple_rows() -> None:
     assert quote.bid_volume_weighted_avg == pytest.approx(9.5)
     assert quote.bid_volume == 4
     assert quote.bid_stddev == 1.0
+    assert quote.ask_change == 4.0
+    assert quote.ask_return_bps == pytest.approx(4000.0)
+    assert quote.ask_range == 4.0
+    assert quote.ask_range_bps == pytest.approx(4000.0)
+    assert quote.bid_change == 2.0
+    assert quote.bid_return_bps == pytest.approx(2500.0)
+    assert quote.bid_range == 2.0
+    assert quote.bid_range_bps == pytest.approx(2500.0)
+    assert quote.spread_open == 2.0
+    assert quote.spread_close == 4.0
+    assert quote.spread_avg == 3.0
+    assert quote.spread_stddev == 1.0
+    assert quote.mid_open == 9.0
+    assert quote.mid_close == 12.0
+    assert quote.mid_avg == 10.5
+    assert quote.mid_stddev == 1.5
+    assert quote.locked_count == 0
+    assert quote.crossed_count == 0
+    assert quote.zero_ask_size_count == 0
+    assert quote.zero_bid_size_count == 0
+    assert quote.size_imbalance_avg == pytest.approx(-1.0 / 3.0)
+    assert quote.microprice_avg == pytest.approx(10.0)
+    assert quote.time_weighted_ask_avg == pytest.approx(10.444444444444445)
+    assert quote.time_weighted_bid_avg == pytest.approx(8.222222222222221)
+    assert quote.time_weighted_mid_avg == pytest.approx(9.333333333333334)
+    assert quote.time_weighted_spread_avg == pytest.approx(2.2222222222222223)
+    assert quote.first_timestamp == 100_000_000
+    assert quote.last_timestamp == 900_000_000
+    assert quote.duration_ns == 800_000_000
 
     currency_rows = [
         module.CurrencyQuote(["C:AED-AUD", "48", "1.0", "48", "0.8", "100000000"]),
         module.CurrencyQuote(["C:AED-AUD", "48", "1.4", "48", "1.0", "900000000"]),
     ]
     currency = next(module.CurrencyQuoteAggregator(currency_rows, interval_seconds=1))
-    assert "volume" not in currency._fields
+    assert isinstance(currency, module.CurrencyQuoteAggregation)
+    assert not hasattr(currency, "volume")
+    assert currency.ticker is currency.ticker
+    assert currency.mid_avg is currency.mid_avg
     assert currency.ticker == "C:AED-AUD"
     assert currency.ask_avg == pytest.approx(1.2)
     assert currency.ask_stddev == pytest.approx(0.2)
@@ -1287,6 +1372,19 @@ def test_native_quote_and_trade_aggregators_yield_namedtuple_rows() -> None:
     assert currency.bid_stddev == pytest.approx(0.1)
     assert currency.window_start == 0
     assert currency.transactions == 2
+    assert currency.spread_open == pytest.approx(0.2)
+    assert currency.spread_close == pytest.approx(0.4)
+    assert currency.spread_avg == pytest.approx(0.3)
+    assert currency.mid_open == pytest.approx(0.9)
+    assert currency.mid_close == pytest.approx(1.2)
+    assert currency.mid_avg == pytest.approx(1.05)
+    assert currency.time_weighted_ask_avg == pytest.approx(1.0444444444444445)
+    assert currency.time_weighted_bid_avg == pytest.approx(0.8222222222222222)
+    assert currency.time_weighted_mid_avg == pytest.approx(0.9333333333333333)
+    assert currency.time_weighted_spread_avg == pytest.approx(0.22222222222222224)
+    assert currency.first_timestamp == 100_000_000
+    assert currency.last_timestamp == 900_000_000
+    assert currency.duration_ns == 800_000_000
 
 
 def test_native_database_record_files_mmap_iter_index_search_and_market_calendar(
@@ -1381,6 +1479,10 @@ def test_native_database_record_files_mmap_iter_index_search_and_market_calendar
         trade_records.find_after_participant_timestamp(1500, 1000, galloping=True)
         == trade_rows[1]
     )
+    trade_bar = next(module.StockTradeAggregator(trade_records, interval_seconds=1))
+    assert trade_bar.volume == 200
+    assert trade_bar.transactions == 2
+    assert trade_bar.volume_weighted_avg == pytest.approx(129.795)
 
     quote_rows = [
         module.StockQuote(
@@ -1429,6 +1531,10 @@ def test_native_database_record_files_mmap_iter_index_search_and_market_calendar
     assert list(quote_records.iterate_bounded(dt.time(0, 0, 0, 2))) == [quote_rows[1]]
     assert quote_records.find_after_participant_timestamp(1500, 1000) == quote_rows[1]
     assert quote_records.find_before_participant_timestamp(2000, on=False) == quote_rows[0]
+    quote_bar = next(module.StockQuoteAggregator(quote_records, interval_seconds=1))
+    assert quote_bar.transactions == 2
+    assert quote_bar.ask_volume == 0
+    assert quote_bar.bid_volume == 0
 
     currency_rows = [
         module.CurrencyQuote(["C:AED-AUD", "48", "0.412", "48", "0.411", "1000"]),
@@ -1443,6 +1549,9 @@ def test_native_database_record_files_mmap_iter_index_search_and_market_calendar
     assert list(currency_records.iterate_bounded(dt.time(0, 0, 0, 2))) == [currency_rows[1]]
     assert currency_records.find_before_participant_timestamp(1500, 1000) == currency_rows[0]
     assert currency_records.find_after_participant_timestamp(1500, galloping=True) == currency_rows[1]
+    currency_bar = next(module.CurrencyQuoteAggregator(currency_records, interval_seconds=1))
+    assert currency_bar.transactions == 2
+    assert currency_bar.ask_avg == pytest.approx(0.4125)
 
     class FakeTimestamp:
         def __init__(self, value: int) -> None:

@@ -1,6 +1,6 @@
 [project]
 name = "massive-speedup"
-version = "0.1.0"
+version = "0.1.1"
 description = "Nanobind/C++ parsers for polygon, bulk S3, and websocket market data."
 readme = "README.md"
 requires-python = ">=3.9,<4.0"

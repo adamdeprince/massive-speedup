@@ -121,7 +121,7 @@ class StockTrade:
         self.price = _parse_float(fields[6])
         self.sequence_number = _parse_int(fields[7])
         self.sip_timestamp = _parse_int(fields[8])
-        self.size = _parse_int(fields[9])
+        self.size = _parse_float(fields[9])
         self.tape = _parse_int(fields[10])
         self.trf_id = _parse_int(fields[11])
         self.trf_timestamp = _parse_int(fields[12])

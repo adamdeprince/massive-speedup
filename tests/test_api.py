@@ -2,6 +2,7 @@ from pathlib import Path
 from importlib import import_module
 import datetime as dt
 import gzip
+import struct
 import sys
 import types
 
@@ -87,6 +88,28 @@ def test_flatfiles_stocks_parse_trades_reads_gzip_records(tmp_path: Path) -> Non
     assert trades[0].exchange == 8
     assert trades[0].participant_timestamp == 1770810300032981000
     assert trades[0].price == 129.79
+
+
+def test_flatfiles_stocks_parse_trades_accepts_decimal_size_field(tmp_path: Path) -> None:
+    path = tmp_path / "recent_trades.csv.gz"
+    with gzip.open(path, "wt", encoding="utf-8", newline="") as handle:
+        handle.write(
+            "ticker,conditions,correction,exchange,id,participant_timestamp,price,"
+            "sequence_number,sip_timestamp,size,tape,trf_id,trf_timestamp\n"
+        )
+        handle.write(
+            'A,"12,37",0,4,52983526340682,1775023619906000000,113.950000,'
+            "4410,1775030437400930176,1.000000,1,201,1775030437400903786\n"
+        )
+
+    trade = next(FlatFiles.Stock.Trade.parse(path))
+
+    assert trade.conditions == frozenset({12, 37})
+    assert trade.exchange == 4
+    assert trade.price == 113.95
+    assert trade.size == 1.0
+    assert isinstance(trade.size, float)
+    assert trade.trf_id == 201
 
 
 def test_flatfiles_stocks_nested_trade_api_parse_and_parse_raw(tmp_path: Path) -> None:
@@ -1022,11 +1045,18 @@ def test_native_row_models_pack_roundtrip_and_extract_timestamps_when_built() ->
             "137.73",
             "4798",
             "1769161728012983416",
-            "15",
+            "16713336.0",
             "1",
             "0",
             "0",
         ],
+    )
+    assert trade.size == 16713336.0
+    assert isinstance(trade.size, float)
+    size_offset = module.StockTrade.packed_size_offset
+    assert (
+        struct.unpack("<f", packed_trade[size_offset:size_offset + 4])[0]
+        == 16713336.0
     )
     quote, packed_quote = assert_roundtrip(
         module.StockQuote,
@@ -1222,7 +1252,7 @@ def test_native_quote_and_trade_aggregators_yield_native_result_objects() -> Non
                 "14.0",
                 "2",
                 "1500000000",
-                "300",
+                "300.5",
                 "1",
                 "0",
                 "0",
@@ -1258,15 +1288,16 @@ def test_native_quote_and_trade_aggregators_yield_native_result_objects() -> Non
     assert first_trade.high == 14.0
     assert first_trade.low == 10.0
     assert first_trade.avg == 12.0
-    assert first_trade.volume_weighted_avg == 13.0
-    assert first_trade.volume == 400
+    assert first_trade.volume_weighted_avg == pytest.approx(13.001248439450686)
+    assert first_trade.volume == 400.5
+    assert isinstance(first_trade.volume, float)
     assert first_trade.window_start == 1_000_000_000
     assert first_trade.transactions == 2
     assert first_trade.stddev == 2.0
-    assert first_trade.dollar_volume == 5200.0
-    assert first_trade.avg_trade_size == 200.0
-    assert first_trade.min_trade_size == 100
-    assert first_trade.max_trade_size == 300
+    assert first_trade.dollar_volume == 5207.0
+    assert first_trade.avg_trade_size == 200.25
+    assert first_trade.min_trade_size == 100.0
+    assert first_trade.max_trade_size == 300.5
     assert first_trade.price_change == 4.0
     assert first_trade.return_bps == pytest.approx(4000.0)
     assert first_trade.price_range == 4.0

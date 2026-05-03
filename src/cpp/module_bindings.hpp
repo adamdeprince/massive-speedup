@@ -393,7 +393,7 @@ inline void bind_aggregation_results(nb::module_& m) {
       stock_trade_aggregation, native::StockTradeAggregation, avg);
   MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
       stock_trade_aggregation, native::StockTradeAggregation, volume_weighted_avg);
-  MASSIVE_SPEEDUP_BIND_AGG_UINT64(
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
       stock_trade_aggregation, native::StockTradeAggregation, volume);
   MASSIVE_SPEEDUP_BIND_AGG_UINT64(
       stock_trade_aggregation, native::StockTradeAggregation, window_start);
@@ -405,9 +405,9 @@ inline void bind_aggregation_results(nb::module_& m) {
       stock_trade_aggregation, native::StockTradeAggregation, dollar_volume);
   MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
       stock_trade_aggregation, native::StockTradeAggregation, avg_trade_size);
-  MASSIVE_SPEEDUP_BIND_AGG_UINT64(
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
       stock_trade_aggregation, native::StockTradeAggregation, min_trade_size);
-  MASSIVE_SPEEDUP_BIND_AGG_UINT64(
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
       stock_trade_aggregation, native::StockTradeAggregation, max_trade_size);
   MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
       stock_trade_aggregation, native::StockTradeAggregation, price_change);
@@ -908,6 +908,8 @@ inline void bind_row_models(nb::module_& m, nb::module_& flatfiles) {
       nb::int_(native::StockTrade::packed_participant_timestamp_offset);
   stock_trade.attr("packed_sip_timestamp_offset") =
       nb::int_(native::StockTrade::packed_sip_timestamp_offset);
+  stock_trade.attr("packed_size_offset") =
+      nb::int_(native::StockTrade::packed_size_offset);
   bind_participant_timestamp_ordering(stock_trade);
 
   auto stock_quote =

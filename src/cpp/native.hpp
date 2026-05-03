@@ -403,6 +403,12 @@ inline double read_double_le_at(const void* data, std::size_t offset) {
   return std::bit_cast<double>(read_uint64_le_at(data, offset));
 }
 
+inline float read_float32_le_at(const void* data, std::size_t offset) {
+  static_assert(sizeof(float) == sizeof(std::uint32_t));
+  static_assert(std::numeric_limits<float>::is_iec559);
+  return std::bit_cast<float>(read_uint32_le_at(data, offset));
+}
+
 template <std::size_t PackedSize>
 void write_int32_le(
     PackedBuffer<PackedSize>& output,
@@ -429,6 +435,22 @@ inline double read_double_le(std::string_view input, std::size_t& offset) {
   static_assert(sizeof(double) == sizeof(std::uint64_t));
   static_assert(std::numeric_limits<double>::is_iec559);
   return std::bit_cast<double>(read_unsigned_le<std::uint64_t>(input, offset));
+}
+
+template <std::size_t PackedSize>
+void write_float32_le(
+    PackedBuffer<PackedSize>& output,
+    std::size_t& offset,
+    float value) {
+  static_assert(sizeof(float) == sizeof(std::uint32_t));
+  static_assert(std::numeric_limits<float>::is_iec559);
+  write_unsigned_le(output, offset, std::bit_cast<std::uint32_t>(value));
+}
+
+inline float read_float32_le(std::string_view input, std::size_t& offset) {
+  static_assert(sizeof(float) == sizeof(std::uint32_t));
+  static_assert(std::numeric_limits<float>::is_iec559);
+  return std::bit_cast<float>(read_unsigned_le<std::uint32_t>(input, offset));
 }
 
 template <std::size_t BitCount, std::size_t PackedSize>
@@ -1230,7 +1252,7 @@ struct StockTrade {
   std::uint64_t sip_timestamp = 0;
   std::uint64_t trf_timestamp = 0;
   std::int32_t correction = 0;
-  std::int32_t size = 0;
+  float size = 0.0F;
   std::uint16_t tape = 0;
   std::uint16_t trf_id = 0;
   std::uint8_t exchange = 0;
@@ -1304,7 +1326,7 @@ struct StockTrade {
         Specialization::template parse_integer<std::uint64_t>(fields[7], "sequence_number");
     result.sip_timestamp =
         Specialization::template parse_integer<std::uint64_t>(fields[8], "sip_timestamp");
-    result.size = Specialization::template parse_integer<std::int32_t>(fields[9], "size");
+    result.size = static_cast<float>(Specialization::parse_double(fields[9], "size"));
     result.tape = Specialization::template parse_integer<std::uint16_t>(fields[10], "tape");
     result.trf_id =
         Specialization::template parse_integer<std::uint16_t>(fields[11], "trf_id");
@@ -1327,7 +1349,7 @@ struct StockTrade {
     result.price = detail::read_double_le(packed_data, offset);
     result.sequence_number = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
     result.sip_timestamp = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
-    result.size = detail::read_int32_le(packed_data, offset);
+    result.size = detail::read_float32_le(packed_data, offset);
     result.tape = detail::read_unsigned_le<std::uint16_t>(packed_data, offset);
     result.trf_id = detail::read_unsigned_le<std::uint16_t>(packed_data, offset);
     result.trf_timestamp = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
@@ -1358,8 +1380,8 @@ struct StockTrade {
     return detail::read_double_le_at(packed_data, packed_price_offset);
   }
 
-  static std::int32_t size_at(const void* packed_data) {
-    return detail::read_int32_le_at(packed_data, packed_size_offset);
+  static float size_at(const void* packed_data) {
+    return detail::read_float32_le_at(packed_data, packed_size_offset);
   }
 
   PackedData pack() const {
@@ -1373,7 +1395,7 @@ struct StockTrade {
     detail::write_double_le(output, offset, price);
     detail::write_unsigned_le(output, offset, sequence_number);
     detail::write_unsigned_le(output, offset, sip_timestamp);
-    detail::write_int32_le(output, offset, size);
+    detail::write_float32_le(output, offset, size);
     detail::write_unsigned_le(output, offset, tape);
     detail::write_unsigned_le(output, offset, trf_id);
     detail::write_unsigned_le(output, offset, trf_timestamp);
@@ -1470,7 +1492,7 @@ struct StockTrade {
     return detail::cached_python_object(
         object_cache_,
         size_attribute,
-        [&] { return detail::int64_object_new_ref(size); });
+        [&] { return detail::double_object_new_ref(size); });
   }
 
   nanobind::object tape_object() const {
@@ -2715,16 +2737,16 @@ struct PriceAggregation {
 
 struct WeightedPriceAggregation {
   long double weighted_sum = 0.0;
-  std::uint64_t weight = 0;
+  long double weight = 0.0;
 
-  void add(double value, std::uint64_t value_weight) {
+  void add(double value, double value_weight) {
     weighted_sum += static_cast<long double>(value) *
                     static_cast<long double>(value_weight);
     weight += value_weight;
   }
 
   double average() const {
-    if (weight == 0) {
+    if (weight == 0.0L) {
       return quiet_nan();
     }
     return static_cast<double>(
@@ -2843,11 +2865,11 @@ struct StockTradeAggregation : detail::AggregateObjectCache<22> {
   double return_bps = 0.0;
   double price_range = 0.0;
   double range_bps = 0.0;
-  std::uint64_t volume = 0;
+  double volume = 0.0;
   std::uint64_t window_start = 0;
   std::uint64_t transactions = 0;
-  std::uint64_t min_trade_size = 0;
-  std::uint64_t max_trade_size = 0;
+  double min_trade_size = 0.0;
+  double max_trade_size = 0.0;
   std::uint64_t first_timestamp = 0;
   std::uint64_t last_timestamp = 0;
   std::uint64_t duration_ns = 0;
@@ -3094,9 +3116,9 @@ struct StockTradeAggregationState {
   std::uint64_t window_start = 0;
   std::uint64_t window_end = 0;
   std::uint64_t transactions = 0;
-  std::uint64_t volume = 0;
-  std::uint64_t min_trade_size = 0;
-  std::uint64_t max_trade_size = 0;
+  double volume = 0.0;
+  double min_trade_size = 0.0;
+  double max_trade_size = 0.0;
   std::uint64_t first_timestamp = 0;
   std::uint64_t last_timestamp = 0;
   detail::PriceAggregation price;
@@ -3113,14 +3135,16 @@ struct StockTradeAggregationState {
         window_end(detail::saturating_add_uint64(window, interval_ns)) {}
 
   void add(const StockTrade& row) {
-    const std::uint64_t row_volume =
-        row.size <= 0 ? 0 : static_cast<std::uint64_t>(row.size);
+    const double row_volume =
+        !std::isfinite(row.size) || row.size <= 0.0F
+            ? 0.0
+            : static_cast<double>(row.size);
     add_values(row.price, row_volume, row.sip_timestamp);
   }
 
   void add_values(
       double value,
-      std::uint64_t row_volume,
+      double row_volume,
       std::uint64_t timestamp) {
     price.add(value);
     weighted_price.add(value, row_volume);
@@ -3151,11 +3175,11 @@ struct StockTradeAggregationState {
     result.transactions = transactions;
     result.stddev = price.stddev();
     result.dollar_volume = static_cast<double>(
-        weighted_price.weight == 0 ? 0.0L : weighted_price.weighted_sum);
+        weighted_price.weight == 0.0L ? 0.0L : weighted_price.weighted_sum);
     result.avg_trade_size =
         transactions == 0
             ? detail::quiet_nan()
-            : static_cast<double>(volume) / static_cast<double>(transactions);
+            : volume / static_cast<double>(transactions);
     result.min_trade_size = min_trade_size;
     result.max_trade_size = max_trade_size;
     result.price_change = price.change();
@@ -3467,10 +3491,10 @@ struct StockTradeAggregationTraits {
       State& state,
       const void* packed_data,
       std::uint64_t timestamp) {
-    const std::int32_t size = RowType::size_at(packed_data);
+    const float size = RowType::size_at(packed_data);
     state.add_values(
         RowType::price_at(packed_data),
-        size <= 0 ? 0 : static_cast<std::uint64_t>(size),
+        !std::isfinite(size) || size <= 0.0F ? 0.0 : static_cast<double>(size),
         timestamp);
   }
 };
@@ -5585,10 +5609,9 @@ class Implementation : public Base {
         Specialization::template parse_integer<std::uint64_t>(
             cursor.template next_field<Specialization, true>(scratch),
             "sip_timestamp");
-    result.size =
-        Specialization::template parse_integer<std::int32_t>(
-            cursor.template next_field<Specialization, true>(scratch),
-            "size");
+    result.size = static_cast<float>(Specialization::parse_double(
+        cursor.template next_field<Specialization, true>(scratch),
+        "size"));
     result.tape =
         Specialization::template parse_integer<std::uint16_t>(
             cursor.template next_field<Specialization, true>(scratch),

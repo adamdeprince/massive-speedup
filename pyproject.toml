@@ -1,6 +1,6 @@
 [project]
 name = "massive-speedup"
-version = "0.1.1"
+version = "0.1.2"
 description = "Nanobind/C++ parsers for polygon, bulk S3, and websocket market data."
 readme = "README.md"
 requires-python = ">=3.9,<4.0"
@@ -29,7 +29,7 @@ classifiers = [
   "Programming Language :: C++",
   "Topic :: Software Development :: Libraries :: Python Modules",
 ]
-dependencies = ["tqdm (>=4.67.3,<5.0.0)", "scikit-build-core (>=0.12.2,<0.13.0)", "nanobind (>=2.12.0,<3.0.0)"]
+dependencies = ["tqdm (>=4.67.3,<5.0.0)", "scikit-build-core (>=0.12.2,<0.13.0)", "nanobind (>=2.12.0,<3.0.0)", "pandas_market_calendars (>=5.1.1,<6.0.0)"]
 
 [project.scripts]
 massive-speedup-build-database = "massive_speedup.build_database:main"
@@ -55,6 +55,7 @@ packages = [{ include = "massive_speedup", from = "src" }]
 
 [tool.poetry.dependencies]
 python = ">=3.9,<4.0"
+pandas_market_calendars = ">=5.1.1,<6.0.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.3.0,<9.0.0"

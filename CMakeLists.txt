@@ -197,12 +197,17 @@ function(add_massive_speedup_module module_name module_source)
   nanobind_add_module(
     ${module_name}
     STABLE_ABI
+    FREE_THREADED
     ${module_source}
     ${MASSIVE_SPEEDUP_COMMON_SOURCES}
   )
 
   configure_massive_speedup_target(${module_name})
-  install(TARGETS ${module_name} LIBRARY DESTINATION massive_speedup)
+  install(
+    TARGETS ${module_name}
+    LIBRARY DESTINATION massive_speedup
+    COMPONENT massive_speedup_Runtime
+  )
 endfunction()
 
 add_massive_speedup_module(_native src/cpp/native.cpp)

@@ -1586,7 +1586,8 @@ def test_native_database_record_files_mmap_iter_index_search_and_market_calendar
 
 
 def test_parsed_rows_use_instance_lifetime_bitset_cache() -> None:
-    native_source = Path("src/cpp/native.hpp").read_text(encoding="utf-8")
+    repo_root = Path(__file__).resolve().parents[1]
+    native_source = (repo_root / "src/cpp/native.hpp").read_text(encoding="utf-8")
 
     assert "class BitsetParseCache" in native_source
     assert "detail::BitsetParseCache<96> bitset_cache_;" in native_source

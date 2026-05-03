@@ -5,7 +5,7 @@ scikit-build-core and CMake.
 
 ## Requirements
 
-- Python 3.11 or newer
+- Python 3.9 or newer
 - A C++23-capable compiler
 - CMake 3.24 or newer
 - `pip`

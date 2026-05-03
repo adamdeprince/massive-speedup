@@ -15,6 +15,7 @@
 #include <generator>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -539,7 +540,9 @@ inline nanobind::object bit_indices_frozenset(const std::bitset<96>& bits) {
 
   using InternTable = std::unordered_map<std::bitset<96>, PyObject*, BitsetKeyHash>;
   static InternTable* interned_sets = new InternTable();
+  static std::mutex interned_sets_mutex;
 
+  std::lock_guard<std::mutex> lock(interned_sets_mutex);
   if (const auto found = interned_sets->find(bits); found != interned_sets->end()) {
     Py_INCREF(found->second);
     return nanobind::steal<nanobind::object>(found->second);
@@ -586,7 +589,9 @@ inline nanobind::object currency_tickers_tuple(std::string_view ticker) {
       TransparentStringHash,
       TransparentStringEqual>;
   static InternTable* interned_tickers = new InternTable();
+  static std::mutex interned_tickers_mutex;
 
+  std::lock_guard<std::mutex> lock(interned_tickers_mutex);
   if (const auto found = interned_tickers->find(ticker); found != interned_tickers->end()) {
     Py_INCREF(found->second);
     return nanobind::steal<nanobind::object>(found->second);
@@ -1056,6 +1061,7 @@ class LazyPythonObjectCache {
 
   template <typename Factory>
   nanobind::object get(std::size_t index, Factory&& factory) {
+    std::lock_guard<std::mutex> lock(mutex_);
     PyObject*& cached = objects_[index];
     if (cached == nullptr) {
       cached = factory();
@@ -1070,6 +1076,7 @@ class LazyPythonObjectCache {
 
  private:
   std::array<PyObject*, Count> objects_{};
+  std::mutex mutex_;
 };
 
 template <std::size_t Count, typename Factory>
@@ -1077,6 +1084,8 @@ nanobind::object cached_python_object(
     std::unique_ptr<LazyPythonObjectCache<Count>>& cache,
     std::size_t index,
     Factory&& factory) {
+  static std::mutex cache_pointer_mutex;
+  std::lock_guard<std::mutex> lock(cache_pointer_mutex);
   if (!cache) {
     cache = std::make_unique<LazyPythonObjectCache<Count>>();
   }
@@ -1132,6 +1141,7 @@ class EmbeddedPythonObjectCache {
   }
 
   void clear() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     for (PyObject*& object : objects_) {
       Py_XDECREF(object);
       object = nullptr;
@@ -1140,6 +1150,7 @@ class EmbeddedPythonObjectCache {
 
   template <typename Factory>
   nanobind::object get(std::size_t index, Factory&& factory) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     PyObject*& cached = objects_[index];
     if (cached == nullptr) {
       cached = factory();
@@ -1154,6 +1165,7 @@ class EmbeddedPythonObjectCache {
 
  private:
   mutable std::array<PyObject*, Count> objects_{};
+  mutable std::mutex mutex_;
 };
 
 template <std::size_t Count>

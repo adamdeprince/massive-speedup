@@ -3,8 +3,9 @@ name = "massive-speedup"
 version = "0.1.0"
 description = "Nanobind/C++ parsers for polygon, bulk S3, and websocket market data."
 readme = "README.md"
-requires-python = ">=3.11,<4.0"
+requires-python = ">=3.9,<4.0"
 license = "Apache-2.0"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 authors = [
   { name = "Adam" }
 ]
@@ -19,8 +20,12 @@ classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Programming Language :: C++",
   "Topic :: Software Development :: Libraries :: Python Modules",
 ]
@@ -49,7 +54,7 @@ build-backend = "scikit_build_core.build"
 packages = [{ include = "massive_speedup", from = "src" }]
 
 [tool.poetry.dependencies]
-python = ">=3.11,<4.0"
+python = ">=3.9,<4.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.3.0,<9.0.0"
@@ -61,7 +66,30 @@ scikit-build-core = ">=0.10.0"
 [tool.scikit-build]
 minimum-version = "build-system.requires"
 build-dir = "build/{wheel_tag}"
+install.components = ["massive_speedup_Runtime"]
 wheel.packages = ["src/massive_speedup"]
+
+[tool.cibuildwheel]
+build-frontend = "build"
+config-settings = { "build-dir" = "/tmp/massive-speedup-cibuildwheel/{wheel_tag}" }
+enable = ["cpython-freethreading"]
+test-command = "python -m pytest {project}/tests"
+test-requires = ["pytest>=8.3.0,<9.0.0"]
+
+[tool.cibuildwheel.linux]
+archs = ["x86_64"]
+build = """
+cp39-manylinux_x86_64 cp39-musllinux_x86_64
+cp310-manylinux_x86_64 cp310-musllinux_x86_64
+cp311-manylinux_x86_64 cp311-musllinux_x86_64
+cp312-manylinux_x86_64 cp312-musllinux_x86_64
+cp313-manylinux_x86_64 cp313-musllinux_x86_64
+cp313t-manylinux_x86_64 cp313t-musllinux_x86_64
+cp314-manylinux_x86_64 cp314-musllinux_x86_64
+cp314t-manylinux_x86_64 cp314t-musllinux_x86_64
+"""
+manylinux-x86_64-image = "manylinux_2_28"
+musllinux-x86_64-image = "musllinux_1_2"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

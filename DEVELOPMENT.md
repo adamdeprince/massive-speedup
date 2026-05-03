@@ -121,11 +121,15 @@ python -m cibuildwheel --output-dir dist
 Limit Python versions if needed:
 
 ```bash
-CIBW_BUILD="cp311-* cp312-* cp313-*" python -m cibuildwheel --output-dir dist
+CIBW_BUILD="cp311-* cp312-* cp313-* cp314-*" python -m cibuildwheel --output-dir dist
 ```
 
 Linux builds normally require Docker because cibuildwheel builds manylinux or
 musllinux-compatible wheels in containers.
+
+The default project configuration builds Linux x86_64 wheels for CPython
+3.9-3.14 on both manylinux and musllinux. It also includes the free-threaded
+`cp313t` and `cp314t` variants.
 
 ## Publish To TestPyPI
 

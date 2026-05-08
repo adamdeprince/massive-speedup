@@ -134,6 +134,21 @@ The input type is inferred from the CSV header. Output layout is:
 {database}/{stock_trade|stock_quote|currency_quote}/{YYYY-MM-DD}/{ticker}
 ```
 
+Existing ticker files are not overwritten by default. The builder keeps reading
+the input until the next ticker and only writes missing ticker files. Use
+`--force` to rebuild existing ticker files, which is useful after a binary
+record format change:
+
+```bash
+massive-speedup-build-database --force --database /data/massive-db 2026-01-23.csv.gz
+```
+
+Date-level idempotency uses an `.incomplete` marker in
+`{database}/{type}/{YYYY-MM-DD}`. If the date directory exists without
+`.incomplete`, the input file is skipped. If the directory is new, `.incomplete`
+is created before processing and removed only after successful completion. Use
+`--force` to process a date even when `.incomplete` is absent.
+
 Use `--benchmark` to print throughput:
 
 ```bash
@@ -155,6 +170,25 @@ for trade in records:
     print(trade.sip_timestamp, trade.price)
 ```
 
+Merge stock trades and quotes for one date and ticker in SIP timestamp order:
+
+```python
+for trade, quote in massive_speedup.stock_trade_quote_timeline(
+    "/data/massive-db",
+    "2026-01-23",
+    "A",
+):
+    if trade:
+        print("trade", trade.sip_timestamp, trade.price, quote)
+    else:
+        print("quote", quote.sip_timestamp, quote.bid_price, quote.ask_price)
+```
+
+Quote rows yield `(None, current_quote)`. Trade rows yield
+`(trade, last_quote)`, where `last_quote` is `None` until the first quote has
+appeared. When a trade and quote have the same SIP timestamp, the quote is
+yielded first.
+
 Database files support indexing and timestamp search:
 
 ```python
@@ -162,7 +196,8 @@ first = records[0]
 last = records[-1]
 
 index = records.index_before_timestamp(1769161728012983416)
-near_open = records.index_before_timestamp(1769161728012983416, galloping=True)
+near_open = records.index_before_timestamp(1769161728012983416, galloping=0)
+next_index = records.index_after_timestamp(1769161728012983416, galloping=index + 1)
 ```
 
 Timestamp arguments are nanoseconds since epoch. Database readers also accept

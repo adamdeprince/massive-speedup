@@ -195,7 +195,9 @@ def read_gzip_lines(path, parallelization=0, chunk_size=1 << 20):
 __all__ = [
     "FlatFiles",
     "StockTrade",
+    "StockTradeCondition",
     "StockQuote",
+    "StockQuoteCondition",
     "StockAggregate",
     "StockTradeAggregation",
     "StockQuoteAggregation",
@@ -203,6 +205,9 @@ __all__ = [
     "StockQuoteAggregator",
     "StockTradeDatabase",
     "StockQuoteDatabase",
+    "StockTradeQuoteTimeline",
+    "SimpleMarket",
+    "SimpleMarketBroker",
     "StockQuotes",
     "CurrencyQuote",
     "CurrencyAggregate",
@@ -213,4 +218,5 @@ __all__ = [
     "gzip_lines",
     "read_gzip_lines",
     "build_database_file",
+    "stock_trade_quote_timeline",
 ]

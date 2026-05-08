@@ -17,6 +17,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <queue>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -44,7 +45,468 @@
 
 namespace massive_speedup::native {
 
+enum class StockTradeConditionCode : std::uint8_t {
+  ACQUISITION = 1,
+  AVERAGE_PRICE_TRADE = 2,
+  AUTOMATIC_EXECUTION = 3,
+  BUNCHED_TRADE = 4,
+  BUNCHED_SOLD_TRADE = 5,
+  CAP_ELECTION = 6,
+  CASH_SALE = 7,
+  CLOSING_PRINTS = 8,
+  CROSS_TRADE = 9,
+  DERIVATIVELY_PRICED = 10,
+  DISTRIBUTION = 11,
+  FORM_T_EXTENDED_HOURS = 12,
+  EXTENDED_HOURS_SOLD_OUT_OF_SEQUENCE = 13,
+  INTERMARKET_SWEEP = 14,
+  MARKET_CENTER_OFFICIAL_CLOSE = 15,
+  MARKET_CENTER_OFFICIAL_OPEN = 16,
+  MARKET_CENTER_OPENING_TRADE = 17,
+  MARKET_CENTER_REOPENING_TRADE = 18,
+  MARKET_CENTER_CLOSING_TRADE = 19,
+  NEXT_DAY = 20,
+  PRICE_VARIATION_TRADE = 21,
+  PRIOR_REFERENCE_PRICE = 22,
+  RULE_155_TRADE_AMEX = 23,
+  RULE_127_NYSE_ONLY = 24,
+  OPENING_PRINTS = 25,
+  STOPPED_STOCK_REGULAR_TRADE = 27,
+  RE_OPENING_PRINTS = 28,
+  SELLER = 29,
+  SOLD_LAST = 30,
+  SOLD_LAST_AND_STOPPED_STOCK = 31,
+  SOLD_OUT_OF_SEQUENCE = 32,
+  SOLD_OUT_OF_SEQUENCE_AND_STOPPED_STOCK = 33,
+  SPLIT_TRADE = 34,
+  STOCK_OPTION = 35,
+  YELLOW_FLAG_REGULAR_TRADE = 36,
+  ODD_LOT_TRADE = 37,
+  CORRECTED_CONSOLIDATED_CLOSE_PER_LISTING_MARKET = 38,
+  TRADE_THRU_EXEMPT = 41,
+  CONTINGENT_TRADE = 52,
+  QUALIFIED_CONTINGENT_TRADE = 53,
+  OPENING_REOPENING_TRADE_DETAIL = 55,
+  SHORT_SALE_RESTRICTION_ACTIVATED = 57,
+  SHORT_SALE_RESTRICTION_CONTINUED = 58,
+  SHORT_SALE_RESTRICTION_DEACTIVATED = 59,
+  SHORT_SALE_RESTRICTION_IN_EFFECT = 60,
+  FINANCIAL_STATUS_BANKRUPT = 62,
+  FINANCIAL_STATUS_DEFICIENT = 63,
+  FINANCIAL_STATUS_DELINQUENT = 64,
+  FINANCIAL_STATUS_BANKRUPT_AND_DEFICIENT = 65,
+  FINANCIAL_STATUS_BANKRUPT_AND_DELINQUENT = 66,
+  FINANCIAL_STATUS_DEFICIENT_AND_DELINQUENT = 67,
+  FINANCIAL_STATUS_DEFICIENT_DELINQUENT_AND_BANKRUPT = 68,
+  FINANCIAL_STATUS_LIQUIDATION = 69,
+  FINANCIAL_STATUS_CREATIONS_SUSPENDED = 70,
+  FINANCIAL_STATUS_REDEMPTIONS_SUSPENDED = 71,
+};
+
+enum class StockQuoteConditionCode : std::uint8_t {
+  REGULAR_TWO_SIDED_OPEN = 1,
+  REGULAR_ONE_SIDED_OPEN = 2,
+  SLOW_ASK = 3,
+  SLOW_BID = 4,
+  SLOW_BID_AND_ASK = 5,
+  SLOW_DUE_LRP_BID = 6,
+  SLOW_DUE_LRP_ASK = 7,
+  SLOW_DUE_SET_SLOW_LIST_BID_ASK = 9,
+  MANUAL_ASK_AUTOMATED_BID = 10,
+  MANUAL_BID_AUTOMATED_ASK = 11,
+  MANUAL_BID_AND_ASK = 12,
+  OPENING = 13,
+  CLOSING = 14,
+  CLOSED = 15,
+  RESUME = 16,
+  FAST_TRADING = 17,
+  TRADING_RANGE_INDICATION = 18,
+  MARKET_MAKER_QUOTES_CLOSED = 19,
+  NON_FIRM = 20,
+  NEWS_DISSEMINATION = 21,
+  ORDER_INFLUX = 22,
+  ORDER_IMBALANCE = 23,
+  ADDITIONAL_INFORMATION = 26,
+  NEWS_PENDING = 27,
+  ADDITIONAL_INFORMATION_DUE_TO_RELATED_SECURITY = 28,
+  DUE_TO_RELATED_SECURITY = 29,
+  IN_VIEW_OF_COMMON = 30,
+  NO_OPEN_NO_RESUME = 32,
+  ON_DEMAND_AUCTION = 40,
+  CASH_ONLY_SETTLEMENT = 41,
+  NEXT_DAY_SETTLEMENT = 42,
+  LULD_TRADING_PAUSE = 43,
+  SLOW_DUE_LRP_BID_AND_ASK = 71,
+  CORRECTED_PRICE_INDICATION = 81,
+  SIP_GENERATED = 82,
+  CROSSED_MARKET = 84,
+  LOCKED_MARKET = 85,
+  CQS_GENERATED = 94,
+};
+
+struct ConditionCodeMetadata {
+  std::string_view enum_name;
+  std::string_view display_name;
+  bool updates_high_low = true;
+  bool updates_open_close = true;
+  bool updates_volume = true;
+};
+
 namespace detail {
+
+enum class ConditionSetKind : std::uint8_t {
+  raw_indices,
+  stock_trade,
+  stock_quote,
+};
+
+inline constexpr std::size_t condition_code_count = 96;
+
+using ConditionCodeMetadataTable =
+    std::array<std::optional<ConditionCodeMetadata>, condition_code_count>;
+
+inline constexpr ConditionCodeMetadataTable
+    stock_trade_condition_metadata = [] constexpr {
+      ConditionCodeMetadataTable table{};
+      table[1] = ConditionCodeMetadata{"ACQUISITION", "Acquisition", true, true, true};
+      table[2] = ConditionCodeMetadata{"AVERAGE_PRICE_TRADE", "Average Price Trade", false, false, true};
+      table[3] = ConditionCodeMetadata{"AUTOMATIC_EXECUTION", "Automatic Execution", true, true, true};
+      table[4] = ConditionCodeMetadata{"BUNCHED_TRADE", "Bunched Trade", true, true, true};
+      table[5] = ConditionCodeMetadata{"BUNCHED_SOLD_TRADE", "Bunched Sold Trade", true, false, true};
+      table[6] = ConditionCodeMetadata{"CAP_ELECTION", "CAP Election", true, true, true};
+      table[7] = ConditionCodeMetadata{"CASH_SALE", "Cash Sale", false, false, true};
+      table[8] = ConditionCodeMetadata{"CLOSING_PRINTS", "Closing Prints", true, true, true};
+      table[9] = ConditionCodeMetadata{"CROSS_TRADE", "Cross Trade", true, true, true};
+      table[10] = ConditionCodeMetadata{"DERIVATIVELY_PRICED", "Derivatively Priced", true, false, true};
+      table[11] = ConditionCodeMetadata{"DISTRIBUTION", "Distribution", true, true, true};
+      table[12] = ConditionCodeMetadata{"FORM_T_EXTENDED_HOURS", "Form T/Extended Hours", false, false, true};
+      table[13] = ConditionCodeMetadata{
+          "EXTENDED_HOURS_SOLD_OUT_OF_SEQUENCE",
+          "Extended Hours (Sold Out Of Sequence)",
+          false,
+          false,
+          true};
+      table[14] = ConditionCodeMetadata{"INTERMARKET_SWEEP", "Intermarket Sweep", true, true, true};
+      table[15] = ConditionCodeMetadata{
+          "MARKET_CENTER_OFFICIAL_CLOSE",
+          "Market Center Official Close",
+          false,
+          false,
+          false};
+      table[16] = ConditionCodeMetadata{
+          "MARKET_CENTER_OFFICIAL_OPEN",
+          "Market Center Official Open",
+          false,
+          false,
+          false};
+      table[17] = ConditionCodeMetadata{"MARKET_CENTER_OPENING_TRADE", "Market Center Opening Trade", true, true, true};
+      table[18] = ConditionCodeMetadata{
+          "MARKET_CENTER_REOPENING_TRADE",
+          "Market Center Reopening Trade",
+          true,
+          true,
+          true};
+      table[19] = ConditionCodeMetadata{"MARKET_CENTER_CLOSING_TRADE", "Market Center Closing Trade", true, true, true};
+      table[20] = ConditionCodeMetadata{"NEXT_DAY", "Next Day", false, false, true};
+      table[21] = ConditionCodeMetadata{"PRICE_VARIATION_TRADE", "Price Variation Trade", false, false, true};
+      table[22] = ConditionCodeMetadata{"PRIOR_REFERENCE_PRICE", "Prior Reference Price", true, false, true};
+      table[23] = ConditionCodeMetadata{"RULE_155_TRADE_AMEX", "Rule 155 Trade (AMEX)", true, true, true};
+      table[24] = ConditionCodeMetadata{"RULE_127_NYSE_ONLY", "Rule 127 (NYSE Only)", true, true, true};
+      table[25] = ConditionCodeMetadata{"OPENING_PRINTS", "Opening Prints", true, true, true};
+      table[27] = ConditionCodeMetadata{
+          "STOPPED_STOCK_REGULAR_TRADE",
+          "Stopped Stock (Regular Trade)",
+          true,
+          true,
+          true};
+      table[28] = ConditionCodeMetadata{"RE_OPENING_PRINTS", "Re-Opening Prints", true, true, true};
+      table[29] = ConditionCodeMetadata{"SELLER", "Seller", false, false, true};
+      table[30] = ConditionCodeMetadata{"SOLD_LAST", "Sold Last", true, true, true};
+      table[31] = ConditionCodeMetadata{"SOLD_LAST_AND_STOPPED_STOCK", "Sold Last and Stopped Stock", true, true, true};
+      table[32] = ConditionCodeMetadata{"SOLD_OUT_OF_SEQUENCE", "Sold (Out Of Sequence)", true, false, true};
+      table[33] = ConditionCodeMetadata{
+          "SOLD_OUT_OF_SEQUENCE_AND_STOPPED_STOCK",
+          "Sold (Out of Sequence) and Stopped Stock",
+          true,
+          false,
+          true};
+      table[34] = ConditionCodeMetadata{"SPLIT_TRADE", "Split Trade", true, true, true};
+      table[35] = ConditionCodeMetadata{"STOCK_OPTION", "Stock Option", true, true, true};
+      table[36] = ConditionCodeMetadata{"YELLOW_FLAG_REGULAR_TRADE", "Yellow Flag Regular Trade", true, true, true};
+      table[37] = ConditionCodeMetadata{"ODD_LOT_TRADE", "Odd Lot Trade", false, false, true};
+      table[38] = ConditionCodeMetadata{
+          "CORRECTED_CONSOLIDATED_CLOSE_PER_LISTING_MARKET",
+          "Corrected Consolidated Close (per listing market)",
+          true,
+          true,
+          false};
+      table[41] = ConditionCodeMetadata{"TRADE_THRU_EXEMPT", "Trade Thru Exempt", true, true, true};
+      table[52] = ConditionCodeMetadata{"CONTINGENT_TRADE", "Contingent Trade", false, false, true};
+      table[53] = ConditionCodeMetadata{"QUALIFIED_CONTINGENT_TRADE", "Qualified Contingent Trade", false, false, true};
+      table[55] = ConditionCodeMetadata{
+          "OPENING_REOPENING_TRADE_DETAIL",
+          "Opening Reopening Trade Detail",
+          true,
+          true,
+          true};
+      table[57] = ConditionCodeMetadata{
+          "SHORT_SALE_RESTRICTION_ACTIVATED",
+          "Short Sale Restriction Activated",
+          true,
+          true,
+          true};
+      table[58] = ConditionCodeMetadata{
+          "SHORT_SALE_RESTRICTION_CONTINUED",
+          "Short Sale Restriction Continued",
+          true,
+          true,
+          true};
+      table[59] = ConditionCodeMetadata{
+          "SHORT_SALE_RESTRICTION_DEACTIVATED",
+          "Short Sale Restriction Deactivated",
+          true,
+          true,
+          true};
+      table[60] = ConditionCodeMetadata{
+          "SHORT_SALE_RESTRICTION_IN_EFFECT",
+          "Short Sale Restriction In Effect",
+          true,
+          true,
+          true};
+      table[62] = ConditionCodeMetadata{"FINANCIAL_STATUS_BANKRUPT", "Financial Status - Bankrupt", true, true, true};
+      table[63] = ConditionCodeMetadata{"FINANCIAL_STATUS_DEFICIENT", "Financial Status - Deficient", true, true, true};
+      table[64] = ConditionCodeMetadata{"FINANCIAL_STATUS_DELINQUENT", "Financial Status - Delinquent", true, true, true};
+      table[65] = ConditionCodeMetadata{
+          "FINANCIAL_STATUS_BANKRUPT_AND_DEFICIENT",
+          "Financial Status - Bankrupt and Deficient",
+          true,
+          true,
+          true};
+      table[66] = ConditionCodeMetadata{
+          "FINANCIAL_STATUS_BANKRUPT_AND_DELINQUENT",
+          "Financial Status - Bankrupt and Delinquent",
+          true,
+          true,
+          true};
+      table[67] = ConditionCodeMetadata{
+          "FINANCIAL_STATUS_DEFICIENT_AND_DELINQUENT",
+          "Financial Status - Deficient and Delinquent",
+          true,
+          true,
+          true};
+      table[68] = ConditionCodeMetadata{
+          "FINANCIAL_STATUS_DEFICIENT_DELINQUENT_AND_BANKRUPT",
+          "Financial Status - Deficient, Delinquent, and Bankrupt",
+          true,
+          true,
+          true};
+      table[69] = ConditionCodeMetadata{"FINANCIAL_STATUS_LIQUIDATION", "Financial Status - Liquidation", true, true, true};
+      table[70] = ConditionCodeMetadata{
+          "FINANCIAL_STATUS_CREATIONS_SUSPENDED",
+          "Financial Status - Creations Suspended",
+          true,
+          true,
+          true};
+      table[71] = ConditionCodeMetadata{
+          "FINANCIAL_STATUS_REDEMPTIONS_SUSPENDED",
+          "Financial Status - Redemptions Suspended",
+          true,
+          true,
+          true};
+      return table;
+    }();
+
+inline constexpr ConditionCodeMetadataTable
+    stock_quote_condition_metadata = [] constexpr {
+      ConditionCodeMetadataTable table{};
+      table[1] = ConditionCodeMetadata{"REGULAR_TWO_SIDED_OPEN", "Regular Two-Sided Open", true, true, true};
+      table[2] = ConditionCodeMetadata{"REGULAR_ONE_SIDED_OPEN", "Regular One-Sided Open", true, true, true};
+      table[3] = ConditionCodeMetadata{"SLOW_ASK", "Slow Ask", true, true, true};
+      table[4] = ConditionCodeMetadata{"SLOW_BID", "Slow Bid", true, true, true};
+      table[5] = ConditionCodeMetadata{"SLOW_BID_AND_ASK", "Slow Bid and Ask", true, true, true};
+      table[6] = ConditionCodeMetadata{"SLOW_DUE_LRP_BID", "Slow Due LRP Bid", true, true, true};
+      table[7] = ConditionCodeMetadata{"SLOW_DUE_LRP_ASK", "Slow Due LRP Ask", true, true, true};
+      table[9] = ConditionCodeMetadata{
+          "SLOW_DUE_SET_SLOW_LIST_BID_ASK",
+          "Slow Due Set Slow List Bid Ask",
+          true,
+          true,
+          true};
+      table[10] = ConditionCodeMetadata{"MANUAL_ASK_AUTOMATED_BID", "Manual Ask Automated Bid", true, true, true};
+      table[11] = ConditionCodeMetadata{"MANUAL_BID_AUTOMATED_ASK", "Manual Bid Automated Ask", true, true, true};
+      table[12] = ConditionCodeMetadata{"MANUAL_BID_AND_ASK", "Manual Bid and Ask", true, true, true};
+      table[13] = ConditionCodeMetadata{"OPENING", "Opening", true, true, true};
+      table[14] = ConditionCodeMetadata{"CLOSING", "Closing", true, true, true};
+      table[15] = ConditionCodeMetadata{"CLOSED", "Closed", true, true, true};
+      table[16] = ConditionCodeMetadata{"RESUME", "Resume", true, true, true};
+      table[17] = ConditionCodeMetadata{"FAST_TRADING", "Fast Trading", true, true, true};
+      table[18] = ConditionCodeMetadata{"TRADING_RANGE_INDICATION", "Trading Range Indication", true, true, true};
+      table[19] = ConditionCodeMetadata{"MARKET_MAKER_QUOTES_CLOSED", "Market Maker Quotes Closed", true, true, true};
+      table[20] = ConditionCodeMetadata{"NON_FIRM", "Non-Firm", true, true, true};
+      table[21] = ConditionCodeMetadata{"NEWS_DISSEMINATION", "News Dissemination", true, true, true};
+      table[22] = ConditionCodeMetadata{"ORDER_INFLUX", "Order Influx", true, true, true};
+      table[23] = ConditionCodeMetadata{"ORDER_IMBALANCE", "Order Imbalance", true, true, true};
+      table[26] = ConditionCodeMetadata{"ADDITIONAL_INFORMATION", "Additional Information", true, true, true};
+      table[27] = ConditionCodeMetadata{"NEWS_PENDING", "News Pending", true, true, true};
+      table[28] = ConditionCodeMetadata{
+          "ADDITIONAL_INFORMATION_DUE_TO_RELATED_SECURITY",
+          "Additional Information Due To Related Security",
+          true,
+          true,
+          true};
+      table[29] = ConditionCodeMetadata{"DUE_TO_RELATED_SECURITY", "Due To Related Security", true, true, true};
+      table[30] = ConditionCodeMetadata{"IN_VIEW_OF_COMMON", "In View Of Common", true, true, true};
+      table[32] = ConditionCodeMetadata{"NO_OPEN_NO_RESUME", "No Open No Resume", true, true, true};
+      table[40] = ConditionCodeMetadata{"ON_DEMAND_AUCTION", "On Demand Auction", true, true, true};
+      table[41] = ConditionCodeMetadata{"CASH_ONLY_SETTLEMENT", "Cash Only Settlement", true, true, true};
+      table[42] = ConditionCodeMetadata{"NEXT_DAY_SETTLEMENT", "Next Day Settlement", true, true, true};
+      table[43] = ConditionCodeMetadata{"LULD_TRADING_PAUSE", "LULD Trading Pause", true, true, true};
+      table[71] = ConditionCodeMetadata{"SLOW_DUE_LRP_BID_AND_ASK", "Slow Due LRP Bid and Ask", true, true, true};
+      table[81] = ConditionCodeMetadata{"CORRECTED_PRICE_INDICATION", "Corrected Price Indication", true, true, true};
+      table[82] = ConditionCodeMetadata{"SIP_GENERATED", "SIP Generated", true, true, true};
+      table[84] = ConditionCodeMetadata{"CROSSED_MARKET", "Crossed Market", true, true, true};
+      table[85] = ConditionCodeMetadata{"LOCKED_MARKET", "Locked Market", true, true, true};
+      table[94] = ConditionCodeMetadata{"CQS_GENERATED", "CQS Generated", true, true, true};
+      return table;
+    }();
+
+inline constexpr const std::optional<ConditionCodeMetadata>& condition_metadata_at(
+    ConditionSetKind kind,
+    std::size_t index) {
+  if (index >= condition_code_count) {
+    static_assert(condition_code_count == 96);
+    return stock_trade_condition_metadata[0];
+  }
+
+  switch (kind) {
+    case ConditionSetKind::stock_trade:
+      return stock_trade_condition_metadata[index];
+    case ConditionSetKind::stock_quote:
+      return stock_quote_condition_metadata[index];
+    case ConditionSetKind::raw_indices:
+      return stock_trade_condition_metadata[0];
+  }
+
+  return stock_trade_condition_metadata[0];
+}
+
+struct ConditionCodeMask {
+  static constexpr std::size_t word_count = (condition_code_count + 63) / 64;
+  std::array<std::uint64_t, word_count> words{};
+
+  constexpr void set(std::size_t index) {
+    words[index / 64] |= std::uint64_t{1} << (index % 64);
+  }
+
+  bool intersects_packed(const void* packed_data) const {
+    const auto* bytes = static_cast<const std::uint8_t*>(packed_data);
+    const std::uint64_t low =
+        static_cast<std::uint64_t>(bytes[0]) |
+        (static_cast<std::uint64_t>(bytes[1]) << 8U) |
+        (static_cast<std::uint64_t>(bytes[2]) << 16U) |
+        (static_cast<std::uint64_t>(bytes[3]) << 24U) |
+        (static_cast<std::uint64_t>(bytes[4]) << 32U) |
+        (static_cast<std::uint64_t>(bytes[5]) << 40U) |
+        (static_cast<std::uint64_t>(bytes[6]) << 48U) |
+        (static_cast<std::uint64_t>(bytes[7]) << 56U);
+    const std::uint64_t high =
+        static_cast<std::uint64_t>(bytes[8]) |
+        (static_cast<std::uint64_t>(bytes[9]) << 8U) |
+        (static_cast<std::uint64_t>(bytes[10]) << 16U) |
+        (static_cast<std::uint64_t>(bytes[11]) << 24U);
+    return ((low & words[0]) != 0) || ((high & words[1]) != 0);
+  }
+};
+
+template <bool ConditionCodeMetadata::* Rule>
+consteval ConditionCodeMask make_rule_exclusion_mask(
+    const ConditionCodeMetadataTable& table) {
+  ConditionCodeMask mask{};
+  for (std::size_t index = 0; index < table.size(); ++index) {
+    if (table[index].has_value() && !((*table[index]).*Rule)) {
+      mask.set(index);
+    }
+  }
+  return mask;
+}
+
+inline constexpr ConditionCodeMask stock_trade_high_low_exclusion_mask =
+    make_rule_exclusion_mask<&ConditionCodeMetadata::updates_high_low>(
+        stock_trade_condition_metadata);
+inline constexpr ConditionCodeMask stock_trade_open_close_exclusion_mask =
+    make_rule_exclusion_mask<&ConditionCodeMetadata::updates_open_close>(
+        stock_trade_condition_metadata);
+inline constexpr ConditionCodeMask stock_trade_volume_exclusion_mask =
+    make_rule_exclusion_mask<&ConditionCodeMetadata::updates_volume>(
+        stock_trade_condition_metadata);
+inline constexpr ConditionCodeMask stock_quote_high_low_exclusion_mask =
+    make_rule_exclusion_mask<&ConditionCodeMetadata::updates_high_low>(
+        stock_quote_condition_metadata);
+inline constexpr ConditionCodeMask stock_quote_open_close_exclusion_mask =
+    make_rule_exclusion_mask<&ConditionCodeMetadata::updates_open_close>(
+        stock_quote_condition_metadata);
+inline constexpr ConditionCodeMask stock_quote_volume_exclusion_mask =
+    make_rule_exclusion_mask<&ConditionCodeMetadata::updates_volume>(
+        stock_quote_condition_metadata);
+
+inline std::bitset<condition_code_count> bitset_from_mask(
+    const ConditionCodeMask& mask) {
+  std::bitset<condition_code_count> bits;
+  for (std::size_t word_index = 0; word_index < mask.words.size(); ++word_index) {
+    std::uint64_t word = mask.words[word_index];
+    std::size_t bit_offset = word_index * 64;
+    while (word != 0) {
+      const auto bit_index =
+          static_cast<std::size_t>(std::countr_zero(word));
+      bits.set(bit_offset + bit_index);
+      word &= word - 1;
+    }
+  }
+  return bits;
+}
+
+inline const std::bitset<condition_code_count> stock_trade_high_low_exclusion_bits =
+    bitset_from_mask(stock_trade_high_low_exclusion_mask);
+inline const std::bitset<condition_code_count> stock_trade_open_close_exclusion_bits =
+    bitset_from_mask(stock_trade_open_close_exclusion_mask);
+inline const std::bitset<condition_code_count> stock_trade_volume_exclusion_bits =
+    bitset_from_mask(stock_trade_volume_exclusion_mask);
+inline const std::bitset<condition_code_count> stock_quote_high_low_exclusion_bits =
+    bitset_from_mask(stock_quote_high_low_exclusion_mask);
+inline const std::bitset<condition_code_count> stock_quote_open_close_exclusion_bits =
+    bitset_from_mask(stock_quote_open_close_exclusion_mask);
+inline const std::bitset<condition_code_count> stock_quote_volume_exclusion_bits =
+    bitset_from_mask(stock_quote_volume_exclusion_mask);
+
+inline bool condition_bits_clear(
+    const std::bitset<condition_code_count>& conditions,
+    const std::bitset<condition_code_count>& exclusion_bits) {
+  return (conditions & exclusion_bits).none();
+}
+
+inline bool stock_trade_updates_high_low(const std::bitset<96>& conditions) {
+  return condition_bits_clear(conditions, stock_trade_high_low_exclusion_bits);
+}
+
+inline bool stock_trade_updates_open_close(const std::bitset<96>& conditions) {
+  return condition_bits_clear(conditions, stock_trade_open_close_exclusion_bits);
+}
+
+inline bool stock_trade_updates_volume(const std::bitset<96>& conditions) {
+  return condition_bits_clear(conditions, stock_trade_volume_exclusion_bits);
+}
+
+inline bool stock_quote_updates_high_low(const std::bitset<96>& conditions) {
+  return condition_bits_clear(conditions, stock_quote_high_low_exclusion_bits);
+}
+
+inline bool stock_quote_updates_open_close(const std::bitset<96>& conditions) {
+  return condition_bits_clear(conditions, stock_quote_open_close_exclusion_bits);
+}
+
+inline bool stock_quote_updates_volume(const std::bitset<96>& conditions) {
+  return condition_bits_clear(conditions, stock_quote_volume_exclusion_bits);
+}
 
 inline void require_field_count(
     std::string_view row_name,
@@ -553,19 +1015,93 @@ inline std::size_t bitset_hash(const std::bitset<BitCount>& bits) {
   return seed;
 }
 
-inline nanobind::object bit_indices_frozenset(const std::bitset<96>& bits) {
+inline std::array<PyObject*, condition_code_count>& condition_enum_members(
+    ConditionSetKind kind) {
+  static auto* stock_trade_members = new std::array<PyObject*, condition_code_count>{};
+  static auto* stock_quote_members = new std::array<PyObject*, condition_code_count>{};
+
+  switch (kind) {
+    case ConditionSetKind::stock_trade:
+      return *stock_trade_members;
+    case ConditionSetKind::stock_quote:
+      return *stock_quote_members;
+    case ConditionSetKind::raw_indices:
+      return *stock_trade_members;
+  }
+
+  return *stock_trade_members;
+}
+
+inline const ConditionCodeMetadataTable& condition_metadata_table(
+    ConditionSetKind kind) {
+  switch (kind) {
+    case ConditionSetKind::stock_trade:
+      return stock_trade_condition_metadata;
+    case ConditionSetKind::stock_quote:
+      return stock_quote_condition_metadata;
+    case ConditionSetKind::raw_indices:
+      return stock_trade_condition_metadata;
+  }
+
+  return stock_trade_condition_metadata;
+}
+
+inline void install_condition_enum_members(
+    ConditionSetKind kind,
+    nanobind::handle enum_type) {
+  auto& members = condition_enum_members(kind);
+  const auto& metadata = condition_metadata_table(kind);
+
+  for (std::size_t index = 0; index < members.size(); ++index) {
+    Py_CLEAR(members[index]);
+    if (!metadata[index].has_value()) {
+      continue;
+    }
+
+    nanobind::object member = enum_type.attr(metadata[index]->enum_name.data());
+    Py_INCREF(member.ptr());
+    members[index] = member.ptr();
+  }
+}
+
+inline PyObject* condition_value_new_ref(
+    ConditionSetKind kind,
+    std::size_t index) {
+  if (kind != ConditionSetKind::raw_indices && index < condition_code_count) {
+    PyObject* member = condition_enum_members(kind)[index];
+    if (member != nullptr) {
+      Py_INCREF(member);
+      return member;
+    }
+  }
+
+  return PyLong_FromSize_t(index);
+}
+
+inline nanobind::object bit_indices_frozenset(
+    const std::bitset<96>& bits,
+    ConditionSetKind kind) {
   struct BitsetKeyHash {
-    std::size_t operator()(const std::bitset<96>& value) const noexcept {
-      return bitset_hash(value);
+    std::size_t operator()(const std::pair<ConditionSetKind, std::bitset<96>>& value)
+        const noexcept {
+      std::size_t seed = std::hash<unsigned>{}(
+          static_cast<unsigned>(value.first));
+      seed ^= bitset_hash(value.second) + 0x9e3779b97f4a7c15ULL + (seed << 6U) +
+          (seed >> 2U);
+      return seed;
     }
   };
 
-  using InternTable = std::unordered_map<std::bitset<96>, PyObject*, BitsetKeyHash>;
+  using InternTable = std::unordered_map<
+      std::pair<ConditionSetKind, std::bitset<96>>,
+      PyObject*,
+      BitsetKeyHash>;
   static InternTable* interned_sets = new InternTable();
   static std::mutex interned_sets_mutex;
 
+  const std::pair<ConditionSetKind, std::bitset<96>> key{kind, bits};
   std::lock_guard<std::mutex> lock(interned_sets_mutex);
-  if (const auto found = interned_sets->find(bits); found != interned_sets->end()) {
+  if (const auto found = interned_sets->find(key); found != interned_sets->end()) {
     Py_INCREF(found->second);
     return nanobind::steal<nanobind::object>(found->second);
   }
@@ -580,15 +1116,20 @@ inline nanobind::object bit_indices_frozenset(const std::bitset<96>& bits) {
       continue;
     }
 
-    nanobind::object value = nanobind::steal<nanobind::object>(PyLong_FromSize_t(index));
+    nanobind::object value =
+        nanobind::steal<nanobind::object>(condition_value_new_ref(kind, index));
     if (!value.is_valid() || PySet_Add(result.ptr(), value.ptr()) != 0) {
       throw nanobind::python_error();
     }
   }
 
   Py_INCREF(result.ptr());
-  interned_sets->emplace(bits, result.ptr());
+  interned_sets->emplace(key, result.ptr());
   return result;
+}
+
+inline nanobind::object bit_indices_frozenset(const std::bitset<96>& bits) {
+  return bit_indices_frozenset(bits, ConditionSetKind::raw_indices);
 }
 
 inline PyObject* intern_unicode_from_view(std::string_view value) {
@@ -638,9 +1179,12 @@ inline nanobind::object currency_tickers_tuple(std::string_view ticker) {
   return result;
 }
 
-inline std::string bit_indices_repr(const std::bitset<96>& bits) {
+inline std::string bit_indices_repr(
+    const std::bitset<96>& bits,
+    ConditionSetKind kind = ConditionSetKind::raw_indices) {
   std::ostringstream out;
   bool first = true;
+  const auto& metadata = condition_metadata_table(kind);
   for (std::size_t index = 0; index < bits.size(); ++index) {
     if (!bits.test(index)) {
       continue;
@@ -652,7 +1196,13 @@ inline std::string bit_indices_repr(const std::bitset<96>& bits) {
     } else {
       out << ", ";
     }
-    out << index;
+    if (kind != ConditionSetKind::raw_indices &&
+        index < metadata.size() &&
+        metadata[index].has_value()) {
+      out << metadata[index]->enum_name;
+    } else {
+      out << index;
+    }
   }
 
   if (first) {
@@ -1384,6 +1934,30 @@ struct StockTrade {
     return detail::read_float32_le_at(packed_data, packed_size_offset);
   }
 
+  static bool condition_at(const void* packed_data, std::size_t condition_code) {
+    if (condition_code >= 96) {
+      return false;
+    }
+    const auto* bytes = static_cast<const std::uint8_t*>(packed_data);
+    return (bytes[condition_code / 8] &
+            static_cast<std::uint8_t>(1U << (condition_code % 8))) != 0;
+  }
+
+  static bool updates_high_low_at(const void* packed_data) {
+    return !detail::stock_trade_high_low_exclusion_mask.intersects_packed(
+        packed_data);
+  }
+
+  static bool updates_open_close_at(const void* packed_data) {
+    return !detail::stock_trade_open_close_exclusion_mask.intersects_packed(
+        packed_data);
+  }
+
+  static bool updates_volume_at(const void* packed_data) {
+    return !detail::stock_trade_volume_exclusion_mask.intersects_packed(
+        packed_data);
+  }
+
   PackedData pack() const {
     PackedData output{};
     std::size_t offset = 0;
@@ -1435,8 +2009,22 @@ struct StockTrade {
         conditions_attribute,
         [&] {
           return detail::object_cache_new_ref(
-              detail::bit_indices_frozenset(conditions));
+              detail::bit_indices_frozenset(
+                  conditions,
+                  detail::ConditionSetKind::stock_trade));
         });
+  }
+
+  bool updates_high_low() const {
+    return detail::stock_trade_updates_high_low(conditions);
+  }
+
+  bool updates_open_close() const {
+    return detail::stock_trade_updates_open_close(conditions);
+  }
+
+  bool updates_volume() const {
+    return detail::stock_trade_updates_volume(conditions);
   }
 
   nanobind::object correction_object() const {
@@ -1556,7 +2144,11 @@ struct StockTrade {
     std::ostringstream out;
     out << "StockTrade("
         << "ticker='" << ticker << "', "
-        << "conditions=" << detail::bit_indices_repr(conditions) << ", "
+        << "conditions="
+        << detail::bit_indices_repr(
+               conditions,
+               detail::ConditionSetKind::stock_trade)
+        << ", "
         << "correction=" << correction << ", "
         << "exchange=" << static_cast<unsigned>(exchange) << ", "
         << "id=" << id << ", "
@@ -1851,7 +2443,9 @@ struct StockQuote {
         conditions_attribute,
         [&] {
           return detail::object_cache_new_ref(
-              detail::bit_indices_frozenset(conditions));
+              detail::bit_indices_frozenset(
+                  conditions,
+                  detail::ConditionSetKind::stock_quote));
         });
   }
 
@@ -1861,8 +2455,22 @@ struct StockQuote {
         indicators_attribute,
         [&] {
           return detail::object_cache_new_ref(
-              detail::bit_indices_frozenset(indicators));
+              detail::bit_indices_frozenset(
+                  indicators,
+                  detail::ConditionSetKind::stock_quote));
         });
+  }
+
+  bool updates_high_low() const {
+    return detail::stock_quote_updates_high_low(conditions | indicators);
+  }
+
+  bool updates_open_close() const {
+    return detail::stock_quote_updates_open_close(conditions | indicators);
+  }
+
+  bool updates_volume() const {
+    return detail::stock_quote_updates_volume(conditions | indicators);
   }
 
   nanobind::object participant_timestamp_object() const {
@@ -1948,8 +2556,16 @@ struct StockQuote {
         << "bid_exchange=" << static_cast<unsigned>(bid_exchange) << ", "
         << "bid_price=" << bid_price << ", "
         << "bid_size=" << bid_size << ", "
-        << "conditions=" << detail::bit_indices_repr(conditions) << ", "
-        << "indicators=" << detail::bit_indices_repr(indicators) << ", "
+        << "conditions="
+        << detail::bit_indices_repr(
+               conditions,
+               detail::ConditionSetKind::stock_quote)
+        << ", "
+        << "indicators="
+        << detail::bit_indices_repr(
+               indicators,
+               detail::ConditionSetKind::stock_quote)
+        << ", "
         << "participant_timestamp=" << participant_timestamp << ", "
         << "sequence_number=" << sequence_number << ", "
         << "sip_timestamp=" << sip_timestamp << ", "
@@ -2675,7 +3291,8 @@ inline double quiet_nan() {
 }
 
 struct PriceAggregation {
-  bool has_value = false;
+  bool has_high_low = false;
+  bool has_open_close = false;
   double open = 0.0;
   double close = 0.0;
   double high = 0.0;
@@ -2685,23 +3302,51 @@ struct PriceAggregation {
   std::uint64_t count = 0;
 
   void add(double value) {
-    if (!has_value) {
-      has_value = true;
-      open = value;
-      high = value;
-      low = value;
-    } else {
-      high = std::max(high, value);
-      low = std::min(low, value);
+    add(value, true, true, true);
+  }
+
+  void add(
+      double value,
+      bool update_high_low,
+      bool update_open_close,
+      bool update_statistics) {
+    if (update_high_low) {
+      if (!has_high_low) {
+        has_high_low = true;
+        high = value;
+        low = value;
+      } else {
+        high = std::max(high, value);
+        low = std::min(low, value);
+      }
     }
 
-    close = value;
+    if (update_open_close) {
+      if (!has_open_close) {
+        has_open_close = true;
+        open = value;
+      }
+      close = value;
+    }
+
+    if (!update_statistics) {
+      return;
+    }
+
     ++count;
 
     const double delta = value - mean;
     mean += delta / static_cast<double>(count);
     const double delta2 = value - mean;
     m2 += delta * delta2;
+  }
+
+  void add_open_close_only(double value) {
+    if (!has_open_close) {
+      has_open_close = true;
+      open = value;
+    }
+    close = value;
   }
 
   double average() const {
@@ -2713,22 +3358,22 @@ struct PriceAggregation {
   }
 
   double change() const {
-    return count == 0 ? quiet_nan() : close - open;
+    return !has_open_close ? quiet_nan() : close - open;
   }
 
   double range() const {
-    return count == 0 ? quiet_nan() : high - low;
+    return !has_high_low ? quiet_nan() : high - low;
   }
 
   double return_bps() const {
-    if (count == 0 || open == 0.0) {
+    if (!has_open_close || open == 0.0) {
       return quiet_nan();
     }
     return ((close / open) - 1.0) * 10'000.0;
   }
 
   double range_bps() const {
-    if (count == 0 || open == 0.0) {
+    if (!has_high_low || !has_open_close || open == 0.0) {
       return quiet_nan();
     }
     return ((high - low) / open) * 10'000.0;
@@ -3136,18 +3781,28 @@ struct StockTradeAggregationState {
 
   void add(const StockTrade& row) {
     const double row_volume =
-        !std::isfinite(row.size) || row.size <= 0.0F
+        !detail::stock_trade_updates_volume(row.conditions) ||
+                !std::isfinite(row.size) || row.size <= 0.0F
             ? 0.0
             : static_cast<double>(row.size);
-    add_values(row.price, row_volume, row.sip_timestamp);
+    add_values(
+        row.price,
+        row_volume,
+        row.sip_timestamp,
+        detail::stock_trade_updates_high_low(row.conditions),
+        detail::stock_trade_updates_open_close(row.conditions));
   }
 
   void add_values(
       double value,
       double row_volume,
-      std::uint64_t timestamp) {
-    price.add(value);
-    weighted_price.add(value, row_volume);
+      std::uint64_t timestamp,
+      bool updates_high_low = true,
+      bool updates_open_close = true) {
+    price.add(value, updates_high_low, updates_open_close, updates_high_low);
+    if (row_volume > 0.0) {
+      weighted_price.add(value, row_volume);
+    }
     volume += row_volume;
     if (transactions == 0) {
       min_trade_size = row_volume;
@@ -3164,10 +3819,10 @@ struct StockTradeAggregationState {
   StockTradeAggregation to_result() const {
     StockTradeAggregation result;
     result.ticker = ticker;
-    result.open = price.open;
-    result.close = price.close;
-    result.high = price.high;
-    result.low = price.low;
+    result.open = price.has_open_close ? price.open : detail::quiet_nan();
+    result.close = price.has_open_close ? price.close : detail::quiet_nan();
+    result.high = price.has_high_low ? price.high : detail::quiet_nan();
+    result.low = price.has_high_low ? price.low : detail::quiet_nan();
     result.avg = price.average();
     result.volume_weighted_avg = weighted_price.average();
     result.volume = volume;
@@ -3494,8 +4149,13 @@ struct StockTradeAggregationTraits {
     const float size = RowType::size_at(packed_data);
     state.add_values(
         RowType::price_at(packed_data),
-        !std::isfinite(size) || size <= 0.0F ? 0.0 : static_cast<double>(size),
-        timestamp);
+        !RowType::updates_volume_at(packed_data) ||
+                !std::isfinite(size) || size <= 0.0F
+            ? 0.0
+            : static_cast<double>(size),
+        timestamp,
+        RowType::updates_high_low_at(packed_data),
+        RowType::updates_open_close_at(packed_data));
   }
 };
 
@@ -3813,21 +4473,34 @@ class DatabaseRecordFile {
 
   std::int64_t index_before_timestamp(
       std::uint64_t timestamp,
-      bool galloping = false) const {
+      std::optional<std::int64_t> galloping = std::nullopt) const {
     if (size_ == 0 || timestamp_at(0) > timestamp) {
       return -1;
     }
 
     if (galloping) {
-      return galloping_index_before_timestamp(timestamp);
+      return galloping_index_before_timestamp(timestamp, *galloping);
     }
     return binary_index_before_timestamp(0, size_, timestamp);
+  }
+
+  std::int64_t index_after_timestamp(
+      std::uint64_t timestamp,
+      std::optional<std::int64_t> galloping = std::nullopt) const {
+    if (size_ == 0 || timestamp_at(size_ - 1) < timestamp) {
+      return -1;
+    }
+
+    if (galloping) {
+      return galloping_index_after_timestamp(timestamp, *galloping);
+    }
+    return binary_index_after_timestamp(0, size_, timestamp);
   }
 
   RowType find_before_participant_timestamp(
       std::uint64_t timestamp,
       std::uint64_t fuzz = 1'000'000'000ULL,
-      bool galloping = false,
+      std::optional<std::int64_t> galloping = std::nullopt,
       bool on = true) const {
     return record_at(find_participant_timestamp_index(
         timestamp,
@@ -3840,7 +4513,7 @@ class DatabaseRecordFile {
   RowType find_after_participant_timestamp(
       std::uint64_t timestamp,
       std::uint64_t fuzz = 1'000'000'000ULL,
-      bool galloping = false,
+      std::optional<std::int64_t> galloping = std::nullopt,
       bool on = true) const {
     return record_at(find_participant_timestamp_index(
         timestamp,
@@ -3895,17 +4568,103 @@ class DatabaseRecordFile {
     return static_cast<std::int64_t>(begin) - 1;
   }
 
-  std::int64_t galloping_index_before_timestamp(std::uint64_t timestamp) const {
-    std::size_t lower = 0;
-    std::size_t upper = 1;
+  std::int64_t binary_index_after_timestamp(
+      std::size_t begin,
+      std::size_t end,
+      std::uint64_t timestamp) const {
+    const std::size_t index = lower_bound_timestamp(begin, end, timestamp);
+    if (index >= size_) {
+      return -1;
+    }
+    return static_cast<std::int64_t>(index);
+  }
 
-    while (upper < size_ && timestamp_at(upper) <= timestamp) {
-      lower = upper;
-      upper *= 2;
+  std::size_t normalize_galloping_start(std::int64_t start) const {
+    if (size_ == 0 || start <= 0) {
+      return 0;
+    }
+    const auto unsigned_start = static_cast<std::uint64_t>(start);
+    if (unsigned_start >= size_) {
+      return size_ - 1;
+    }
+    return static_cast<std::size_t>(unsigned_start);
+  }
+
+  std::size_t capped_galloping_upper(
+      std::size_t start,
+      std::size_t step) const {
+    if (step >= size_ - start) {
+      return size_;
+    }
+    return start + step;
+  }
+
+  static std::size_t next_galloping_step(std::size_t step) {
+    const std::size_t maximum_step = std::numeric_limits<std::size_t>::max() / 2;
+    if (step > maximum_step) {
+      return std::numeric_limits<std::size_t>::max();
+    }
+    return step * 2;
+  }
+
+  std::int64_t galloping_index_before_timestamp(
+      std::uint64_t timestamp,
+      std::int64_t start) const {
+    const std::size_t start_index = normalize_galloping_start(start);
+
+    if (timestamp_at(start_index) <= timestamp) {
+      std::size_t lower = start_index;
+      std::size_t step = 1;
+      std::size_t upper = capped_galloping_upper(start_index, step);
+      while (upper < size_ && timestamp_at(upper) <= timestamp) {
+        lower = upper;
+        step = next_galloping_step(step);
+        upper = capped_galloping_upper(start_index, step);
+      }
+
+      return binary_index_before_timestamp(lower, std::min(upper, size_), timestamp);
     }
 
-    upper = std::min(upper + 1, size_);
+    std::size_t lower = start_index;
+    std::size_t upper = start_index + 1;
+    std::size_t step = 1;
+    while (lower > 0 && timestamp_at(lower) > timestamp) {
+      upper = lower;
+      lower = (step >= start_index) ? 0 : start_index - step;
+      step = next_galloping_step(step);
+    }
+
     return binary_index_before_timestamp(lower, upper, timestamp);
+  }
+
+  std::int64_t galloping_index_after_timestamp(
+      std::uint64_t timestamp,
+      std::int64_t start) const {
+    const std::size_t start_index = normalize_galloping_start(start);
+
+    if (timestamp_at(start_index) >= timestamp) {
+      std::size_t lower = start_index;
+      std::size_t upper = start_index + 1;
+    std::size_t step = 1;
+    while (lower > 0 && timestamp_at(lower) >= timestamp) {
+      upper = lower + 1;
+      lower = (step >= start_index) ? 0 : start_index - step;
+      step = next_galloping_step(step);
+    }
+
+      return binary_index_after_timestamp(lower, upper, timestamp);
+    }
+
+    std::size_t lower = start_index;
+    std::size_t step = 1;
+    std::size_t upper = capped_galloping_upper(start_index, step);
+    while (upper < size_ && timestamp_at(upper) < timestamp) {
+      lower = upper;
+      step = next_galloping_step(step);
+      upper = capped_galloping_upper(start_index, step);
+    }
+
+    return binary_index_after_timestamp(lower, std::min(upper + 1, size_), timestamp);
   }
 
   std::size_t lower_bound_timestamp(
@@ -3931,7 +4690,7 @@ class DatabaseRecordFile {
   std::size_t participant_scan_lower_bound(
       std::uint64_t timestamp,
       std::uint64_t fuzz,
-      bool galloping) const {
+      std::optional<std::int64_t> galloping) const {
     const std::uint64_t lower_timestamp =
         (fuzz > timestamp) ? 0 : timestamp - fuzz;
     const auto prior_index = index_before_timestamp(timestamp, galloping);
@@ -3966,7 +4725,7 @@ class DatabaseRecordFile {
   std::size_t find_participant_timestamp_index(
       std::uint64_t timestamp,
       std::uint64_t fuzz,
-      bool galloping,
+      std::optional<std::int64_t> galloping,
       bool on,
       ParticipantSearchDirection direction) const {
     if (size_ == 0) {
@@ -4096,6 +4855,486 @@ class CurrencyQuoteDatabase
     : public DatabaseRecordFile<CurrencyQuoteDatabaseTraits> {
  public:
   using DatabaseRecordFile::DatabaseRecordFile;
+};
+
+class StockTradeQuoteTimeline {
+ public:
+  StockTradeQuoteTimeline(
+      std::filesystem::path database_path,
+      std::string date,
+      std::string ticker)
+      : trades_(database_path, date, ticker),
+        quotes_(std::move(database_path), std::move(date), std::move(ticker)) {}
+
+  StockTradeQuoteTimeline& iter() { return *this; }
+
+  nanobind::tuple next() {
+    if (trade_index_ >= trades_.size() && quote_index_ >= quotes_.size()) {
+      throw nanobind::stop_iteration();
+    }
+
+    const bool next_is_quote =
+        quote_index_ < quotes_.size() &&
+        (trade_index_ >= trades_.size() ||
+         StockQuote::sip_timestamp_at(quotes_.packed_data_at(quote_index_)) <=
+             StockTrade::sip_timestamp_at(trades_.packed_data_at(trade_index_)));
+
+    nanobind::tuple result = nanobind::steal<nanobind::tuple>(PyTuple_New(2));
+    if (!result.is_valid()) {
+      throw nanobind::python_error();
+    }
+
+    if (next_is_quote) {
+      last_quote_ = quotes_.get_item(static_cast<std::int64_t>(quote_index_++));
+      Py_INCREF(Py_None);
+      PyTuple_SET_ITEM(result.ptr(), 0, Py_None);
+      PyTuple_SET_ITEM(result.ptr(), 1, nanobind::cast(*last_quote_).release().ptr());
+      return result;
+    }
+
+    StockTrade trade = trades_.get_item(static_cast<std::int64_t>(trade_index_++));
+    PyTuple_SET_ITEM(result.ptr(), 0, nanobind::cast(std::move(trade)).release().ptr());
+    if (last_quote_) {
+      PyTuple_SET_ITEM(result.ptr(), 1, nanobind::cast(*last_quote_).release().ptr());
+    } else {
+      Py_INCREF(Py_None);
+      PyTuple_SET_ITEM(result.ptr(), 1, Py_None);
+    }
+    return result;
+  }
+
+ private:
+  StockTradeDatabase trades_;
+  StockQuoteDatabase quotes_;
+  std::size_t trade_index_ = 0;
+  std::size_t quote_index_ = 0;
+  std::optional<StockQuote> last_quote_;
+};
+
+struct SimpleMarketState {
+  enum class EventKind : std::uint8_t {
+    Quote = 0,
+    Trade = 1,
+  };
+
+  struct Event {
+    std::uint64_t timestamp = 0;
+    std::size_t symbol_index = 0;
+    EventKind kind = EventKind::Trade;
+  };
+
+  struct EventGreater {
+    bool operator()(const Event& left, const Event& right) const {
+      if (left.timestamp != right.timestamp) {
+        return left.timestamp > right.timestamp;
+      }
+      if (left.symbol_index != right.symbol_index) {
+        return left.symbol_index > right.symbol_index;
+      }
+      return static_cast<std::uint8_t>(left.kind) >
+             static_cast<std::uint8_t>(right.kind);
+    }
+  };
+
+  struct SymbolState {
+    std::string symbol;
+    nanobind::object symbol_object;
+    std::unique_ptr<StockTradeDatabase> trades;
+    std::unique_ptr<StockQuoteDatabase> quotes;
+    std::size_t trade_index = 0;
+    std::size_t quote_index = 0;
+    std::int64_t last_quote_index = -1;
+    std::int64_t last_execution_quote_index = -1;
+    std::optional<StockTrade> last_trade;
+    std::optional<StockQuote> last_quote;
+  };
+
+  SimpleMarketState(
+      std::filesystem::path database_path,
+      std::string date,
+      const std::vector<std::string>& symbols,
+      std::uint64_t trade_latency_ns,
+      bool emit_quotes,
+      bool fast)
+      : database_path(std::move(database_path)),
+        date(std::move(date)),
+        trade_latency_ns(trade_latency_ns),
+        emit_quotes(emit_quotes),
+        fast(fast) {
+    symbol_states.reserve(symbols.size());
+    for (const auto& symbol : symbols) {
+      SymbolState state;
+      state.symbol = symbol;
+      state.symbol_object = intern_symbol(symbol);
+      state.trades = std::make_unique<StockTradeDatabase>(
+          this->database_path,
+          this->date,
+          symbol);
+      state.quotes = std::make_unique<StockQuoteDatabase>(
+          this->database_path,
+          this->date,
+          symbol);
+
+      const std::size_t symbol_index = symbol_states.size();
+      if (state.trades->size() > 0) {
+        event_queue.push(Event{
+            StockTrade::sip_timestamp_at(state.trades->packed_data_at(0)),
+            symbol_index,
+            EventKind::Trade});
+      }
+      if (state.quotes->size() > 0) {
+        event_queue.push(Event{
+            StockQuote::sip_timestamp_at(state.quotes->packed_data_at(0)),
+            symbol_index,
+            EventKind::Quote});
+      }
+
+      holdings.emplace(symbol, 0.0);
+      symbol_states.push_back(std::move(state));
+    }
+  }
+
+  static nanobind::object intern_symbol(const std::string& symbol) {
+    PyObject* object = PyUnicode_InternFromString(symbol.c_str());
+    if (object == nullptr) {
+      throw nanobind::python_error();
+    }
+    return nanobind::steal<nanobind::object>(object);
+  }
+
+  static std::uint64_t add_latency(
+      std::uint64_t timestamp,
+      std::uint64_t latency) {
+    const std::uint64_t maximum = std::numeric_limits<std::uint64_t>::max();
+    if (maximum - timestamp < latency) {
+      return maximum;
+    }
+    return timestamp + latency;
+  }
+
+  std::filesystem::path database_path;
+  std::string date;
+  std::uint64_t trade_latency_ns = 0;
+  bool emit_quotes = false;
+  bool fast = false;
+  nanobind::dict last_trades_by_symbol;
+  nanobind::dict last_quotes_by_symbol;
+  std::vector<SymbolState> symbol_states;
+  std::priority_queue<Event, std::vector<Event>, EventGreater> event_queue;
+  std::unordered_map<std::string, double> holdings;
+  double cash = 0.0;
+};
+
+class SimpleMarketBroker {
+ public:
+  SimpleMarketBroker(
+      std::shared_ptr<SimpleMarketState> state,
+      std::size_t symbol_index,
+      std::uint64_t sip_timestamp)
+      : state_(std::move(state)),
+        symbol_index_(symbol_index),
+        sip_timestamp_(sip_timestamp) {}
+
+  nanobind::object symbol() const {
+    return state_->symbol_states.at(symbol_index_).symbol_object;
+  }
+
+  std::uint64_t sip_timestamp() const { return sip_timestamp_; }
+
+  void buy(double shares, std::optional<std::string> symbol = std::nullopt) {
+    execute(shares, symbol, Side::Buy);
+  }
+
+  void sell(double shares, std::optional<std::string> symbol = std::nullopt) {
+    execute(shares, symbol, Side::Sell);
+  }
+
+ private:
+  enum class Side {
+    Buy,
+    Sell,
+  };
+
+  std::size_t resolve_symbol_index(const std::optional<std::string>& symbol) const {
+    if (!symbol) {
+      return symbol_index_;
+    }
+    for (std::size_t index = 0; index < state_->symbol_states.size(); ++index) {
+      if (state_->symbol_states[index].symbol == *symbol) {
+        return index;
+      }
+    }
+    throw std::out_of_range("SimpleMarket broker received an unknown symbol");
+  }
+
+  void execute(
+      double shares,
+      const std::optional<std::string>& symbol,
+      Side side) {
+    if (!std::isfinite(shares) || shares < 0.0) {
+      throw std::invalid_argument("shares must be a finite non-negative number");
+    }
+
+    const std::size_t target_symbol_index = resolve_symbol_index(symbol);
+    auto& symbol_state = state_->symbol_states[target_symbol_index];
+    const std::uint64_t target_timestamp =
+        SimpleMarketState::add_latency(sip_timestamp_, state_->trade_latency_ns);
+    const std::optional<std::int64_t> galloping =
+        symbol_state.last_execution_quote_index >= 0
+            ? std::optional<std::int64_t>(symbol_state.last_execution_quote_index)
+            : std::optional<std::int64_t>(
+                  symbol_state.last_quote_index >= 0 ? symbol_state.last_quote_index : 0);
+    const std::int64_t quote_index =
+        symbol_state.quotes->index_before_timestamp(target_timestamp, galloping);
+    if (quote_index < 0) {
+      throw std::out_of_range("no quote available at execution timestamp");
+    }
+    symbol_state.last_execution_quote_index = quote_index;
+
+    const void* quote_data =
+        symbol_state.quotes->packed_data_at(static_cast<std::size_t>(quote_index));
+    const double price = side == Side::Buy
+        ? StockQuote::ask_price_at(quote_data)
+        : StockQuote::bid_price_at(quote_data);
+    if (!std::isfinite(price) || price <= 0.0) {
+      throw std::out_of_range("execution quote has no usable price");
+    }
+
+    double& position = state_->holdings[symbol_state.symbol];
+    if (side == Side::Buy) {
+      position += shares;
+      state_->cash -= shares * price;
+    } else {
+      position -= shares;
+      state_->cash += shares * price;
+    }
+  }
+
+  std::shared_ptr<SimpleMarketState> state_;
+  std::size_t symbol_index_ = 0;
+  std::uint64_t sip_timestamp_ = 0;
+};
+
+class SimpleMarket {
+ public:
+  SimpleMarket(
+      std::filesystem::path database_path,
+      std::string date,
+      const std::vector<std::string>& symbols,
+      std::uint64_t trade_latency_ns,
+      bool quotes,
+      bool fast)
+      : state_(std::make_shared<SimpleMarketState>(
+            std::move(database_path),
+            std::move(date),
+            symbols,
+            trade_latency_ns,
+            quotes,
+            fast)) {}
+
+  SimpleMarket& iter() { return *this; }
+
+  nanobind::tuple next() {
+    while (!state_->event_queue.empty()) {
+      const SimpleMarketState::Event event = state_->event_queue.top();
+      state_->event_queue.pop();
+      auto& symbol_state = state_->symbol_states[event.symbol_index];
+
+      if (event.kind == SimpleMarketState::EventKind::Quote) {
+        if (symbol_state.quote_index >= symbol_state.quotes->size()) {
+          continue;
+        }
+        const auto quote_index = symbol_state.quote_index++;
+        const void* quote_data = symbol_state.quotes->packed_data_at(quote_index);
+        const std::uint64_t timestamp = StockQuote::sip_timestamp_at(quote_data);
+        symbol_state.last_quote_index = static_cast<std::int64_t>(quote_index);
+        symbol_state.last_quote = symbol_state.quotes->get_item(
+            static_cast<std::int64_t>(quote_index));
+        state_->last_quotes_by_symbol[symbol_state.symbol_object] =
+            nanobind::cast(*symbol_state.last_quote);
+        push_next_quote(event.symbol_index);
+        if (!state_->emit_quotes) {
+          continue;
+        }
+        current_broker_ = SimpleMarketBroker(state_, event.symbol_index, timestamp);
+        return make_event_tuple(event.symbol_index, std::nullopt, symbol_state.last_quote);
+      }
+
+      if (symbol_state.trade_index >= symbol_state.trades->size()) {
+        continue;
+      }
+      const auto trade_index = symbol_state.trade_index++;
+      const void* trade_data = symbol_state.trades->packed_data_at(trade_index);
+      const std::uint64_t timestamp = StockTrade::sip_timestamp_at(trade_data);
+      symbol_state.last_trade = symbol_state.trades->get_item(
+          static_cast<std::int64_t>(trade_index));
+      state_->last_trades_by_symbol[symbol_state.symbol_object] =
+          nanobind::cast(*symbol_state.last_trade);
+      push_next_trade(event.symbol_index);
+      current_broker_ = SimpleMarketBroker(state_, event.symbol_index, timestamp);
+      return make_event_tuple(event.symbol_index, symbol_state.last_trade, std::nullopt);
+    }
+
+    throw nanobind::stop_iteration();
+  }
+
+  double get_holding(nanobind::handle key) const {
+    if (key.is_none()) {
+      return state_->cash;
+    }
+    const std::string symbol = nanobind::cast<std::string>(key);
+    const auto iter = state_->holdings.find(symbol);
+    if (iter == state_->holdings.end()) {
+      throw std::out_of_range("SimpleMarket holdings key not found");
+    }
+    return iter->second;
+  }
+
+  bool contains(nanobind::handle key) const {
+    if (key.is_none()) {
+      return true;
+    }
+    if (!PyUnicode_Check(key.ptr())) {
+      return false;
+    }
+    const std::string symbol = nanobind::cast<std::string>(key);
+    return state_->holdings.find(symbol) != state_->holdings.end();
+  }
+
+  std::size_t size() const {
+    return state_->holdings.size() + 1;
+  }
+
+  nanobind::list keys() const {
+    nanobind::list result;
+    Py_INCREF(Py_None);
+    result.append(nanobind::borrow<nanobind::object>(Py_None));
+    for (const auto& symbol_state : state_->symbol_states) {
+      result.append(symbol_state.symbol_object);
+    }
+    return result;
+  }
+
+  nanobind::list values() const {
+    nanobind::list result;
+    result.append(state_->cash);
+    for (const auto& symbol_state : state_->symbol_states) {
+      const auto iter = state_->holdings.find(symbol_state.symbol);
+      result.append(iter == state_->holdings.end() ? 0.0 : iter->second);
+    }
+    return result;
+  }
+
+  nanobind::list items() const {
+    nanobind::list result;
+    result.append(nanobind::make_tuple(nanobind::none(), state_->cash));
+    for (const auto& symbol_state : state_->symbol_states) {
+      const auto iter = state_->holdings.find(symbol_state.symbol);
+      result.append(nanobind::make_tuple(
+          symbol_state.symbol_object,
+          iter == state_->holdings.end() ? 0.0 : iter->second));
+    }
+    return result;
+  }
+
+  nanobind::dict as_dict() const {
+    nanobind::dict result;
+    result[nanobind::none()] = state_->cash;
+    for (const auto& symbol_state : state_->symbol_states) {
+      const auto iter = state_->holdings.find(symbol_state.symbol);
+      result[symbol_state.symbol_object] =
+          iter == state_->holdings.end() ? 0.0 : iter->second;
+    }
+    return result;
+  }
+
+  SimpleMarketBroker broker() const {
+    if (!current_broker_) {
+      throw std::out_of_range("SimpleMarket broker is not available before iteration");
+    }
+    return *current_broker_;
+  }
+
+ private:
+  void push_next_trade(std::size_t symbol_index) {
+    auto& symbol_state = state_->symbol_states[symbol_index];
+    if (symbol_state.trade_index < symbol_state.trades->size()) {
+      state_->event_queue.push(SimpleMarketState::Event{
+          StockTrade::sip_timestamp_at(
+              symbol_state.trades->packed_data_at(symbol_state.trade_index)),
+          symbol_index,
+          SimpleMarketState::EventKind::Trade});
+    }
+  }
+
+  void push_next_quote(std::size_t symbol_index) {
+    auto& symbol_state = state_->symbol_states[symbol_index];
+    if (symbol_state.quote_index < symbol_state.quotes->size()) {
+      state_->event_queue.push(SimpleMarketState::Event{
+          StockQuote::sip_timestamp_at(
+              symbol_state.quotes->packed_data_at(symbol_state.quote_index)),
+          symbol_index,
+          SimpleMarketState::EventKind::Quote});
+    }
+  }
+
+  nanobind::tuple make_event_tuple(
+      std::size_t symbol_index,
+      const std::optional<StockTrade>& trade,
+      const std::optional<StockQuote>& quote) {
+    nanobind::tuple result = nanobind::steal<nanobind::tuple>(PyTuple_New(6));
+    if (!result.is_valid()) {
+      throw nanobind::python_error();
+    }
+
+    auto& symbol_state = state_->symbol_states[symbol_index];
+    PyTuple_SET_ITEM(
+        result.ptr(),
+        0,
+        nanobind::object(symbol_state.symbol_object).release().ptr());
+
+    if (trade) {
+      PyTuple_SET_ITEM(result.ptr(), 1, nanobind::cast(*trade).release().ptr());
+    } else {
+      Py_INCREF(Py_None);
+      PyTuple_SET_ITEM(result.ptr(), 1, Py_None);
+    }
+
+    if (quote) {
+      PyTuple_SET_ITEM(result.ptr(), 2, nanobind::cast(*quote).release().ptr());
+    } else {
+      Py_INCREF(Py_None);
+      PyTuple_SET_ITEM(result.ptr(), 2, Py_None);
+    }
+
+    PyTuple_SET_ITEM(
+        result.ptr(),
+        3,
+        event_dict_object(state_->last_trades_by_symbol).release().ptr());
+    PyTuple_SET_ITEM(
+        result.ptr(),
+        4,
+        event_dict_object(state_->last_quotes_by_symbol).release().ptr());
+    PyTuple_SET_ITEM(
+        result.ptr(),
+        5,
+        nanobind::cast(*current_broker_).release().ptr());
+    return result;
+  }
+
+  nanobind::object event_dict_object(const nanobind::dict& source) const {
+    if (state_->fast) {
+      return nanobind::object(source);
+    }
+    PyObject* copy = PyDict_Copy(source.ptr());
+    if (copy == nullptr) {
+      throw nanobind::python_error();
+    }
+    return nanobind::steal<nanobind::object>(copy);
+  }
+
+  std::shared_ptr<SimpleMarketState> state_;
+  std::optional<SimpleMarketBroker> current_broker_;
 };
 
 struct NativeSpecialization {
@@ -5457,7 +6696,8 @@ class Implementation : public Base {
   static std::uint64_t build_database_file(
       const std::filesystem::path& input_path,
       const std::filesystem::path& database_path,
-      std::string_view record_type) {
+      std::string_view record_type,
+      bool force = false) {
     if (record_type == "stock_trade") {
       detail::BitsetParseCache<96> bitset_cache;
       return build_parsed_database<StockTrade>(
@@ -5467,7 +6707,8 @@ class Implementation : public Base {
           [&bitset_cache](std::string_view line) {
             return Implementation::parse_trade_row(line, bitset_cache);
           },
-          [](const StockTrade& row) { return row.sip_timestamp; });
+          [](const StockTrade& row) { return row.sip_timestamp; },
+          force);
     }
 
     if (record_type == "stock_quote") {
@@ -5479,7 +6720,8 @@ class Implementation : public Base {
           [&bitset_cache](std::string_view line) {
             return Implementation::parse_quote_row(line, bitset_cache);
           },
-          [](const StockQuote& row) { return row.sip_timestamp; });
+          [](const StockQuote& row) { return row.sip_timestamp; },
+          force);
     }
 
     if (record_type == "currency_quote") {
@@ -5490,7 +6732,8 @@ class Implementation : public Base {
           [](std::string_view line) {
             return Implementation::parse_currency_quote_row(line);
           },
-          [](const CurrencyQuote& row) { return row.participant_timestamp; });
+          [](const CurrencyQuote& row) { return row.participant_timestamp; },
+          force);
     }
 
     std::ostringstream message;
@@ -5526,7 +6769,8 @@ class Implementation : public Base {
       const std::filesystem::path& database_path,
       std::string_view record_type,
       ParseRowFn parse_row,
-      DateTimestampFn date_timestamp) {
+      DateTimestampFn date_timestamp,
+      bool force) {
     std::filesystem::create_directories(database_path);
 
     detail::BufferedGzipLineReader reader(input_path);
@@ -5537,6 +6781,7 @@ class Implementation : public Base {
     bool is_first_line = true;
     bool has_output_root = false;
     bool has_current_output = false;
+    bool skip_current_output = false;
     std::uint64_t rows_written = 0;
 
     while (reader.template next_line<Specialization>(line)) {
@@ -5559,8 +6804,19 @@ class Implementation : public Base {
 
       if (!has_current_output || row.ticker != current_ticker) {
         current_ticker = row.ticker;
-        writer.open(output_root / current_ticker);
-        has_current_output = true;
+        const auto output_path = output_root / current_ticker;
+        skip_current_output = !force && std::filesystem::exists(output_path);
+        if (skip_current_output) {
+          writer.close();
+          has_current_output = true;
+        } else {
+          writer.open(output_path);
+          has_current_output = true;
+        }
+      }
+
+      if (skip_current_output) {
+        continue;
       }
 
       writer.write(row.pack());

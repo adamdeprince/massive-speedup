@@ -1097,6 +1097,25 @@ class StockQuoteDatabase:
         raise RuntimeError("StockQuoteDatabase requires the native massive_speedup extension")
 
 
+class StockTradeQuoteTimeline:
+    def __init__(self, *args, **kwargs):
+        raise RuntimeError("StockTradeQuoteTimeline requires the native massive_speedup extension")
+
+
+class SimpleMarketBroker:
+    def __init__(self, *args, **kwargs):
+        raise RuntimeError("SimpleMarketBroker requires the native massive_speedup extension")
+
+
+class SimpleMarket:
+    def __init__(self, *args, **kwargs):
+        raise RuntimeError("SimpleMarket requires the native massive_speedup extension")
+
+
+def stock_trade_quote_timeline(*args, **kwargs):
+    raise RuntimeError("stock_trade_quote_timeline requires the native massive_speedup extension")
+
+
 class CurrencyQuoteDatabase:
     def __init__(self, *args, **kwargs):
         raise RuntimeError("CurrencyQuoteDatabase requires the native massive_speedup extension")

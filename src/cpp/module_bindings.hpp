@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -130,6 +131,39 @@ void bind_iterator_type(nb::module_& m, const char* iterator_name) {
       .def("__next__", &IteratorType::next);
 }
 
+inline nb::object bind_condition_enum(
+    nb::module_& m,
+    const char* class_name,
+    native::detail::ConditionSetKind kind) {
+  nb::dict members;
+  const auto& metadata = native::detail::condition_metadata_table(kind);
+  for (std::size_t index = 0; index < metadata.size(); ++index) {
+    if (!metadata[index].has_value()) {
+      continue;
+    }
+    members[nb::str(metadata[index]->enum_name.data())] = nb::int_(index);
+  }
+
+  nb::module_ condition_enums =
+      nb::module_::import_("massive_speedup._condition_enums");
+  nb::object enum_type =
+      condition_enums.attr("make_condition_enum")(class_name, members);
+  m.attr(class_name) = enum_type;
+  native::detail::install_condition_enum_members(kind, enum_type);
+  return enum_type;
+}
+
+inline void bind_condition_enums(nb::module_& m) {
+  bind_condition_enum(
+      m,
+      "StockTradeCondition",
+      native::detail::ConditionSetKind::stock_trade);
+  bind_condition_enum(
+      m,
+      "StockQuoteCondition",
+      native::detail::ConditionSetKind::stock_quote);
+}
+
 inline std::string date_argument_to_string(nb::handle date) {
   if (PyUnicode_Check(date.ptr())) {
     return nb::cast<std::string>(date);
@@ -171,6 +205,35 @@ inline std::uint64_t nanoseconds_argument_to_uint64(
   std::ostringstream message;
   message << argument_name << " must be integer or float nanoseconds";
   throw std::invalid_argument(message.str());
+}
+
+inline std::optional<std::int64_t> galloping_argument_to_optional_index(
+    nb::handle value) {
+  if (value.ptr() == Py_None) {
+    return std::nullopt;
+  }
+
+  PyObject* index_object_ptr = PyNumber_Index(value.ptr());
+  if (index_object_ptr == nullptr) {
+    PyErr_Clear();
+    throw std::invalid_argument("galloping must be None or an integer index");
+  }
+  nb::object index_object = nb::steal<nb::object>(index_object_ptr);
+
+  int overflow = 0;
+  const long long parsed =
+      PyLong_AsLongLongAndOverflow(index_object.ptr(), &overflow);
+  if (overflow > 0) {
+    return std::numeric_limits<std::int64_t>::max();
+  }
+  if (overflow < 0) {
+    return std::numeric_limits<std::int64_t>::min();
+  }
+  if (PyErr_Occurred()) {
+    throw nb::python_error();
+  }
+
+  return static_cast<std::int64_t>(parsed);
 }
 
 template <typename DatabaseType>
@@ -261,49 +324,59 @@ void bind_database_record_file(
           nb::keep_alive<0, 1>())
       .def(
           "index_before_timestamp",
-          [](const DatabaseType& self, nb::handle timestamp, bool galloping) {
+          [](const DatabaseType& self, nb::handle timestamp, nb::handle galloping) {
             return self.index_before_timestamp(
                 timestamp_argument_to_ns(self, timestamp),
-                galloping);
+                galloping_argument_to_optional_index(galloping));
           },
           nb::arg("timestamp"),
           nb::kw_only(),
-          nb::arg("galloping") = false)
+          nb::arg("galloping") = nb::none())
+      .def(
+          "index_after_timestamp",
+          [](const DatabaseType& self, nb::handle timestamp, nb::handle galloping) {
+            return self.index_after_timestamp(
+                timestamp_argument_to_ns(self, timestamp),
+                galloping_argument_to_optional_index(galloping));
+          },
+          nb::arg("timestamp"),
+          nb::kw_only(),
+          nb::arg("galloping") = nb::none())
       .def(
           "find_before_participant_timestamp",
           [](const DatabaseType& self,
              nb::handle timestamp,
              nb::handle fuzz,
-             bool galloping,
+             nb::handle galloping,
              bool on) {
             return self.find_before_participant_timestamp(
                 timestamp_argument_to_ns(self, timestamp),
                 nanoseconds_argument_to_uint64(fuzz, "fuzz"),
-                galloping,
+                galloping_argument_to_optional_index(galloping),
                 on);
           },
           nb::arg("timestamp"),
           nb::arg("fuzz") = 1'000'000'000ULL,
           nb::kw_only(),
-          nb::arg("galloping") = false,
+          nb::arg("galloping") = nb::none(),
           nb::arg("on") = true)
       .def(
           "find_after_participant_timestamp",
           [](const DatabaseType& self,
              nb::handle timestamp,
              nb::handle fuzz,
-             bool galloping,
+             nb::handle galloping,
              bool on) {
             return self.find_after_participant_timestamp(
                 timestamp_argument_to_ns(self, timestamp),
                 nanoseconds_argument_to_uint64(fuzz, "fuzz"),
-                galloping,
+                galloping_argument_to_optional_index(galloping),
                 on);
           },
           nb::arg("timestamp"),
           nb::arg("fuzz") = 1'000'000'000ULL,
           nb::kw_only(),
-          nb::arg("galloping") = false,
+          nb::arg("galloping") = nb::none(),
           nb::arg("on") = true)
       .def(
           "iterate_bounded",
@@ -332,6 +405,123 @@ void bind_database_record_file(
         .def_prop_ro("market_open", &DatabaseType::market_open)
         .def_prop_ro("market_close", &DatabaseType::market_close);
   }
+}
+
+inline void bind_stock_trade_quote_timeline(nb::module_& m) {
+  nb::class_<native::StockTradeQuoteTimeline>(m, "StockTradeQuoteTimeline")
+      .def(
+          "__init__",
+          [](native::StockTradeQuoteTimeline* self,
+             const std::filesystem::path& database_path,
+             nb::handle date,
+             const std::string& ticker) {
+            new (self) native::StockTradeQuoteTimeline(
+                database_path,
+                date_argument_to_string(date),
+                ticker);
+          },
+          nb::arg("database_path"),
+          nb::arg("date"),
+          nb::arg("ticker"))
+      .def(
+          "__iter__",
+          [](native::StockTradeQuoteTimeline& self)
+              -> native::StockTradeQuoteTimeline& { return self.iter(); },
+          nb::rv_policy::reference_internal)
+      .def("__next__", &native::StockTradeQuoteTimeline::next);
+
+  m.def(
+      "stock_trade_quote_timeline",
+      [](const std::filesystem::path& database_path,
+         nb::handle date,
+         const std::string& ticker) {
+        return native::StockTradeQuoteTimeline(
+            database_path,
+            date_argument_to_string(date),
+            ticker);
+      },
+      nb::arg("database_path"),
+      nb::arg("date"),
+      nb::arg("ticker"));
+}
+
+inline void bind_simple_market(nb::module_& m) {
+  nb::class_<native::SimpleMarketBroker>(m, "SimpleMarketBroker")
+      .def_prop_ro("symbol", &native::SimpleMarketBroker::symbol)
+      .def_prop_ro("sip_timestamp", &native::SimpleMarketBroker::sip_timestamp)
+      .def(
+          "buy",
+          [](native::SimpleMarketBroker& self, double shares, nb::handle symbol) {
+            if (symbol.is_none()) {
+              self.buy(shares);
+              return;
+            }
+            self.buy(shares, nb::cast<std::string>(symbol));
+          },
+          nb::arg("shares"),
+          nb::arg("symbol") = nb::none())
+      .def(
+          "sell",
+          [](native::SimpleMarketBroker& self, double shares, nb::handle symbol) {
+            if (symbol.is_none()) {
+              self.sell(shares);
+              return;
+            }
+            self.sell(shares, nb::cast<std::string>(symbol));
+          },
+          nb::arg("shares"),
+          nb::arg("symbol") = nb::none());
+
+  nb::class_<native::SimpleMarket>(m, "SimpleMarket")
+      .def(
+          "__init__",
+          [](native::SimpleMarket* self,
+             const std::filesystem::path& database_path,
+             nb::handle date,
+             const std::vector<std::string>& symbols,
+             std::uint64_t trade_latency_ns,
+             bool quotes,
+             bool fast) {
+            new (self) native::SimpleMarket(
+                database_path,
+                date_argument_to_string(date),
+                symbols,
+                trade_latency_ns,
+                quotes,
+                fast);
+          },
+          nb::arg("database_path"),
+          nb::arg("date"),
+          nb::arg("symbols"),
+          nb::arg("trade_latency_ns"),
+          nb::kw_only(),
+          nb::arg("quotes") = false,
+          nb::arg("fast") = false)
+      .def(
+          "__iter__",
+          [](native::SimpleMarket& self) -> native::SimpleMarket& {
+            return self.iter();
+          },
+          nb::rv_policy::reference_internal)
+      .def("__next__", &native::SimpleMarket::next)
+      .def(
+          "__getitem__",
+          [](const native::SimpleMarket& self, nb::handle key) {
+            return self.get_holding(key);
+          },
+          nb::arg("key").none())
+      .def(
+          "__contains__",
+          [](const native::SimpleMarket& self, nb::handle key) {
+            return self.contains(key);
+          },
+          nb::arg("key").none())
+      .def("__len__", &native::SimpleMarket::size)
+      .def_prop_ro("broker", &native::SimpleMarket::broker)
+      .def("keys", &native::SimpleMarket::keys)
+      .def("values", &native::SimpleMarket::values)
+      .def("items", &native::SimpleMarket::items)
+      .def("as_dict", &native::SimpleMarket::as_dict);
 }
 
 template <typename AggregatorType>
@@ -858,9 +1048,12 @@ inline void bind_row_models(nb::module_& m, nb::module_& flatfiles) {
               "__init__",
               &construct_row_from_packed_with_ticker<native::StockTrade>,
               nb::arg("packed"),
-              nb::arg("ticker"))
+          nb::arg("ticker"))
           .def_prop_ro("ticker", &native::StockTrade::ticker_object)
           .def_prop_ro("conditions", &native::StockTrade::conditions_object)
+          .def("updates_high_low", &native::StockTrade::updates_high_low)
+          .def("updates_open_close", &native::StockTrade::updates_open_close)
+          .def("updates_volume", &native::StockTrade::updates_volume)
           .def_prop_ro("correction", &native::StockTrade::correction_object)
           .def_prop_ro("exchange", &native::StockTrade::exchange_object)
           .def_prop_ro("id", &native::StockTrade::id_object)
@@ -936,6 +1129,9 @@ inline void bind_row_models(nb::module_& m, nb::module_& flatfiles) {
           .def_prop_ro("bid_size", &native::StockQuote::bid_size_object)
           .def_prop_ro("conditions", &native::StockQuote::conditions_object)
           .def_prop_ro("indicators", &native::StockQuote::indicators_object)
+          .def("updates_high_low", &native::StockQuote::updates_high_low)
+          .def("updates_open_close", &native::StockQuote::updates_open_close)
+          .def("updates_volume", &native::StockQuote::updates_volume)
           .def_prop_ro(
               "participant_timestamp",
               &native::StockQuote::participant_timestamp_object)
@@ -1629,18 +1825,22 @@ void bind_native_module(nb::module_& m, const char* alias_prefix) {
       "build_database_file",
       [](const std::filesystem::path& input_path,
          const std::filesystem::path& database_path,
-         const std::string& record_type) {
+         const std::string& record_type,
+         bool force) {
         return Impl<FlatFileStocksParser>::build_database_file(
             input_path,
             database_path,
-            record_type);
+            record_type,
+            force);
       },
       nb::arg("input_path"),
       nb::arg("database_path"),
       nb::arg("record_type"),
+      nb::arg("force") = false,
       nb::call_guard<nb::gil_scoped_release>());
   static_cast<void>(alias_prefix);
 
+  bind_condition_enums(m);
   bind_gzip_lines<Impl<FlatFileStocksParser>>(m, gzip_iterator_name.c_str());
   bind_common_bases(m);
   bind_database_record_file<native::StockTradeDatabase>(
@@ -1655,6 +1855,8 @@ void bind_native_module(nb::module_& m, const char* alias_prefix) {
       m,
       "CurrencyQuoteDatabase",
       currency_quote_database_iterator_name.c_str());
+  bind_stock_trade_quote_timeline(m);
+  bind_simple_market(m);
 
   auto flatfiles = m.def_submodule("FlatFiles", "Flat-file parser classes.");
   bind_stock_flatfile_asset<FlatFileStocksParser, Impl<FlatFileStocksParser>>(

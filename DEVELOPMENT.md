@@ -112,16 +112,26 @@ Local Linux wheels built directly with `python -m build --wheel` are usually
 tagged for the local machine. For PyPI binary distribution, build repaired
 platform wheels with `cibuildwheel`.
 
+Do not upload local wheels named like:
+
+```text
+massive_speedup-<version>-cp313-cp313-linux_x86_64.whl
+```
+
+PyPI rejects the `linux_x86_64` platform tag. Upload only the sdist and wheels
+with valid platform tags such as `manylinux_2_28_x86_64` or
+`musllinux_1_2_x86_64`.
+
 Build wheels for the current platform:
 
 ```bash
-python -m cibuildwheel --output-dir dist
+python -m cibuildwheel --platform linux --output-dir dist-pypi-<version>
 ```
 
 Limit Python versions if needed:
 
 ```bash
-CIBW_BUILD="cp311-* cp312-* cp313-* cp314-*" python -m cibuildwheel --output-dir dist
+CIBW_BUILD="cp311-* cp312-* cp313-* cp314-*" python -m cibuildwheel --platform linux --output-dir dist-pypi-<version>
 ```
 
 Linux builds normally require Docker because cibuildwheel builds manylinux or
@@ -159,14 +169,36 @@ tokens are not stored in the repository or CI secrets.
 Manual token-based upload:
 
 ```bash
-python -m twine upload dist/*
+python -m twine upload dist/massive_speedup-<version>.tar.gz
+python -m twine upload dist-pypi-<version>/massive_speedup-<version>-*.whl
 ```
 
 Upload both source and binary artifacts together when possible:
 
 ```text
 dist/massive_speedup-<version>.tar.gz
-dist/massive_speedup-<version>-<python>-<abi>-<platform>.whl
+dist-pypi-<version>/massive_speedup-<version>-<python>-<abi>-<platform>.whl
 ```
 
 Do not reuse a version number after uploading to PyPI; PyPI files are immutable.
+
+## Release Command Pattern
+
+This is the exact pattern to use for a Linux release:
+
+```bash
+VERSION=0.1.4
+rm -rf dist "dist-pypi-$VERSION"
+python -m build --sdist
+python -m cibuildwheel --platform linux --output-dir "dist-pypi-$VERSION"
+python -m twine check "dist/massive_speedup-$VERSION.tar.gz" "dist-pypi-$VERSION"/*.whl
+python -m twine upload "dist/massive_speedup-$VERSION.tar.gz"
+python -m twine upload "dist-pypi-$VERSION/massive_speedup-$VERSION-"*.whl
+```
+
+If `python -m build --wheel` is run locally as a smoke test, leave that wheel
+out of the upload command unless it has been repaired and retagged by
+`cibuildwheel`.
+
+The `0.1.3` sdist was uploaded before the wheel-test fallback export issue was
+fixed. Do not try to replace it; publish the next version instead.

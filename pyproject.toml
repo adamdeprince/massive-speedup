@@ -1,7 +1,7 @@
 [project]
 name = "massive-speedup"
-version = "0.1.2"
-description = "Nanobind/C++ parsers for polygon, bulk S3, and websocket market data."
+version = "0.1.4"
+description = "Nanobind/C++ parsers for massive, bulk S3, and websocket market data."
 readme = "README.md"
 requires-python = ">=3.9,<4.0"
 license = "Apache-2.0"
@@ -11,7 +11,7 @@ authors = [
 ]
 keywords = [
   "nanobind",
-  "polygon",
+  "massive",
   "s3",
   "websocket",
   "market-data",

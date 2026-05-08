@@ -9,6 +9,114 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Iterator
 
+from ._condition_enums import make_condition_enum
+
+
+StockTradeCondition = make_condition_enum(
+    "StockTradeCondition",
+    {
+        "ACQUISITION": 1,
+        "AVERAGE_PRICE_TRADE": 2,
+        "AUTOMATIC_EXECUTION": 3,
+        "BUNCHED_TRADE": 4,
+        "BUNCHED_SOLD_TRADE": 5,
+        "CAP_ELECTION": 6,
+        "CASH_SALE": 7,
+        "CLOSING_PRINTS": 8,
+        "CROSS_TRADE": 9,
+        "DERIVATIVELY_PRICED": 10,
+        "DISTRIBUTION": 11,
+        "FORM_T_EXTENDED_HOURS": 12,
+        "EXTENDED_HOURS_SOLD_OUT_OF_SEQUENCE": 13,
+        "INTERMARKET_SWEEP": 14,
+        "MARKET_CENTER_OFFICIAL_CLOSE": 15,
+        "MARKET_CENTER_OFFICIAL_OPEN": 16,
+        "MARKET_CENTER_OPENING_TRADE": 17,
+        "MARKET_CENTER_REOPENING_TRADE": 18,
+        "MARKET_CENTER_CLOSING_TRADE": 19,
+        "NEXT_DAY": 20,
+        "PRICE_VARIATION_TRADE": 21,
+        "PRIOR_REFERENCE_PRICE": 22,
+        "RULE_155_TRADE_AMEX": 23,
+        "RULE_127_NYSE_ONLY": 24,
+        "OPENING_PRINTS": 25,
+        "STOPPED_STOCK_REGULAR_TRADE": 27,
+        "RE_OPENING_PRINTS": 28,
+        "SELLER": 29,
+        "SOLD_LAST": 30,
+        "SOLD_LAST_AND_STOPPED_STOCK": 31,
+        "SOLD_OUT_OF_SEQUENCE": 32,
+        "SOLD_OUT_OF_SEQUENCE_AND_STOPPED_STOCK": 33,
+        "SPLIT_TRADE": 34,
+        "STOCK_OPTION": 35,
+        "YELLOW_FLAG_REGULAR_TRADE": 36,
+        "ODD_LOT_TRADE": 37,
+        "CORRECTED_CONSOLIDATED_CLOSE_PER_LISTING_MARKET": 38,
+        "TRADE_THRU_EXEMPT": 41,
+        "CONTINGENT_TRADE": 52,
+        "QUALIFIED_CONTINGENT_TRADE": 53,
+        "OPENING_REOPENING_TRADE_DETAIL": 55,
+        "SHORT_SALE_RESTRICTION_ACTIVATED": 57,
+        "SHORT_SALE_RESTRICTION_CONTINUED": 58,
+        "SHORT_SALE_RESTRICTION_DEACTIVATED": 59,
+        "SHORT_SALE_RESTRICTION_IN_EFFECT": 60,
+        "FINANCIAL_STATUS_BANKRUPT": 62,
+        "FINANCIAL_STATUS_DEFICIENT": 63,
+        "FINANCIAL_STATUS_DELINQUENT": 64,
+        "FINANCIAL_STATUS_BANKRUPT_AND_DEFICIENT": 65,
+        "FINANCIAL_STATUS_BANKRUPT_AND_DELINQUENT": 66,
+        "FINANCIAL_STATUS_DEFICIENT_AND_DELINQUENT": 67,
+        "FINANCIAL_STATUS_DEFICIENT_DELINQUENT_AND_BANKRUPT": 68,
+        "FINANCIAL_STATUS_LIQUIDATION": 69,
+        "FINANCIAL_STATUS_CREATIONS_SUSPENDED": 70,
+        "FINANCIAL_STATUS_REDEMPTIONS_SUSPENDED": 71,
+    },
+)
+
+StockQuoteCondition = make_condition_enum(
+    "StockQuoteCondition",
+    {
+        "REGULAR_TWO_SIDED_OPEN": 1,
+        "REGULAR_ONE_SIDED_OPEN": 2,
+        "SLOW_ASK": 3,
+        "SLOW_BID": 4,
+        "SLOW_BID_AND_ASK": 5,
+        "SLOW_DUE_LRP_BID": 6,
+        "SLOW_DUE_LRP_ASK": 7,
+        "SLOW_DUE_SET_SLOW_LIST_BID_ASK": 9,
+        "MANUAL_ASK_AUTOMATED_BID": 10,
+        "MANUAL_BID_AUTOMATED_ASK": 11,
+        "MANUAL_BID_AND_ASK": 12,
+        "OPENING": 13,
+        "CLOSING": 14,
+        "CLOSED": 15,
+        "RESUME": 16,
+        "FAST_TRADING": 17,
+        "TRADING_RANGE_INDICATION": 18,
+        "MARKET_MAKER_QUOTES_CLOSED": 19,
+        "NON_FIRM": 20,
+        "NEWS_DISSEMINATION": 21,
+        "ORDER_INFLUX": 22,
+        "ORDER_IMBALANCE": 23,
+        "ADDITIONAL_INFORMATION": 26,
+        "NEWS_PENDING": 27,
+        "ADDITIONAL_INFORMATION_DUE_TO_RELATED_SECURITY": 28,
+        "DUE_TO_RELATED_SECURITY": 29,
+        "IN_VIEW_OF_COMMON": 30,
+        "NO_OPEN_NO_RESUME": 32,
+        "ON_DEMAND_AUCTION": 40,
+        "CASH_ONLY_SETTLEMENT": 41,
+        "NEXT_DAY_SETTLEMENT": 42,
+        "LULD_TRADING_PAUSE": 43,
+        "SLOW_DUE_LRP_BID_AND_ASK": 71,
+        "CORRECTED_PRICE_INDICATION": 81,
+        "SIP_GENERATED": 82,
+        "CROSSED_MARKET": 84,
+        "LOCKED_MARKET": 85,
+        "CQS_GENERATED": 94,
+    },
+)
+
 
 def read_gzip_lines(path: str | Path):
     with gzip.open(path, "rb") as handle:
@@ -42,9 +150,6 @@ def _parse_bitset96(text: str) -> str:
         return f"{int(text, 16):096b}"[-96:]
     if all(ch in "01" for ch in text) and len(text) <= 96:
         return text.zfill(96)
-    if text.isdigit():
-        return f"{int(text):096b}"[-96:]
-
     bits = [0] * 96
     current = []
     for ch in text:
@@ -63,18 +168,43 @@ def _parse_bitset96(text: str) -> str:
     return "".join("1" if bit else "0" for bit in reversed(bits))
 
 
-_BITSET_INDICES_INTERN_CACHE: dict[str, frozenset[int]] = {}
+_BITSET_INDICES_INTERN_CACHE: dict[tuple[object, str], frozenset[int]] = {}
 
 
-def _bitset_indices(text: str) -> frozenset[int]:
+def _bitset_indices(text: str, enum_type: type[int] | None = None) -> frozenset[int]:
     bit_string = _parse_bitset96(text)
-    cached = _BITSET_INDICES_INTERN_CACHE.get(bit_string)
+    cache_key = (enum_type, bit_string)
+    cached = _BITSET_INDICES_INTERN_CACHE.get(cache_key)
     if cached is not None:
         return cached
 
-    cached = frozenset(index for index, value in enumerate(reversed(bit_string)) if value == "1")
-    _BITSET_INDICES_INTERN_CACHE[bit_string] = cached
+    values = []
+    for index, value in enumerate(reversed(bit_string)):
+        if value != "1":
+            continue
+        if enum_type is None:
+            values.append(index)
+            continue
+        try:
+            values.append(enum_type(index))
+        except ValueError:
+            values.append(index)
+    cached = frozenset(values)
+    _BITSET_INDICES_INTERN_CACHE[cache_key] = cached
     return cached
+
+
+def _conditions_clear(conditions: frozenset[int], excluded: frozenset[int]) -> bool:
+    return not any(int(condition) in excluded for condition in conditions)
+
+
+_STOCK_TRADE_HIGH_LOW_EXCLUDED = frozenset({2, 7, 12, 13, 15, 16, 20, 22, 38})
+_STOCK_TRADE_OPEN_CLOSE_EXCLUDED = frozenset({2, 5, 7, 10, 12, 13, 15, 16, 20, 22, 38})
+_STOCK_TRADE_VOLUME_EXCLUDED = frozenset({15, 16, 38})
+
+_STOCK_QUOTE_HIGH_LOW_EXCLUDED = frozenset()
+_STOCK_QUOTE_OPEN_CLOSE_EXCLUDED = frozenset()
+_STOCK_QUOTE_VOLUME_EXCLUDED = frozenset()
 
 
 _TICKERS_INTERN_CACHE: dict[str, tuple[str, str]] = {}
@@ -113,7 +243,7 @@ class StockTrade:
         if len(fields) != 13:
             raise ValueError(f"StockTrade expected 13 fields, received {len(fields)}")
         self.ticker = fields[0]
-        self.conditions = _bitset_indices(fields[1])
+        self.conditions = _bitset_indices(fields[1], StockTradeCondition)
         self.correction = _parse_int(fields[2])
         self.exchange = _parse_int(fields[3])
         self.id = _parse_int(fields[4])
@@ -169,6 +299,15 @@ class StockTrade:
     def __hash__(self) -> int:
         return hash(tuple(self))
 
+    def updates_high_low(self) -> bool:
+        return _conditions_clear(self.conditions, _STOCK_TRADE_HIGH_LOW_EXCLUDED)
+
+    def updates_open_close(self) -> bool:
+        return _conditions_clear(self.conditions, _STOCK_TRADE_OPEN_CLOSE_EXCLUDED)
+
+    def updates_volume(self) -> bool:
+        return _conditions_clear(self.conditions, _STOCK_TRADE_VOLUME_EXCLUDED)
+
     def __repr__(self) -> str:
         return (
             "StockTrade("
@@ -211,8 +350,8 @@ class StockQuote:
         self.bid_exchange = _parse_int(fields[4])
         self.bid_price = _parse_float(fields[5])
         self.bid_size = _parse_int(fields[6])
-        self.conditions = _bitset_indices(fields[7])
-        self.indicators = _bitset_indices(fields[8])
+        self.conditions = _bitset_indices(fields[7], StockQuoteCondition)
+        self.indicators = _bitset_indices(fields[8], StockQuoteCondition)
         self.participant_timestamp = _parse_int(fields[9])
         self.sequence_number = _parse_int(fields[10])
         self.sip_timestamp = _parse_int(fields[11])
@@ -262,6 +401,21 @@ class StockQuote:
 
     def __hash__(self) -> int:
         return hash(tuple(self))
+
+    def updates_high_low(self) -> bool:
+        return _conditions_clear(
+            self.conditions | self.indicators, _STOCK_QUOTE_HIGH_LOW_EXCLUDED
+        )
+
+    def updates_open_close(self) -> bool:
+        return _conditions_clear(
+            self.conditions | self.indicators, _STOCK_QUOTE_OPEN_CLOSE_EXCLUDED
+        )
+
+    def updates_volume(self) -> bool:
+        return _conditions_clear(
+            self.conditions | self.indicators, _STOCK_QUOTE_VOLUME_EXCLUDED
+        )
 
     def __repr__(self) -> str:
         return (

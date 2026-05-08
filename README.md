@@ -189,6 +189,68 @@ Quote rows yield `(None, current_quote)`. Trade rows yield
 appeared. When a trade and quote have the same SIP timestamp, the quote is
 yielded first.
 
+## Simple Market Simulation
+
+`SimpleMarket` opens stock trade and quote database files for a date and a
+sequence of symbols, then merges all events in SIP timestamp order inside C++.
+It is intended for row-at-a-time strategy code that needs current trade/quote
+state without bouncing through Python for every lookup.
+
+```python
+import massive_speedup
+
+market = massive_speedup.SimpleMarket(
+    "/data/massive-db",
+    "2026-01-23",
+    ["AAPL", "MSFT"],
+    1_000_000,  # simulated trade latency in nanoseconds
+    quotes=True,
+)
+
+for symbol, trade, quote, trades, quotes, broker in market:
+    if trade is not None:
+        last_quote = quotes.get(symbol)
+        if last_quote is not None and trade.price < last_quote.bid_price:
+            broker.buy(100)
+    else:
+        print("quote update", symbol, quote.bid_price, quote.ask_price)
+
+print(market["AAPL"])
+print(market[None])  # cash delta
+```
+
+Each iteration yields a 6-tuple:
+
+- `symbol`: the current event's symbol.
+- `trade`: the current `StockTrade`, or `None` when the event is a quote.
+- `quote`: the current `StockQuote`, or `None` when the event is a trade.
+- `trades`: a dict mapping symbols to the most recent trade seen for each symbol.
+- `quotes`: a dict mapping symbols to the most recent quote seen for each symbol.
+- `broker`: a `SimpleMarketBroker` bound to the current symbol and SIP timestamp.
+
+By default, the iterator emits only trade events, but quote files are still read
+so `quotes` contains the latest quote state for trade handling. Set
+`quotes=True` to also emit quote events. The `date` argument may be a
+`YYYY-MM-DD` string or a `datetime.date`.
+
+The broker supports `buy(shares, symbol=None)` and `sell(shares, symbol=None)`.
+If `symbol` is omitted, the current event symbol is used. Fills are priced using
+the quote at `current_sip_timestamp + trade_latency_ns`; buys use the ask and
+sells use the bid. Holdings are exposed through a small dict-like interface:
+symbol keys return share positions, and `None` returns the cash delta.
+
+```python
+broker.sell(50, "MSFT")
+
+print("cash", market[None])
+print(dict(market.items()))
+```
+
+`fast=False` is the default and returns fresh `trades` and `quotes` dicts for
+each event. Set `fast=True` to reuse those dict objects across iterations and
+reduce Python allocation churn; do not store those dicts when using fast mode
+because later iterations mutate them in place.
+
 Database files support indexing and timestamp search:
 
 ```python

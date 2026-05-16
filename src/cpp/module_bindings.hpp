@@ -28,9 +28,13 @@ std::vector<nb::bytes> read_gzip_lines_bytes(
     std::size_t parallelization,
     std::size_t chunk_size) {
   std::vector<nb::bytes> lines;
-  for (auto&& line : ParserType::read_gzip_lines(path, parallelization, chunk_size)) {
-    lines.emplace_back(line.data(), line.size());
-  }
+  ParserType::for_each_gzip_line(
+      path,
+      parallelization,
+      chunk_size,
+      [&lines](std::string_view line) {
+        lines.emplace_back(line.data(), line.size());
+      });
   return lines;
 }
 

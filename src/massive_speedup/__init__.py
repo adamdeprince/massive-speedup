@@ -1,7 +1,11 @@
 """Python bootstrap for the native nanobind module."""
 
-from types import ModuleType
+from __future__ import annotations
+
+import importlib
+import os
 import sys
+from types import ModuleType
 
 
 def _install_stock_api(module: ModuleType) -> None:
@@ -174,9 +178,66 @@ def _install_currency_api(module: ModuleType) -> None:
     module._massive_speedup_currency_api_installed = True
 
 
-try:
-    from ._native import *  # noqa: F403
-except ImportError:
+_BACKEND_ENV_VAR = "MASSIVE_SPEEDUP_BACKEND"
+
+# Ordered priority for backend selection when no override is given. Each entry
+# names the BackendKind member followed by the suffix of the compiled module.
+_BACKEND_PRIORITY: tuple[tuple[str, str], ...] = (
+    ("X86_AVX512BW", "_avx512bw"),
+    ("X86_AVX2", "_avx2"),
+    ("AARCH64_NEON", "_neon"),
+    ("SWAR", "_swar"),
+    ("GENERIC", "_generic"),
+)
+
+
+def _resolve_backend() -> tuple[str, ModuleType] | None:
+    try:
+        from . import _cpu  # type: ignore[attr-defined]
+    except ImportError:
+        _cpu = None  # type: ignore[assignment]
+
+    override = os.environ.get(_BACKEND_ENV_VAR, "").strip().lower()
+    if override:
+        suffix = "_" + override.lstrip("_")
+        try:
+            module = importlib.import_module(f"{__name__}.{suffix}")
+        except ImportError as exc:
+            raise ImportError(
+                f"{_BACKEND_ENV_VAR}={override!r} requested but module "
+                f"{__name__}.{suffix} is not available"
+            ) from exc
+        return suffix.lstrip("_"), module
+
+    detected: str | None = None
+    if _cpu is not None:
+        try:
+            detected = _cpu.detect_best_backend().name
+        except Exception:  # pragma: no cover - defensive
+            detected = None
+
+    ordered = list(_BACKEND_PRIORITY)
+    if detected is not None:
+        ordered.sort(key=lambda entry: 0 if entry[0] == detected else 1)
+
+    for kind_name, suffix in ordered:
+        try:
+            module = importlib.import_module(f"{__name__}.{suffix}")
+            return kind_name.lower(), module
+        except ImportError:
+            continue
+    return None
+
+
+_resolution = _resolve_backend()
+if _resolution is not None:
+    _BACKEND_KIND, _backend = _resolution
+    for _name in dir(_backend):
+        if not _name.startswith("_"):
+            globals()[_name] = getattr(_backend, _name)
+    sys.modules[__name__]._native = _backend  # type: ignore[attr-defined]
+else:
+    _BACKEND_KIND = "fallback"
     from ._fallback import *  # noqa: F403
 
 

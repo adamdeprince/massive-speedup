@@ -5,6 +5,7 @@ include(FetchContent)
 
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
 find_package(nanobind CONFIG REQUIRED)
+find_package(ZLIB REQUIRED)
 
 set(
   FETCHCONTENT_UPDATES_DISCONNECTED
@@ -157,6 +158,7 @@ target_link_libraries(
   INTERFACE
   rapidgzip
   simdjson
+  ZLIB::ZLIB
 )
 target_compile_definitions(
   massive_speedup_cppdeps
@@ -193,16 +195,57 @@ function(configure_massive_speedup_target target_name)
   endif()
 endfunction()
 
-function(add_massive_speedup_module module_name module_source)
+function(add_massive_speedup_backend module_name backend_source)
   nanobind_add_module(
     ${module_name}
     STABLE_ABI
-    ${module_source}
+    ${backend_source}
     ${MASSIVE_SPEEDUP_COMMON_SOURCES}
   )
-
   configure_massive_speedup_target(${module_name})
   install(TARGETS ${module_name} LIBRARY DESTINATION massive_speedup)
 endfunction()
 
-add_massive_speedup_module(_native src/cpp/native.cpp)
+set(MASSIVE_SPEEDUP_CPU_COMPILE_DEFINITIONS MASSIVE_SPEEDUP_HAVE_GENERIC=1)
+
+nanobind_add_module(_cpu STABLE_ABI src/cpp/cpu_module.cpp src/cpp/cpu.cpp)
+target_compile_features(_cpu PRIVATE cxx_std_23)
+target_include_directories(_cpu PRIVATE src/cpp)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+  target_compile_options(_cpu PRIVATE -O3 -Wall -Wextra -Wpedantic)
+endif()
+if(MSVC)
+  target_compile_options(_cpu PRIVATE /O2 /W4)
+endif()
+
+add_massive_speedup_backend(_generic src/cpp/backends/generic.cpp)
+
+if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+  add_massive_speedup_backend(_swar src/cpp/backends/swar.cpp)
+  list(APPEND MASSIVE_SPEEDUP_CPU_COMPILE_DEFINITIONS MASSIVE_SPEEDUP_HAVE_SWAR=1)
+endif()
+
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|i[3-6]86)$")
+  add_massive_speedup_backend(_avx2 src/cpp/backends/x86_avx2.cpp)
+  add_massive_speedup_backend(_avx512bw src/cpp/backends/x86_avx512bw.cpp)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(_avx2 PRIVATE -mavx2 -mbmi -mbmi2)
+    target_compile_options(_avx512bw PRIVATE -mavx512f -mavx512bw -mavx512vl -mbmi2)
+  endif()
+  list(
+    APPEND MASSIVE_SPEEDUP_CPU_COMPILE_DEFINITIONS
+    MASSIVE_SPEEDUP_HAVE_X86_AVX2=1
+    MASSIVE_SPEEDUP_HAVE_X86_AVX512BW=1
+  )
+endif()
+
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+  add_massive_speedup_backend(_neon src/cpp/backends/aarch64_neon.cpp)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(_neon PRIVATE -march=armv8-a+simd)
+  endif()
+  list(APPEND MASSIVE_SPEEDUP_CPU_COMPILE_DEFINITIONS MASSIVE_SPEEDUP_HAVE_AARCH64_NEON=1)
+endif()
+
+target_compile_definitions(_cpu PRIVATE ${MASSIVE_SPEEDUP_CPU_COMPILE_DEFINITIONS})
+install(TARGETS _cpu LIBRARY DESTINATION massive_speedup)

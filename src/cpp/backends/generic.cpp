@@ -3,8 +3,8 @@
 
 namespace nb = nanobind;
 
-NB_MODULE(_native, m) {
+NB_MODULE(_generic, m) {
   massive_speedup::bindings::bind_native_module<massive_speedup::native::Implementation>(
       m,
-      "_Native");
+      "_Generic");
 }

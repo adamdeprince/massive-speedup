@@ -12,7 +12,6 @@
 #include <cstring>
 #include <cstdint>
 #include <filesystem>
-#include <generator>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -97,10 +96,31 @@ inline double parse_double(std::string_view text, std::string_view field_name) {
   }
 
   double parsed = 0.0;
+
+#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201907L
   const char* begin = text.data();
   const char* end = text.data() + text.size();
   const auto [ptr, error] = std::from_chars(begin, end, parsed);
-  if (error != std::errc{} || ptr != end) {
+  const bool ok = error == std::errc{} && ptr == end;
+#else
+  // Apple libc++ gates out FP from_chars via availability attributes.
+  // Fall back to strtod on a NUL-terminated stack copy. The Python build
+  // never touches setlocale, so LC_NUMERIC stays "C" (decimal point).
+  char buffer[64];
+  if (text.size() >= sizeof(buffer)) {
+    std::ostringstream message;
+    message << "unable to parse floating-point field " << field_name << ": " << text;
+    throw std::invalid_argument(message.str());
+  }
+  std::memcpy(buffer, text.data(), text.size());
+  buffer[text.size()] = '\0';
+  char* end_ptr = nullptr;
+  errno = 0;
+  parsed = std::strtod(buffer, &end_ptr);
+  const bool ok = errno != ERANGE && end_ptr == buffer + text.size();
+#endif
+
+  if (!ok) {
     std::ostringstream message;
     message << "unable to parse floating-point field " << field_name << ": " << text;
     throw std::invalid_argument(message.str());
@@ -920,11 +940,26 @@ class BufferedGzipLineReader {
 
 class CsvLineCursor {
  public:
+  static constexpr std::size_t kMaxFieldSlots = 16;
+
   explicit CsvLineCursor(std::string_view line)
       : line_(line) {}
 
+  template <typename Specialization, std::size_t FieldCount>
+  void prescan() {
+    static_assert(FieldCount + 1 <= kMaxFieldSlots,
+                  "FieldCount exceeds CsvLineCursor::kMaxFieldSlots");
+    Specialization::template prescan_row<FieldCount>(line_, offsets_);
+    offset_count_ = static_cast<std::uint8_t>(FieldCount + 1);
+    field_index_ = 0;
+  }
+
   template <typename Specialization, bool ExpectMore>
   std::string_view next_field(std::string& scratch) {
+    if (offset_count_ != 0) {
+      return fast_next_field<ExpectMore>(scratch);
+    }
+
     if constexpr (!ExpectMore) {
       if (cursor_ == line_.size()) {
         return {};
@@ -946,6 +981,12 @@ class CsvLineCursor {
   }
 
   void finish() const {
+    if (offset_count_ != 0) {
+      if (field_index_ + 1u != offset_count_) {
+        throw std::invalid_argument("unexpected trailing data in CSV row");
+      }
+      return;
+    }
     if (cursor_ != line_.size()) {
       throw std::invalid_argument("unexpected trailing data in CSV row");
     }
@@ -1035,9 +1076,85 @@ class CsvLineCursor {
     return result;
   }
 
+  static void scalar_prescan(
+      std::string_view line,
+      std::size_t expected_fields,
+      std::array<std::uint16_t, kMaxFieldSlots>& offsets) {
+    std::size_t field = 1;
+    bool in_quote = false;
+    offsets[0] = 0;
+    for (std::size_t pos = 0; pos < line.size(); ++pos) {
+      const char value = line[pos];
+      if (value == '"') {
+        in_quote = !in_quote;
+      } else if (value == ',' && !in_quote) {
+        if (field >= expected_fields) {
+          throw std::invalid_argument("too many fields in CSV row");
+        }
+        offsets[field++] = static_cast<std::uint16_t>(pos + 1);
+      }
+    }
+    if (field != expected_fields) {
+      throw std::invalid_argument("too few fields in CSV row");
+    }
+    offsets[expected_fields] = static_cast<std::uint16_t>(line.size() + 1);
+  }
+
  private:
+  template <bool ExpectMore>
+  std::string_view fast_next_field(std::string& scratch) {
+    if (field_index_ + 1u >= offset_count_) {
+      throw std::invalid_argument("CSV row exhausted before all fields consumed");
+    }
+    if constexpr (ExpectMore) {
+      if (field_index_ + 2u >= offset_count_) {
+        throw std::invalid_argument("CSV row exhausted before expected delimiter");
+      }
+    }
+
+    const std::size_t start = offsets_[field_index_];
+    const std::size_t next_start = offsets_[field_index_ + 1u];
+    ++field_index_;
+
+    if (start >= line_.size()) {
+      return {};
+    }
+
+    const std::size_t end = next_start - 1u;  // strip trailing comma / sentinel
+    const std::string_view view = line_.substr(start, end - start);
+
+    if (view.empty() || view.front() != '"') {
+      return view;
+    }
+    return unescape_quoted_token(view, scratch);
+  }
+
+  static std::string_view unescape_quoted_token(
+      std::string_view token,
+      std::string& scratch) {
+    if (token.size() < 2 || token.back() != '"') {
+      throw std::invalid_argument("unterminated quoted CSV field");
+    }
+    const std::string_view inner = token.substr(1, token.size() - 2);
+    if (inner.find("\"\"") == std::string_view::npos) {
+      return inner;
+    }
+    scratch.clear();
+    scratch.reserve(inner.size());
+    for (std::size_t index = 0; index < inner.size(); ++index) {
+      scratch.push_back(inner[index]);
+      if (inner[index] == '"' && index + 1 < inner.size() && inner[index + 1] == '"') {
+        ++index;
+      }
+    }
+    return scratch;
+  }
+
   std::string_view line_;
   std::size_t cursor_ = 0;
+  std::array<std::uint16_t, kMaxFieldSlots> offsets_{};
+  std::uint8_t offset_count_ = 0;
+  std::uint8_t field_index_ = 0;
 };
 
 template <std::size_t Count>
@@ -4163,6 +4280,13 @@ struct NativeSpecialization {
     output.resize(field_index + 1);
   }
 
+  template <std::size_t FieldCount>
+  static inline void prescan_row(
+      std::string_view line,
+      std::array<std::uint16_t, detail::CsvLineCursor::kMaxFieldSlots>& offsets) {
+    detail::CsvLineCursor::scalar_prescan(line, FieldCount, offsets);
+  }
+
   static inline void split_csv_fields(
       std::string_view line,
       std::vector<std::string>& output) {
@@ -4209,8 +4333,6 @@ class Implementation : public Base {
  public:
   using Base::Base;
   using specialization_type = Specialization;
-  using GzipLineGenerator = std::generator<std::string>;
-  using GzipLineIteratorType = decltype(std::declval<GzipLineGenerator&>().begin());
   using RawStockTrade = std::array<std::string, 13>;
   using RawStockQuote = std::array<std::string, 14>;
   using RawStockAggregate = std::array<std::string, 8>;
@@ -4223,34 +4345,20 @@ class Implementation : public Base {
         const std::filesystem::path& path,
         std::size_t parallelization = 0,
         std::size_t chunk_size = 1U << 20)
-        : generator_(Implementation::read_gzip_lines(path, parallelization, chunk_size)) {}
+        : reader_(path, parallelization, chunk_size) {}
 
     GzipLinesIterator& iter() { return *this; }
 
     nanobind::bytes next() {
-      if (exhausted_) {
+      std::string_view line;
+      if (!reader_.template next_line<Specialization>(line)) {
         throw nanobind::stop_iteration();
       }
-
-      if (!iterator_) {
-        iterator_.emplace(generator_.begin());
-      }
-
-      if (*iterator_ == std::default_sentinel) {
-        exhausted_ = true;
-        throw nanobind::stop_iteration();
-      }
-
-      const std::string& line = **iterator_;
-      nanobind::bytes result(line.data(), line.size());
-      ++(*iterator_);
-      return result;
+      return nanobind::bytes(line.data(), line.size());
     }
 
    private:
-    GzipLineGenerator generator_;
-    std::optional<GzipLineIteratorType> iterator_;
-    bool exhausted_ = false;
+    detail::BufferedGzipLineReader reader_;
   };
 
   class StockTradeStreamState {
@@ -5336,15 +5444,16 @@ class Implementation : public Base {
     detail::RawBytesInternCache intern_cache_;
   };
 
-  static GzipLineGenerator read_gzip_lines(
+  template <typename LineConsumer>
+  static void for_each_gzip_line(
       std::filesystem::path path,
-      std::size_t parallelization = 0,
-      std::size_t chunk_size = 1U << 20) {
+      std::size_t parallelization,
+      std::size_t chunk_size,
+      LineConsumer&& consume) {
     detail::BufferedGzipLineReader reader(std::move(path), parallelization, chunk_size);
     std::string_view line;
-
     while (reader.template next_line<Specialization>(line)) {
-      co_yield std::string(line);
+      consume(line);
     }
   }
 
@@ -5539,6 +5648,7 @@ class Implementation : public Base {
       std::string_view line,
       detail::BitsetParseCache<96>& bitset_cache) {
     detail::CsvLineCursor cursor(line);
+    cursor.template prescan<Specialization, 13>();
     std::string scratch;
     StockTrade result;
 
@@ -5640,34 +5750,6 @@ class Implementation : public Base {
     PyTuple_SET_ITEM(result.ptr(), 0, intern_cache.ticker_new_ref(ticker));
   }
 
-  template <bool ExpectMore>
-  static std::string_view next_raw_unquoted_field(
-      std::string_view line,
-      std::size_t& cursor) {
-    return Specialization::template parse_unquoted_field<ExpectMore>(line, cursor);
-  }
-
-  template <bool ExpectMore>
-  static std::string_view next_raw_condition_field(
-      std::string_view line,
-      std::size_t& cursor,
-      std::string& scratch) {
-    if (cursor < line.size() && line[cursor] == '"') {
-      return Specialization::template parse_quoted_field<ExpectMore>(
-          line,
-          cursor,
-          scratch);
-    }
-
-    return Specialization::template parse_unquoted_field<ExpectMore>(line, cursor);
-  }
-
-  static void finish_raw_row(std::string_view line, std::size_t cursor) {
-    if (cursor != line.size()) {
-      throw std::invalid_argument("unexpected trailing data in CSV row");
-    }
-  }
-
   static RawStockTrade parse_raw_trade_row(std::string_view line) {
     return parse_raw_row<13>(line);
   }
@@ -5675,36 +5757,37 @@ class Implementation : public Base {
   static nanobind::tuple parse_raw_trade_tuple(
       std::string_view line,
       detail::RawBytesInternCache& intern_cache) {
-    std::size_t cursor = 0;
+    detail::CsvLineCursor cursor(line);
+    cursor.template prescan<Specialization, 13>();
     std::string scratch;
     nanobind::tuple result = make_raw_tuple<13>();
 
     set_raw_ticker_field(
         result,
-        next_raw_unquoted_field<true>(line, cursor),
+        cursor.template next_field<Specialization, true>(scratch),
         intern_cache);
-    set_raw_bytes_field(result, 1, next_raw_condition_field<true>(line, cursor, scratch));
-    set_raw_bytes_field(result, 2, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_bytes_field(result, 1, cursor.template next_field<Specialization, true>(scratch));
+    set_raw_bytes_field(result, 2, cursor.template next_field<Specialization, true>(scratch));
     set_raw_small_uint_field(
         result,
         3,
-        next_raw_unquoted_field<true>(line, cursor),
+        cursor.template next_field<Specialization, true>(scratch),
         intern_cache);
-    set_raw_bytes_field(result, 4, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 5, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 6, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 7, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 8, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 9, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_bytes_field(result, 4, cursor.template next_field<Specialization, true>(scratch));
+    set_raw_bytes_field(result, 5, cursor.template next_field<Specialization, true>(scratch));
+    set_raw_bytes_field(result, 6, cursor.template next_field<Specialization, true>(scratch));
+    set_raw_bytes_field(result, 7, cursor.template next_field<Specialization, true>(scratch));
+    set_raw_bytes_field(result, 8, cursor.template next_field<Specialization, true>(scratch));
+    set_raw_bytes_field(result, 9, cursor.template next_field<Specialization, true>(scratch));
     set_raw_small_uint_field(
         result,
         10,
-        next_raw_unquoted_field<true>(line, cursor),
+        cursor.template next_field<Specialization, true>(scratch),
         intern_cache);
-    set_raw_bytes_field(result, 11, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 12, next_raw_unquoted_field<false>(line, cursor));
+    set_raw_bytes_field(result, 11, cursor.template next_field<Specialization, true>(scratch));
+    set_raw_bytes_field(result, 12, cursor.template next_field<Specialization, false>(scratch));
 
-    finish_raw_row(line, cursor);
+    cursor.finish();
     return result;
   }
 
@@ -5732,6 +5815,7 @@ class Implementation : public Base {
       std::string_view line,
       detail::BitsetParseCache<96>& bitset_cache) {
     detail::CsvLineCursor cursor(line);
+    cursor.template prescan<Specialization, 14>();
     std::string scratch;
     StockQuote result;
 
@@ -5796,41 +5880,42 @@ class Implementation : public Base {
   static nanobind::tuple parse_raw_quote_tuple(
       std::string_view line,
       detail::RawBytesInternCache& intern_cache) {
-    std::size_t cursor = 0;
+    detail::CsvLineCursor cursor(line);
+    cursor.template prescan<Specialization, 14>();
     std::string scratch;
     nanobind::tuple result = make_raw_tuple<14>();
 
     set_raw_ticker_field(
         result,
-        next_raw_unquoted_field<true>(line, cursor),
+        cursor.template next_field<Specialization, true>(scratch),
         intern_cache);
     set_raw_small_uint_field(
         result,
         1,
-        next_raw_unquoted_field<true>(line, cursor),
+        cursor.template next_field<Specialization, true>(scratch),
         intern_cache);
-    set_raw_bytes_field(result, 2, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 3, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_bytes_field(result, 2, cursor.template next_field<Specialization, true>(scratch));
+    set_raw_bytes_field(result, 3, cursor.template next_field<Specialization, true>(scratch));
     set_raw_small_uint_field(
         result,
         4,
-        next_raw_unquoted_field<true>(line, cursor),
+        cursor.template next_field<Specialization, true>(scratch),
         intern_cache);
-    set_raw_bytes_field(result, 5, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 6, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 7, next_raw_condition_field<true>(line, cursor, scratch));
-    set_raw_bytes_field(result, 8, next_raw_condition_field<true>(line, cursor, scratch));
-    set_raw_bytes_field(result, 9, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 10, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 11, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_bytes_field(result, 5, cursor.template next_field<Specialization, true>(scratch));
+    set_raw_bytes_field(result, 6, cursor.template next_field<Specialization, true>(scratch));
+    set_raw_bytes_field(result, 7, cursor.template next_field<Specialization, true>(scratch));
+    set_raw_bytes_field(result, 8, cursor.template next_field<Specialization, true>(scratch));
+    set_raw_bytes_field(result, 9, cursor.template next_field<Specialization, true>(scratch));
+    set_raw_bytes_field(result, 10, cursor.template next_field<Specialization, true>(scratch));
+    set_raw_bytes_field(result, 11, cursor.template next_field<Specialization, true>(scratch));
     set_raw_small_uint_field(
         result,
         12,
-        next_raw_unquoted_field<true>(line, cursor),
+        cursor.template next_field<Specialization, true>(scratch),
         intern_cache);
-    set_raw_bytes_field(result, 13, next_raw_unquoted_field<false>(line, cursor));
+    set_raw_bytes_field(result, 13, cursor.template next_field<Specialization, false>(scratch));
 
-    finish_raw_row(line, cursor);
+    cursor.finish();
     return result;
   }
 
@@ -5857,6 +5942,7 @@ class Implementation : public Base {
 
   static CurrencyQuote parse_currency_quote_row(std::string_view line) {
     detail::CsvLineCursor cursor(line);
+    cursor.template prescan<Specialization, 6>();
     std::string scratch;
     CurrencyQuote result;
 
@@ -5886,6 +5972,7 @@ class Implementation : public Base {
 
   static StockAggregate parse_stock_aggregate_row(std::string_view line) {
     detail::CsvLineCursor cursor(line);
+    cursor.template prescan<Specialization, 8>();
     std::string scratch;
     StockAggregate result;
 
@@ -5921,6 +6008,7 @@ class Implementation : public Base {
 
   static CurrencyAggregate parse_currency_aggregate_row(std::string_view line) {
     detail::CsvLineCursor cursor(line);
+    cursor.template prescan<Specialization, 8>();
     std::string scratch;
     CurrencyAggregate result;
 
@@ -5965,28 +6053,30 @@ class Implementation : public Base {
   static nanobind::tuple parse_raw_currency_quote_tuple(
       std::string_view line,
       detail::RawBytesInternCache& intern_cache) {
-    std::size_t cursor = 0;
+    detail::CsvLineCursor cursor(line);
+    cursor.template prescan<Specialization, 6>();
+    std::string scratch;
     nanobind::tuple result = make_raw_tuple<6>();
 
     set_raw_ticker_field(
         result,
-        next_raw_unquoted_field<true>(line, cursor),
+        cursor.template next_field<Specialization, true>(scratch),
         intern_cache);
     set_raw_small_uint_field(
         result,
         1,
-        next_raw_unquoted_field<true>(line, cursor),
+        cursor.template next_field<Specialization, true>(scratch),
         intern_cache);
-    set_raw_bytes_field(result, 2, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_bytes_field(result, 2, cursor.template next_field<Specialization, true>(scratch));
     set_raw_small_uint_field(
         result,
         3,
-        next_raw_unquoted_field<true>(line, cursor),
+        cursor.template next_field<Specialization, true>(scratch),
         intern_cache);
-    set_raw_bytes_field(result, 4, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 5, next_raw_unquoted_field<false>(line, cursor));
+    set_raw_bytes_field(result, 4, cursor.template next_field<Specialization, true>(scratch));
+    set_raw_bytes_field(result, 5, cursor.template next_field<Specialization, false>(scratch));
 
-    finish_raw_row(line, cursor);
+    cursor.finish();
     return result;
   }
 
@@ -5997,44 +6087,48 @@ class Implementation : public Base {
   static nanobind::tuple parse_raw_currency_aggregate_tuple(
       std::string_view line,
       detail::RawBytesInternCache& intern_cache) {
-    std::size_t cursor = 0;
+    detail::CsvLineCursor cursor(line);
+    cursor.template prescan<Specialization, 8>();
+    std::string scratch;
     nanobind::tuple result = make_raw_tuple<8>();
 
     set_raw_ticker_field(
         result,
-        next_raw_unquoted_field<true>(line, cursor),
+        cursor.template next_field<Specialization, true>(scratch),
         intern_cache);
-    set_raw_bytes_field(result, 1, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 2, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 3, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 4, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 5, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 6, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 7, next_raw_unquoted_field<false>(line, cursor));
+    set_raw_bytes_field(result, 1, cursor.template next_field<Specialization, true>(scratch));
+    set_raw_bytes_field(result, 2, cursor.template next_field<Specialization, true>(scratch));
+    set_raw_bytes_field(result, 3, cursor.template next_field<Specialization, true>(scratch));
+    set_raw_bytes_field(result, 4, cursor.template next_field<Specialization, true>(scratch));
+    set_raw_bytes_field(result, 5, cursor.template next_field<Specialization, true>(scratch));
+    set_raw_bytes_field(result, 6, cursor.template next_field<Specialization, true>(scratch));
+    set_raw_bytes_field(result, 7, cursor.template next_field<Specialization, false>(scratch));
 
-    finish_raw_row(line, cursor);
+    cursor.finish();
     return result;
   }
 
   static nanobind::tuple parse_raw_stock_aggregate_tuple(
       std::string_view line,
       detail::RawBytesInternCache& intern_cache) {
-    std::size_t cursor = 0;
+    detail::CsvLineCursor cursor(line);
+    cursor.template prescan<Specialization, 8>();
+    std::string scratch;
     nanobind::tuple result = make_raw_tuple<8>();
 
     set_raw_ticker_field(
         result,
-        next_raw_unquoted_field<true>(line, cursor),
+        cursor.template next_field<Specialization, true>(scratch),
         intern_cache);
-    set_raw_bytes_field(result, 1, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 2, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 3, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 4, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 5, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 6, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 7, next_raw_unquoted_field<false>(line, cursor));
+    set_raw_bytes_field(result, 1, cursor.template next_field<Specialization, true>(scratch));
+    set_raw_bytes_field(result, 2, cursor.template next_field<Specialization, true>(scratch));
+    set_raw_bytes_field(result, 3, cursor.template next_field<Specialization, true>(scratch));
+    set_raw_bytes_field(result, 4, cursor.template next_field<Specialization, true>(scratch));
+    set_raw_bytes_field(result, 5, cursor.template next_field<Specialization, true>(scratch));
+    set_raw_bytes_field(result, 6, cursor.template next_field<Specialization, true>(scratch));
+    set_raw_bytes_field(result, 7, cursor.template next_field<Specialization, false>(scratch));
 
-    finish_raw_row(line, cursor);
+    cursor.finish();
     return result;
   }
 

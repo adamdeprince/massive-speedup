@@ -5,7 +5,7 @@ Native C++/nanobind readers for Polygon/Massive flat-file market data.
 See [INSTALL.md](INSTALL.md) for installation details and [DEVELOPMENT.md](DEVELOPMENT.md)
 for release and PyPI publishing notes.
 
-## CSV Gzip Files
+## Massive CSV Gzip Files
 
 Install/build the native extension:
 
@@ -13,7 +13,11 @@ Install/build the native extension:
 pip3 install -e .
 ```
 
-Iterate parsed records directly from a `.csv.gz` file:
+### Parsed Records
+
+Use `parse()` when you want typed C++ row objects with read-only attributes.
+The default path streams the gzip file row by row, skips the CSV header, and
+yields one Python object at a time:
 
 ```python
 import massive_speedup
@@ -28,12 +32,89 @@ for quote in massive_speedup.FlatFiles.currency.Quote.parse("currency_quotes.csv
     print(quote.ticker, quote.participant_timestamp)
 ```
 
-You can also iterate raw CSV fields as `bytes` tuples:
+Available parsed endpoints:
+
+| Endpoint | Yields |
+| --- | --- |
+| `FlatFiles.Stock.Trade.parse(path)` | `StockTrade` |
+| `FlatFiles.Stock.Quote.parse(path)` | `StockQuote` |
+| `FlatFiles.Stock.Aggregate.parse(path)` | `StockAggregate` |
+| `FlatFiles.currency.Quote.parse(path)` | `CurrencyQuote` |
+| `FlatFiles.currency.Aggregate.parse(path)` | `CurrencyAggregate` |
+
+### Raw Field Tuples
+
+Use `parse_raw()` when you want CSV fields without numeric conversion or record
+construction. It yields one tuple of `bytes` per input row:
 
 ```python
 for row in massive_speedup.FlatFiles.Stock.Trade.parse_raw("trades.csv.gz"):
-    print(row[0], row[8])
+    ticker = row[0]
+    sip_timestamp = row[8]
+    print(ticker, sip_timestamp)
+
+for row in massive_speedup.FlatFiles.Stock.Quote.parse_raw("quotes.csv.gz"):
+    ticker, ask_exchange, ask_price = row[:3]
+    print(ticker, ask_exchange, ask_price)
 ```
+
+Available raw endpoints:
+
+| Endpoint | Yields |
+| --- | --- |
+| `FlatFiles.Stock.Trade.parse_raw(path)` | `tuple[bytes, ...]` with trade fields |
+| `FlatFiles.Stock.Quote.parse_raw(path)` | `tuple[bytes, ...]` with quote fields |
+| `FlatFiles.Stock.Aggregate.parse_raw(path)` | `tuple[bytes, ...]` with aggregate fields |
+| `FlatFiles.currency.Quote.parse_raw(path)` | `tuple[bytes, ...]` with currency quote fields |
+| `FlatFiles.currency.Aggregate.parse_raw(path)` | `tuple[bytes, ...]` with currency aggregate fields |
+
+### Raw Lines
+
+Use `gzip_lines()` to benchmark decompression and line delivery without CSV
+field splitting. It yields decompressed lines as `bytes`:
+
+```python
+for line in massive_speedup.gzip_lines("trades.csv.gz"):
+    print(line)
+```
+
+Use `raw_lines()` from a row class when you want data rows after the CSV header:
+
+```python
+for line in massive_speedup.FlatFiles.Stock.Trade.raw_lines("trades.csv.gz"):
+    print(line)
+```
+
+### Sorting
+
+Sorting flags are keyword-only. Leaving them unset preserves the file order and
+streams rows without collecting the file in memory. Enabling a sort flag
+materializes rows, sorts them, and then yields one row at a time:
+
+```python
+for trade in massive_speedup.FlatFiles.Stock.Trade.parse(
+    "trades.csv.gz",
+    sort_by_sip_timestamp=True,
+):
+    print(trade.sip_timestamp, trade.ticker)
+
+for trade in massive_speedup.FlatFiles.Stock.Trade.parse_raw(
+    "trades.csv.gz",
+    sort_by_participant_timestamp=True,
+):
+    print(trade[5])
+
+for bar in massive_speedup.FlatFiles.Stock.Aggregate.parse(
+    "stock_aggregates.csv.gz",
+    sort_by_window_start=True,
+):
+    print(bar.window_start)
+```
+
+`Stock.Trade` and `Stock.Quote` support `sort_by_participant_timestamp` and
+`sort_by_sip_timestamp`. `Stock.Aggregate` and `currency.Aggregate` support
+`sort_by_window_start`. `currency.Quote` supports
+`sort_by_participant_timestamp`.
 
 Example scripts:
 

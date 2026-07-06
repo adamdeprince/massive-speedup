@@ -4,7 +4,8 @@ project(massive_speedup LANGUAGES CXX)
 include(FetchContent)
 
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
-find_package(nanobind CONFIG REQUIRED)
+find_package(nanobind 2.12 CONFIG REQUIRED)
+find_package(ZLIB REQUIRED)
 
 set(
   FETCHCONTENT_UPDATES_DISCONNECTED
@@ -157,6 +158,7 @@ target_link_libraries(
   INTERFACE
   rapidgzip
   simdjson
+  ZLIB::ZLIB
 )
 target_compile_definitions(
   massive_speedup_cppdeps

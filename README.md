@@ -207,21 +207,22 @@ market = massive_speedup.SimpleMarket(
     quotes=True,
 )
 
-for symbol, trade, quote, trades, quotes, broker in market:
+for symbol, timestamp, trade, quote, trades, quotes, broker in market:
     if trade is not None:
         last_quote = quotes.get(symbol)
         if last_quote is not None and trade.price < last_quote.bid_price:
             broker.buy(100)
     else:
-        print("quote update", symbol, quote.bid_price, quote.ask_price)
+        print("quote update", symbol, timestamp, quote.bid_price, quote.ask_price)
 
 print(market["AAPL"])
 print(market[None])  # cash delta
 ```
 
-Each iteration yields a 6-tuple:
+Each iteration yields a 7-tuple:
 
 - `symbol`: the current event's symbol.
+- `timestamp`: the current event's SIP timestamp as floating-point seconds since the epoch.
 - `trade`: the current `StockTrade`, or `None` when the event is a quote.
 - `quote`: the current `StockQuote`, or `None` when the event is a trade.
 - `trades`: a dict mapping symbols to the most recent trade seen for each symbol.

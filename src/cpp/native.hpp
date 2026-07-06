@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cctype>
 #include <cstring>
 #include <cstdint>
 #include <filesystem>
@@ -572,6 +573,14 @@ inline double parse_double(std::string_view text, std::string_view field_name) {
   return parsed;
 }
 
+inline double parse_nullable_double(std::string_view text, std::string_view field_name) {
+  if (text.empty()) {
+    static_cast<void>(field_name);
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+  return parse_double(text, field_name);
+}
+
 template <std::size_t BitCount>
 std::bitset<BitCount> parse_bitset(std::string_view text, std::string_view field_name) {
   if (text.empty()) {
@@ -651,6 +660,48 @@ inline std::string utc_date_directory_name(std::uint64_t timestamp_ns) {
       static_cast<unsigned>(ymd.month()),
       static_cast<unsigned>(ymd.day()));
   return std::string(output.data(), 10);
+}
+
+inline bool is_date_filename_prefix(std::string_view text) {
+  return text.size() >= 10 &&
+         std::isdigit(static_cast<unsigned char>(text[0])) &&
+         std::isdigit(static_cast<unsigned char>(text[1])) &&
+         std::isdigit(static_cast<unsigned char>(text[2])) &&
+         std::isdigit(static_cast<unsigned char>(text[3])) &&
+         text[4] == '-' &&
+         std::isdigit(static_cast<unsigned char>(text[5])) &&
+         std::isdigit(static_cast<unsigned char>(text[6])) &&
+         text[7] == '-' &&
+         std::isdigit(static_cast<unsigned char>(text[8])) &&
+         std::isdigit(static_cast<unsigned char>(text[9]));
+}
+
+inline std::string date_directory_name_from_filename(
+    const std::filesystem::path& path) {
+  const std::string filename = path.filename().string();
+  if (!is_date_filename_prefix(filename)) {
+    std::ostringstream message;
+    message << "database input filename must begin with YYYY-MM-DD: " << path;
+    throw std::invalid_argument(message.str());
+  }
+  const auto digit = [&filename](std::size_t index) -> unsigned {
+    return static_cast<unsigned>(filename[index] - '0');
+  };
+  const int year =
+      static_cast<int>(digit(0) * 1000 + digit(1) * 100 + digit(2) * 10 + digit(3));
+  const unsigned month = digit(5) * 10 + digit(6);
+  const unsigned day = digit(8) * 10 + digit(9);
+  const std::chrono::year_month_day ymd{
+      std::chrono::year{year},
+      std::chrono::month{month},
+      std::chrono::day{day}};
+  if (!ymd.ok()) {
+    std::ostringstream message;
+    message << "database input filename must begin with a valid YYYY-MM-DD date: "
+            << path;
+    throw std::invalid_argument(message.str());
+  }
+  return filename.substr(0, 10);
 }
 
 class BinaryRecordWriter {
@@ -1130,6 +1181,341 @@ inline nanobind::object bit_indices_frozenset(
 
 inline nanobind::object bit_indices_frozenset(const std::bitset<96>& bits) {
   return bit_indices_frozenset(bits, ConditionSetKind::raw_indices);
+}
+
+static constexpr std::uint16_t option_trade_condition_min = 201;
+static constexpr std::uint16_t option_trade_condition_max = 248;
+static constexpr std::size_t option_trade_condition_count =
+    option_trade_condition_max - option_trade_condition_min + 1;
+static constexpr std::size_t option_trade_condition_bytes =
+    (option_trade_condition_count + 7) / 8;
+
+struct OptionConditionBits {
+  std::array<std::uint8_t, option_trade_condition_bytes> bytes{};
+
+  void set(std::size_t offset) {
+    bytes[offset / 8] |= static_cast<std::uint8_t>(1U << (offset % 8));
+  }
+
+  bool test(std::size_t offset) const {
+    return (bytes[offset / 8] & static_cast<std::uint8_t>(1U << (offset % 8))) != 0;
+  }
+
+  bool operator==(const OptionConditionBits& other) const = default;
+};
+
+inline std::uint8_t parse_option_condition_offset(
+    std::string_view token,
+    std::string_view field_name) {
+  const auto code = parse_integer<std::uint16_t>(token, field_name);
+  if (code < option_trade_condition_min || code > option_trade_condition_max) {
+    std::ostringstream message;
+    message << "option trade condition code out of range " << field_name << ": "
+            << code;
+    throw std::out_of_range(message.str());
+  }
+  return static_cast<std::uint8_t>(code - option_trade_condition_min);
+}
+
+inline OptionConditionBits parse_option_condition_bits(
+    std::string_view text,
+    std::string_view field_name) {
+  OptionConditionBits result;
+  if (text.empty()) {
+    return result;
+  }
+
+  std::size_t position = 0;
+  while (position < text.size()) {
+    const std::size_t start = position;
+    const auto comma = text.find(',', start);
+    const std::string_view token = comma == std::string_view::npos
+        ? text.substr(start)
+        : text.substr(start, comma - start);
+    if (token.empty()) {
+      throw std::invalid_argument("empty option trade condition code");
+    }
+
+    const std::uint8_t offset = parse_option_condition_offset(token, field_name);
+    result.set(offset);
+
+    if (comma == std::string_view::npos) {
+      break;
+    }
+    position = comma + 1;
+  }
+
+  return result;
+}
+
+inline nanobind::object option_conditions_frozenset(
+    const OptionConditionBits& conditions) {
+  nanobind::object result = nanobind::steal<nanobind::object>(PyFrozenSet_New(nullptr));
+  if (!result.is_valid()) {
+    throw nanobind::python_error();
+  }
+
+  for (std::size_t index = 0; index < option_trade_condition_count; ++index) {
+    if (!conditions.test(index)) {
+      continue;
+    }
+    const auto code = static_cast<unsigned>(
+        option_trade_condition_min + index);
+    nanobind::object value = nanobind::steal<nanobind::object>(
+        PyLong_FromUnsignedLong(code));
+    if (!value.is_valid() || PySet_Add(result.ptr(), value.ptr()) != 0) {
+      throw nanobind::python_error();
+    }
+  }
+
+  return result;
+}
+
+inline std::string option_conditions_repr(const OptionConditionBits& conditions) {
+  std::ostringstream out;
+  bool first = true;
+  for (std::size_t index = 0; index < option_trade_condition_count; ++index) {
+    if (!conditions.test(index)) {
+      continue;
+    }
+    if (first) {
+      out << "frozenset({";
+      first = false;
+    } else {
+      out << ", ";
+    }
+    out << static_cast<unsigned>(
+        option_trade_condition_min + index);
+  }
+
+  if (first) {
+    return "frozenset()";
+  }
+  out << "})";
+  return out.str();
+}
+
+inline std::size_t option_condition_hash(const OptionConditionBits& conditions) {
+  std::size_t seed = 0;
+  for (const std::uint8_t value : conditions.bytes) {
+    seed ^= std::hash<unsigned>{}(value) + 0x9e3779b97f4a7c15ULL +
+        (seed << 6U) + (seed >> 2U);
+  }
+  return seed;
+}
+
+struct OptionSymbolParts {
+  std::string root;
+  std::string expiration;
+  char right = '\0';
+  std::uint32_t strike_millis = 0;
+  double strike = 0.0;
+};
+
+inline std::uint32_t parse_fixed_unsigned_digits(
+    std::string_view text,
+    std::string_view field_name) {
+  if (text.empty()) {
+    std::ostringstream message;
+    message << "empty " << field_name;
+    throw std::invalid_argument(message.str());
+  }
+
+  std::uint32_t value = 0;
+  for (const char ch : text) {
+    if (!std::isdigit(static_cast<unsigned char>(ch))) {
+      std::ostringstream message;
+      message << "invalid decimal digit in " << field_name << ": " << text;
+      throw std::invalid_argument(message.str());
+    }
+    value = value * 10U + static_cast<std::uint32_t>(ch - '0');
+  }
+  return value;
+}
+
+inline std::string option_expiration_string(
+    std::uint32_t year,
+    std::uint32_t month,
+    std::uint32_t day) {
+  const std::chrono::year_month_day expiration{
+      std::chrono::year(static_cast<int>(year)) /
+      std::chrono::month(month) /
+      std::chrono::day(day)};
+  if (!expiration.ok()) {
+    std::ostringstream message;
+    message << "invalid option expiration date: " << year << '-'
+            << month << '-' << day;
+    throw std::invalid_argument(message.str());
+  }
+
+  std::string result(10, '0');
+  result[0] = static_cast<char>('0' + (year / 1000U) % 10U);
+  result[1] = static_cast<char>('0' + (year / 100U) % 10U);
+  result[2] = static_cast<char>('0' + (year / 10U) % 10U);
+  result[3] = static_cast<char>('0' + year % 10U);
+  result[4] = '-';
+  result[5] = static_cast<char>('0' + (month / 10U) % 10U);
+  result[6] = static_cast<char>('0' + month % 10U);
+  result[7] = '-';
+  result[8] = static_cast<char>('0' + (day / 10U) % 10U);
+  result[9] = static_cast<char>('0' + day % 10U);
+  return result;
+}
+
+inline OptionSymbolParts parse_option_symbol(std::string_view ticker) {
+  if (!ticker.starts_with("O:")) {
+    std::ostringstream message;
+    message << "option ticker must start with O: " << ticker;
+    throw std::invalid_argument(message.str());
+  }
+
+  const std::string_view body = ticker.substr(2);
+  static constexpr std::size_t suffix_size = 6 + 1 + 8;
+  if (body.size() <= suffix_size) {
+    std::ostringstream message;
+    message << "option ticker is too short: " << ticker;
+    throw std::invalid_argument(message.str());
+  }
+
+  const std::size_t suffix_start = body.size() - suffix_size;
+  const std::string_view root = body.substr(0, suffix_start);
+  const std::string_view expiration = body.substr(suffix_start, 6);
+  const char right = body[suffix_start + 6];
+  const std::string_view strike = body.substr(suffix_start + 7, 8);
+
+  if (right != 'C' && right != 'P') {
+    std::ostringstream message;
+    message << "option ticker right must be C or P: " << ticker;
+    throw std::invalid_argument(message.str());
+  }
+
+  const std::uint32_t year =
+      2000U + parse_fixed_unsigned_digits(expiration.substr(0, 2), "expiration year");
+  const std::uint32_t month =
+      parse_fixed_unsigned_digits(expiration.substr(2, 2), "expiration month");
+  const std::uint32_t day =
+      parse_fixed_unsigned_digits(expiration.substr(4, 2), "expiration day");
+  const std::uint32_t strike_millis =
+      parse_fixed_unsigned_digits(strike, "strike");
+
+  OptionSymbolParts result;
+  result.root.assign(root);
+  result.expiration = option_expiration_string(year, month, day);
+  result.right = right;
+  result.strike_millis = strike_millis;
+  result.strike = static_cast<double>(strike_millis) / 1000.0;
+  return result;
+}
+
+inline std::string option_strike_component(std::uint32_t strike_millis) {
+  if (strike_millis > 99'999'999U) {
+    throw std::out_of_range("option strike component exceeds 8 digits");
+  }
+  std::string result(8, '0');
+  for (std::size_t index = 0; index < result.size(); ++index) {
+    const std::size_t divisor_index = result.size() - index - 1;
+    std::uint32_t divisor = 1;
+    for (std::size_t digit = 0; digit < divisor_index; ++digit) {
+      divisor *= 10U;
+    }
+    result[index] =
+        static_cast<char>('0' + ((strike_millis / divisor) % 10U));
+  }
+  return result;
+}
+
+inline std::uint32_t strike_millis_from_double(double strike) {
+  if (!std::isfinite(strike) || strike < 0.0) {
+    throw std::invalid_argument("option strike must be a finite non-negative number");
+  }
+  const double scaled = std::round(strike * 1000.0);
+  if (scaled < 0.0 || scaled > 99'999'999.0) {
+    throw std::out_of_range("option strike is out of range");
+  }
+  return static_cast<std::uint32_t>(scaled);
+}
+
+inline char option_right_from_string(std::string_view right) {
+  if (right.size() != 1 || (right[0] != 'C' && right[0] != 'P')) {
+    throw std::invalid_argument("option right must be C or P");
+  }
+  return right[0];
+}
+
+inline std::string option_contract_key(
+    std::string_view root,
+    std::string_view expiration,
+    char right,
+    std::uint32_t strike_millis) {
+  if (root.empty()) {
+    throw std::invalid_argument("option root must not be empty");
+  }
+  if (root.find('/') != std::string_view::npos) {
+    throw std::invalid_argument("option root must not contain '/'");
+  }
+  if (expiration.find('/') != std::string_view::npos) {
+    throw std::invalid_argument("option expiration must not contain '/'");
+  }
+  if (right != 'C' && right != 'P') {
+    throw std::invalid_argument("option right must be C or P");
+  }
+
+  std::string key;
+  key.reserve(root.size() + expiration.size() + 1 + 8 + 3);
+  key.append(root);
+  key.push_back('/');
+  key.append(expiration);
+  key.push_back('/');
+  key.push_back(right);
+  key.push_back('/');
+  key.append(option_strike_component(strike_millis));
+  return key;
+}
+
+inline std::string option_contract_key(
+    std::string_view root,
+    std::string_view expiration,
+    std::string_view right,
+    double strike) {
+  return option_contract_key(
+      root,
+      expiration,
+      option_right_from_string(right),
+      strike_millis_from_double(strike));
+}
+
+inline OptionSymbolParts parse_option_contract_key(std::string_view key) {
+  const std::size_t first = key.find('/');
+  const std::size_t second =
+      first == std::string_view::npos ? std::string_view::npos : key.find('/', first + 1);
+  const std::size_t third =
+      second == std::string_view::npos ? std::string_view::npos : key.find('/', second + 1);
+  if (first == std::string_view::npos ||
+      second == std::string_view::npos ||
+      third == std::string_view::npos ||
+      key.find('/', third + 1) != std::string_view::npos) {
+    std::ostringstream message;
+    message << "invalid option contract database key: " << key;
+    throw std::invalid_argument(message.str());
+  }
+
+  const std::string_view root = key.substr(0, first);
+  const std::string_view expiration = key.substr(first + 1, second - first - 1);
+  const std::string_view right_text = key.substr(second + 1, third - second - 1);
+  const std::string_view strike_text = key.substr(third + 1);
+  if (strike_text.size() != 8) {
+    std::ostringstream message;
+    message << "option contract strike component must be 8 digits: " << key;
+    throw std::invalid_argument(message.str());
+  }
+
+  OptionSymbolParts result;
+  result.root.assign(root);
+  result.expiration.assign(expiration);
+  result.right = option_right_from_string(right_text);
+  result.strike_millis = parse_fixed_unsigned_digits(strike_text, "strike");
+  result.strike = static_cast<double>(result.strike_millis) / 1000.0;
+  return result;
 }
 
 inline PyObject* intern_unicode_from_view(std::string_view value) {
@@ -2164,6 +2550,896 @@ struct StockTrade {
   }
 };
 
+struct CryptoTrade {
+  static constexpr std::size_t packed_size = 46;
+  static constexpr std::size_t packed_participant_timestamp_offset = 0;
+  static constexpr std::size_t packed_price_offset = 16;
+  static constexpr std::size_t packed_size_offset = 24;
+  using PackedData = detail::PackedBuffer<packed_size>;
+  enum AttributeIndex : std::size_t {
+    ticker_attribute,
+    conditions_attribute,
+    exchange_attribute,
+    id_attribute,
+    participant_timestamp_attribute,
+    price_attribute,
+    size_attribute,
+    attribute_count,
+  };
+
+  std::string ticker;
+  std::bitset<96> conditions;
+  double price = 0.0;
+  double size = 0.0;
+  std::uint64_t id = 0;
+  std::uint64_t participant_timestamp = 0;
+  std::uint16_t exchange = 0;
+  mutable std::unique_ptr<detail::LazyPythonObjectCache<attribute_count>> object_cache_;
+
+  CryptoTrade() = default;
+
+  CryptoTrade(const CryptoTrade& other)
+      : ticker(other.ticker),
+        conditions(other.conditions),
+        price(other.price),
+        size(other.size),
+        id(other.id),
+        participant_timestamp(other.participant_timestamp),
+        exchange(other.exchange) {}
+
+  CryptoTrade& operator=(const CryptoTrade& other) {
+    if (this == &other) {
+      return *this;
+    }
+
+    ticker = other.ticker;
+    conditions = other.conditions;
+    price = other.price;
+    size = other.size;
+    id = other.id;
+    participant_timestamp = other.participant_timestamp;
+    exchange = other.exchange;
+    object_cache_.reset();
+    return *this;
+  }
+
+  CryptoTrade(CryptoTrade&&) noexcept = default;
+  CryptoTrade& operator=(CryptoTrade&&) noexcept = default;
+
+  CryptoTrade(std::string_view packed_data, std::string_view ticker_value) {
+    *this = from_packed(packed_data, ticker_value);
+  }
+
+  CryptoTrade(const char* packed_data, std::string_view ticker_value)
+      : CryptoTrade(std::string_view(packed_data, packed_size), ticker_value) {}
+
+  template <typename Specialization>
+  static CryptoTrade from_fields(const std::vector<std::string>& fields) {
+    detail::require_field_count("CryptoTrade", fields.size(), 7);
+    CryptoTrade result;
+    result.ticker = fields[0];
+    result.conditions = Specialization::template parse_bitset<96>(fields[1], "conditions");
+    result.exchange =
+        Specialization::template parse_integer<std::uint16_t>(fields[2], "exchange");
+    result.id = Specialization::template parse_integer<std::uint64_t>(fields[3], "id");
+    result.participant_timestamp = Specialization::template parse_integer<std::uint64_t>(
+        fields[4],
+        "participant_timestamp");
+    result.price = Specialization::parse_double(fields[5], "price");
+    result.size = Specialization::parse_double(fields[6], "size");
+    return result;
+  }
+
+  static CryptoTrade from_packed(std::string_view packed_data) {
+    detail::require_packed_size("CryptoTrade", packed_data.size(), packed_size);
+    CryptoTrade result;
+    std::size_t offset = 0;
+    result.participant_timestamp =
+        detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
+    result.id = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
+    result.price = detail::read_double_le(packed_data, offset);
+    result.size = detail::read_double_le(packed_data, offset);
+    result.conditions = detail::read_bitset_le<96>(packed_data, offset);
+    result.exchange = detail::read_unsigned_le<std::uint16_t>(packed_data, offset);
+    return result;
+  }
+
+  static CryptoTrade from_packed(
+      std::string_view packed_data,
+      std::string_view ticker_value) {
+    CryptoTrade result = from_packed(packed_data);
+    result.ticker.assign(ticker_value);
+    return result;
+  }
+
+  static CryptoTrade from_packed_data(
+      const char* packed_data,
+      std::string_view ticker_value) {
+    return from_packed(std::string_view(packed_data, packed_size), ticker_value);
+  }
+
+  static std::uint64_t participant_timestamp_at(const void* packed_data) {
+    return detail::read_uint64_le_at(
+        packed_data,
+        packed_participant_timestamp_offset);
+  }
+
+  static double price_at(const void* packed_data) {
+    return detail::read_double_le_at(packed_data, packed_price_offset);
+  }
+
+  static double size_at(const void* packed_data) {
+    return detail::read_double_le_at(packed_data, packed_size_offset);
+  }
+
+  PackedData pack() const {
+    PackedData output{};
+    std::size_t offset = 0;
+    detail::write_unsigned_le(output, offset, participant_timestamp);
+    detail::write_unsigned_le(output, offset, id);
+    detail::write_double_le(output, offset, price);
+    detail::write_double_le(output, offset, size);
+    detail::write_bitset_le(output, offset, conditions);
+    detail::write_unsigned_le(output, offset, exchange);
+    return output;
+  }
+
+  nanobind::bytes packed_bytes() const {
+    return detail::packed_bytes(pack());
+  }
+
+  bool operator==(const CryptoTrade& other) const {
+    return ticker == other.ticker &&
+           conditions == other.conditions &&
+           exchange == other.exchange &&
+           id == other.id &&
+           participant_timestamp == other.participant_timestamp &&
+           price == other.price &&
+           size == other.size;
+  }
+
+  nanobind::object ticker_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        ticker_attribute,
+        [&] { return detail::string_object_new_ref(ticker); });
+  }
+
+  nanobind::object conditions_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        conditions_attribute,
+        [&] {
+          return detail::object_cache_new_ref(
+              detail::bit_indices_frozenset(
+                  conditions,
+                  detail::ConditionSetKind::raw_indices));
+        });
+  }
+
+  nanobind::object exchange_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        exchange_attribute,
+        [&] { return detail::uint64_object_new_ref(exchange); });
+  }
+
+  nanobind::object id_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        id_attribute,
+        [&] { return detail::uint64_object_new_ref(id); });
+  }
+
+  nanobind::object participant_timestamp_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        participant_timestamp_attribute,
+        [&] { return detail::uint64_object_new_ref(participant_timestamp); });
+  }
+
+  nanobind::object price_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        price_attribute,
+        [&] { return detail::double_object_new_ref(price); });
+  }
+
+  nanobind::object size_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        size_attribute,
+        [&] { return detail::double_object_new_ref(size); });
+  }
+
+  nanobind::list python_fields() const {
+    nanobind::list values;
+    values.append(ticker_object());
+    values.append(conditions_object());
+    values.append(exchange_object());
+    values.append(id_object());
+    values.append(participant_timestamp_object());
+    values.append(price_object());
+    values.append(size_object());
+    return values;
+  }
+
+  std::size_t hash_value() const {
+    std::size_t seed = 0;
+    detail::hash_combine(seed, ticker);
+    detail::hash_combine(seed, conditions);
+    detail::hash_combine(seed, exchange);
+    detail::hash_combine(seed, id);
+    detail::hash_combine(seed, participant_timestamp);
+    detail::hash_combine(seed, price);
+    detail::hash_combine(seed, size);
+    return seed;
+  }
+
+  std::string repr() const {
+    std::ostringstream out;
+    out << "CryptoTrade("
+        << "ticker='" << ticker << "', "
+        << "conditions="
+        << detail::bit_indices_repr(
+               conditions,
+               detail::ConditionSetKind::raw_indices)
+        << ", "
+        << "exchange=" << exchange << ", "
+        << "id=" << id << ", "
+        << "participant_timestamp=" << participant_timestamp << ", "
+        << "price=" << price << ", "
+        << "size=" << size << ")";
+    return out.str();
+  }
+};
+
+struct OptionTrade {
+  static constexpr std::size_t packed_size = 32;
+  static constexpr std::size_t packed_sip_timestamp_offset = 0;
+  static constexpr std::size_t packed_price_offset = 8;
+  static constexpr std::size_t packed_size_offset = 16;
+  using PackedData = detail::PackedBuffer<packed_size>;
+
+  enum AttributeIndex : std::size_t {
+    root_attribute,
+    expiration_attribute,
+    right_attribute,
+    strike_attribute,
+    conditions_attribute,
+    correction_attribute,
+    exchange_attribute,
+    price_attribute,
+    sip_timestamp_attribute,
+    size_attribute,
+    attribute_count,
+  };
+
+  std::string root;
+  std::string expiration;
+  detail::OptionConditionBits conditions;
+  double price = 0.0;
+  double strike = 0.0;
+  std::uint64_t sip_timestamp = 0;
+  std::uint32_t strike_millis = 0;
+  std::uint32_t size = 0;
+  std::int32_t correction = 0;
+  std::uint16_t exchange = 0;
+  char right = '\0';
+  mutable std::unique_ptr<detail::LazyPythonObjectCache<attribute_count>> object_cache_;
+
+  OptionTrade() = default;
+
+  OptionTrade(const OptionTrade& other)
+      : root(other.root),
+        expiration(other.expiration),
+        conditions(other.conditions),
+        price(other.price),
+        strike(other.strike),
+        sip_timestamp(other.sip_timestamp),
+        strike_millis(other.strike_millis),
+        size(other.size),
+        correction(other.correction),
+        exchange(other.exchange),
+        right(other.right) {}
+
+  OptionTrade& operator=(const OptionTrade& other) {
+    if (this == &other) {
+      return *this;
+    }
+
+    root = other.root;
+    expiration = other.expiration;
+    conditions = other.conditions;
+    price = other.price;
+    strike = other.strike;
+    sip_timestamp = other.sip_timestamp;
+    strike_millis = other.strike_millis;
+    size = other.size;
+    correction = other.correction;
+    exchange = other.exchange;
+    right = other.right;
+    object_cache_.reset();
+    return *this;
+  }
+
+  OptionTrade(OptionTrade&&) noexcept = default;
+  OptionTrade& operator=(OptionTrade&&) noexcept = default;
+
+  template <typename Specialization>
+  static OptionTrade from_fields(const std::vector<std::string>& fields) {
+    detail::require_field_count("OptionTrade", fields.size(), 7);
+    OptionTrade result;
+    result.assign_symbol(fields[0]);
+    result.conditions = detail::parse_option_condition_bits(fields[1], "conditions");
+    result.correction =
+        Specialization::template parse_integer<std::int32_t>(fields[2], "correction");
+    result.exchange =
+        Specialization::template parse_integer<std::uint16_t>(fields[3], "exchange");
+    result.price = Specialization::parse_double(fields[4], "price");
+    result.sip_timestamp =
+        Specialization::template parse_integer<std::uint64_t>(fields[5], "sip_timestamp");
+    result.size =
+        Specialization::template parse_integer<std::uint32_t>(fields[6], "size");
+    return result;
+  }
+
+  void assign_symbol(std::string_view ticker) {
+    const detail::OptionSymbolParts symbol = detail::parse_option_symbol(ticker);
+    root = symbol.root;
+    expiration = symbol.expiration;
+    right = symbol.right;
+    strike_millis = symbol.strike_millis;
+    strike = symbol.strike;
+  }
+
+  void assign_contract_key(std::string_view key) {
+    const detail::OptionSymbolParts symbol = detail::parse_option_contract_key(key);
+    root = symbol.root;
+    expiration = symbol.expiration;
+    right = symbol.right;
+    strike_millis = symbol.strike_millis;
+    strike = symbol.strike;
+  }
+
+  static OptionTrade from_packed(std::string_view packed_data) {
+    detail::require_packed_size("OptionTrade", packed_data.size(), packed_size);
+    OptionTrade result;
+    std::size_t offset = 0;
+    result.sip_timestamp = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
+    result.price = detail::read_double_le(packed_data, offset);
+    result.size = detail::read_unsigned_le<std::uint32_t>(packed_data, offset);
+    result.correction = detail::read_int32_le(packed_data, offset);
+    result.exchange = detail::read_unsigned_le<std::uint16_t>(packed_data, offset);
+    for (std::uint8_t& byte : result.conditions.bytes) {
+      byte = static_cast<std::uint8_t>(packed_data[offset++]);
+    }
+    return result;
+  }
+
+  static OptionTrade from_packed(
+      std::string_view packed_data,
+      std::string_view contract_key) {
+    OptionTrade result = from_packed(packed_data);
+    result.assign_contract_key(contract_key);
+    return result;
+  }
+
+  static OptionTrade from_packed_data(
+      const char* packed_data,
+      std::string_view contract_key) {
+    return from_packed(std::string_view(packed_data, packed_size), contract_key);
+  }
+
+  static std::uint64_t sip_timestamp_at(const void* packed_data) {
+    return detail::read_uint64_le_at(packed_data, packed_sip_timestamp_offset);
+  }
+
+  static double price_at(const void* packed_data) {
+    return detail::read_double_le_at(packed_data, packed_price_offset);
+  }
+
+  static std::uint32_t size_at(const void* packed_data) {
+    return detail::read_uint32_le_at(packed_data, packed_size_offset);
+  }
+
+  PackedData pack() const {
+    PackedData output{};
+    std::size_t offset = 0;
+    detail::write_unsigned_le(output, offset, sip_timestamp);
+    detail::write_double_le(output, offset, price);
+    detail::write_unsigned_le(output, offset, size);
+    detail::write_int32_le(output, offset, correction);
+    detail::write_unsigned_le(output, offset, exchange);
+    for (const std::uint8_t byte : conditions.bytes) {
+      output[offset++] = byte;
+    }
+    return output;
+  }
+
+  nanobind::bytes packed_bytes() const {
+    return detail::packed_bytes(pack());
+  }
+
+  bool operator==(const OptionTrade& other) const {
+    return root == other.root &&
+           expiration == other.expiration &&
+           right == other.right &&
+           strike_millis == other.strike_millis &&
+           conditions == other.conditions &&
+           correction == other.correction &&
+           exchange == other.exchange &&
+           price == other.price &&
+           sip_timestamp == other.sip_timestamp &&
+           size == other.size;
+  }
+
+  nanobind::object root_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        root_attribute,
+        [&] { return detail::string_object_new_ref(root); });
+  }
+
+  nanobind::object expiration_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        expiration_attribute,
+        [&] { return detail::string_object_new_ref(expiration); });
+  }
+
+  nanobind::object right_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        right_attribute,
+        [&] { return PyUnicode_FromStringAndSize(&right, 1); });
+  }
+
+  nanobind::object strike_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        strike_attribute,
+        [&] { return detail::double_object_new_ref(strike); });
+  }
+
+  nanobind::object conditions_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        conditions_attribute,
+        [&] {
+          return detail::object_cache_new_ref(
+              detail::option_conditions_frozenset(conditions));
+        });
+  }
+
+  nanobind::object correction_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        correction_attribute,
+        [&] { return detail::int64_object_new_ref(correction); });
+  }
+
+  nanobind::object exchange_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        exchange_attribute,
+        [&] { return detail::uint64_object_new_ref(exchange); });
+  }
+
+  nanobind::object price_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        price_attribute,
+        [&] { return detail::double_object_new_ref(price); });
+  }
+
+  nanobind::object sip_timestamp_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        sip_timestamp_attribute,
+        [&] { return detail::uint64_object_new_ref(sip_timestamp); });
+  }
+
+  nanobind::object size_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        size_attribute,
+        [&] { return detail::uint64_object_new_ref(size); });
+  }
+
+  nanobind::list python_fields() const {
+    nanobind::list values;
+    values.append(root_object());
+    values.append(expiration_object());
+    values.append(right_object());
+    values.append(strike_object());
+    values.append(conditions_object());
+    values.append(correction_object());
+    values.append(exchange_object());
+    values.append(price_object());
+    values.append(sip_timestamp_object());
+    values.append(size_object());
+    return values;
+  }
+
+  std::size_t hash_value() const {
+    std::size_t seed = 0;
+    detail::hash_combine(seed, root);
+    detail::hash_combine(seed, expiration);
+    detail::hash_combine(seed, right);
+    detail::hash_combine(seed, strike_millis);
+    detail::hash_combine(seed, detail::option_condition_hash(conditions));
+    detail::hash_combine(seed, correction);
+    detail::hash_combine(seed, exchange);
+    detail::hash_combine(seed, price);
+    detail::hash_combine(seed, sip_timestamp);
+    detail::hash_combine(seed, size);
+    return seed;
+  }
+
+  std::string repr() const {
+    std::ostringstream out;
+    out << "OptionTrade("
+        << "root='" << root << "', "
+        << "expiration='" << expiration << "', "
+        << "right='" << right << "', "
+        << "strike=" << strike << ", "
+        << "conditions=" << detail::option_conditions_repr(conditions) << ", "
+        << "correction=" << correction << ", "
+        << "exchange=" << exchange << ", "
+        << "price=" << price << ", "
+        << "sip_timestamp=" << sip_timestamp << ", "
+        << "size=" << size << ")";
+    return out.str();
+  }
+};
+
+struct OptionQuote {
+  static constexpr std::size_t packed_size = 44;
+  static constexpr std::size_t packed_sip_timestamp_offset = 0;
+  static constexpr std::size_t packed_sequence_number_offset = 8;
+  static constexpr std::size_t packed_ask_price_offset = 16;
+  static constexpr std::size_t packed_bid_price_offset = 24;
+  static constexpr std::size_t packed_ask_size_offset = 32;
+  static constexpr std::size_t packed_bid_size_offset = 36;
+  using PackedData = detail::PackedBuffer<packed_size>;
+
+  enum AttributeIndex : std::size_t {
+    root_attribute,
+    expiration_attribute,
+    right_attribute,
+    strike_attribute,
+    ask_exchange_attribute,
+    ask_price_attribute,
+    ask_size_attribute,
+    bid_exchange_attribute,
+    bid_price_attribute,
+    bid_size_attribute,
+    sequence_number_attribute,
+    sip_timestamp_attribute,
+    attribute_count,
+  };
+
+  std::string root;
+  std::string expiration;
+  double ask_price = std::numeric_limits<double>::quiet_NaN();
+  double bid_price = std::numeric_limits<double>::quiet_NaN();
+  double strike = 0.0;
+  std::uint64_t sequence_number = 0;
+  std::uint64_t sip_timestamp = 0;
+  std::uint32_t strike_millis = 0;
+  std::uint32_t ask_size = 0;
+  std::uint32_t bid_size = 0;
+  std::uint16_t ask_exchange = 0;
+  std::uint16_t bid_exchange = 0;
+  char right = '\0';
+  mutable std::unique_ptr<detail::LazyPythonObjectCache<attribute_count>> object_cache_;
+
+  OptionQuote() = default;
+
+  OptionQuote(const OptionQuote& other)
+      : root(other.root),
+        expiration(other.expiration),
+        ask_price(other.ask_price),
+        bid_price(other.bid_price),
+        strike(other.strike),
+        sequence_number(other.sequence_number),
+        sip_timestamp(other.sip_timestamp),
+        strike_millis(other.strike_millis),
+        ask_size(other.ask_size),
+        bid_size(other.bid_size),
+        ask_exchange(other.ask_exchange),
+        bid_exchange(other.bid_exchange),
+        right(other.right) {}
+
+  OptionQuote& operator=(const OptionQuote& other) {
+    if (this == &other) {
+      return *this;
+    }
+
+    root = other.root;
+    expiration = other.expiration;
+    ask_price = other.ask_price;
+    bid_price = other.bid_price;
+    strike = other.strike;
+    sequence_number = other.sequence_number;
+    sip_timestamp = other.sip_timestamp;
+    strike_millis = other.strike_millis;
+    ask_size = other.ask_size;
+    bid_size = other.bid_size;
+    ask_exchange = other.ask_exchange;
+    bid_exchange = other.bid_exchange;
+    right = other.right;
+    object_cache_.reset();
+    return *this;
+  }
+
+  OptionQuote(OptionQuote&&) noexcept = default;
+  OptionQuote& operator=(OptionQuote&&) noexcept = default;
+
+  template <typename Specialization>
+  static OptionQuote from_fields(const std::vector<std::string>& fields) {
+    detail::require_field_count("OptionQuote", fields.size(), 9);
+    OptionQuote result;
+    result.assign_symbol(fields[0]);
+    result.ask_exchange =
+        Specialization::template parse_integer<std::uint16_t>(fields[1], "ask_exchange");
+    result.ask_price = detail::parse_nullable_double(fields[2], "ask_price");
+    result.ask_size =
+        Specialization::template parse_integer<std::uint32_t>(fields[3], "ask_size");
+    result.bid_exchange =
+        Specialization::template parse_integer<std::uint16_t>(fields[4], "bid_exchange");
+    result.bid_price = detail::parse_nullable_double(fields[5], "bid_price");
+    result.bid_size =
+        Specialization::template parse_integer<std::uint32_t>(fields[6], "bid_size");
+    result.sequence_number =
+        Specialization::template parse_integer<std::uint64_t>(fields[7], "sequence_number");
+    result.sip_timestamp =
+        Specialization::template parse_integer<std::uint64_t>(fields[8], "sip_timestamp");
+    return result;
+  }
+
+  void assign_symbol(std::string_view ticker) {
+    const detail::OptionSymbolParts symbol = detail::parse_option_symbol(ticker);
+    root = symbol.root;
+    expiration = symbol.expiration;
+    right = symbol.right;
+    strike_millis = symbol.strike_millis;
+    strike = symbol.strike;
+  }
+
+  void assign_contract_key(std::string_view key) {
+    const detail::OptionSymbolParts symbol = detail::parse_option_contract_key(key);
+    root = symbol.root;
+    expiration = symbol.expiration;
+    right = symbol.right;
+    strike_millis = symbol.strike_millis;
+    strike = symbol.strike;
+  }
+
+  static OptionQuote from_packed(std::string_view packed_data) {
+    detail::require_packed_size("OptionQuote", packed_data.size(), packed_size);
+    OptionQuote result;
+    std::size_t offset = 0;
+    result.sip_timestamp = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
+    result.sequence_number = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
+    result.ask_price = detail::read_double_le(packed_data, offset);
+    result.bid_price = detail::read_double_le(packed_data, offset);
+    result.ask_size = detail::read_unsigned_le<std::uint32_t>(packed_data, offset);
+    result.bid_size = detail::read_unsigned_le<std::uint32_t>(packed_data, offset);
+    result.ask_exchange = detail::read_unsigned_le<std::uint16_t>(packed_data, offset);
+    result.bid_exchange = detail::read_unsigned_le<std::uint16_t>(packed_data, offset);
+    return result;
+  }
+
+  static OptionQuote from_packed(
+      std::string_view packed_data,
+      std::string_view contract_key) {
+    OptionQuote result = from_packed(packed_data);
+    result.assign_contract_key(contract_key);
+    return result;
+  }
+
+  static OptionQuote from_packed_data(
+      const char* packed_data,
+      std::string_view contract_key) {
+    return from_packed(std::string_view(packed_data, packed_size), contract_key);
+  }
+
+  static std::uint64_t sip_timestamp_at(const void* packed_data) {
+    return detail::read_uint64_le_at(packed_data, packed_sip_timestamp_offset);
+  }
+
+  static double ask_price_at(const void* packed_data) {
+    return detail::read_double_le_at(packed_data, packed_ask_price_offset);
+  }
+
+  static double bid_price_at(const void* packed_data) {
+    return detail::read_double_le_at(packed_data, packed_bid_price_offset);
+  }
+
+  static std::uint32_t ask_size_at(const void* packed_data) {
+    return detail::read_uint32_le_at(packed_data, packed_ask_size_offset);
+  }
+
+  static std::uint32_t bid_size_at(const void* packed_data) {
+    return detail::read_uint32_le_at(packed_data, packed_bid_size_offset);
+  }
+
+  PackedData pack() const {
+    PackedData output{};
+    std::size_t offset = 0;
+    detail::write_unsigned_le(output, offset, sip_timestamp);
+    detail::write_unsigned_le(output, offset, sequence_number);
+    detail::write_double_le(output, offset, ask_price);
+    detail::write_double_le(output, offset, bid_price);
+    detail::write_unsigned_le(output, offset, ask_size);
+    detail::write_unsigned_le(output, offset, bid_size);
+    detail::write_unsigned_le(output, offset, ask_exchange);
+    detail::write_unsigned_le(output, offset, bid_exchange);
+    return output;
+  }
+
+  nanobind::bytes packed_bytes() const {
+    return detail::packed_bytes(pack());
+  }
+
+  bool operator==(const OptionQuote& other) const {
+    const bool ask_prices_equal =
+        ask_price == other.ask_price || (std::isnan(ask_price) && std::isnan(other.ask_price));
+    const bool bid_prices_equal =
+        bid_price == other.bid_price || (std::isnan(bid_price) && std::isnan(other.bid_price));
+    return root == other.root &&
+           expiration == other.expiration &&
+           right == other.right &&
+           strike_millis == other.strike_millis &&
+           ask_exchange == other.ask_exchange &&
+           ask_prices_equal &&
+           ask_size == other.ask_size &&
+           bid_exchange == other.bid_exchange &&
+           bid_prices_equal &&
+           bid_size == other.bid_size &&
+           sequence_number == other.sequence_number &&
+           sip_timestamp == other.sip_timestamp;
+  }
+
+  nanobind::object root_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        root_attribute,
+        [&] { return detail::string_object_new_ref(root); });
+  }
+
+  nanobind::object expiration_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        expiration_attribute,
+        [&] { return detail::string_object_new_ref(expiration); });
+  }
+
+  nanobind::object right_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        right_attribute,
+        [&] { return PyUnicode_FromStringAndSize(&right, 1); });
+  }
+
+  nanobind::object strike_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        strike_attribute,
+        [&] { return detail::double_object_new_ref(strike); });
+  }
+
+  nanobind::object ask_exchange_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        ask_exchange_attribute,
+        [&] { return detail::uint64_object_new_ref(ask_exchange); });
+  }
+
+  nanobind::object ask_price_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        ask_price_attribute,
+        [&] { return detail::double_object_new_ref(ask_price); });
+  }
+
+  nanobind::object ask_size_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        ask_size_attribute,
+        [&] { return detail::uint64_object_new_ref(ask_size); });
+  }
+
+  nanobind::object bid_exchange_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        bid_exchange_attribute,
+        [&] { return detail::uint64_object_new_ref(bid_exchange); });
+  }
+
+  nanobind::object bid_price_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        bid_price_attribute,
+        [&] { return detail::double_object_new_ref(bid_price); });
+  }
+
+  nanobind::object bid_size_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        bid_size_attribute,
+        [&] { return detail::uint64_object_new_ref(bid_size); });
+  }
+
+  nanobind::object sequence_number_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        sequence_number_attribute,
+        [&] { return detail::uint64_object_new_ref(sequence_number); });
+  }
+
+  nanobind::object sip_timestamp_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        sip_timestamp_attribute,
+        [&] { return detail::uint64_object_new_ref(sip_timestamp); });
+  }
+
+  nanobind::list python_fields() const {
+    nanobind::list values;
+    values.append(root_object());
+    values.append(expiration_object());
+    values.append(right_object());
+    values.append(strike_object());
+    values.append(ask_exchange_object());
+    values.append(ask_price_object());
+    values.append(ask_size_object());
+    values.append(bid_exchange_object());
+    values.append(bid_price_object());
+    values.append(bid_size_object());
+    values.append(sequence_number_object());
+    values.append(sip_timestamp_object());
+    return values;
+  }
+
+  std::size_t hash_value() const {
+    std::size_t seed = 0;
+    detail::hash_combine(seed, root);
+    detail::hash_combine(seed, expiration);
+    detail::hash_combine(seed, right);
+    detail::hash_combine(seed, strike_millis);
+    detail::hash_combine(seed, ask_exchange);
+    detail::hash_combine(seed, ask_price);
+    detail::hash_combine(seed, ask_size);
+    detail::hash_combine(seed, bid_exchange);
+    detail::hash_combine(seed, bid_price);
+    detail::hash_combine(seed, bid_size);
+    detail::hash_combine(seed, sequence_number);
+    detail::hash_combine(seed, sip_timestamp);
+    return seed;
+  }
+
+  std::string repr() const {
+    std::ostringstream out;
+    out << "OptionQuote("
+        << "root='" << root << "', "
+        << "expiration='" << expiration << "', "
+        << "right='" << right << "', "
+        << "strike=" << strike << ", "
+        << "ask_exchange=" << ask_exchange << ", "
+        << "ask_price=" << ask_price << ", "
+        << "ask_size=" << ask_size << ", "
+        << "bid_exchange=" << bid_exchange << ", "
+        << "bid_price=" << bid_price << ", "
+        << "bid_size=" << bid_size << ", "
+        << "sequence_number=" << sequence_number << ", "
+        << "sip_timestamp=" << sip_timestamp << ")";
+    return out.str();
+  }
+};
+
 struct StockQuote {
   static constexpr std::size_t packed_size = 83;
   static constexpr std::size_t packed_ask_price_offset = 1;
@@ -2571,6 +3847,572 @@ struct StockQuote {
         << "sip_timestamp=" << sip_timestamp << ", "
         << "tape=" << static_cast<unsigned>(tape) << ", "
         << "trf_timestamp=" << trf_timestamp << ")";
+    return out.str();
+  }
+};
+
+struct FuturesTrade {
+  static constexpr std::size_t packed_size = 38;
+  static constexpr std::size_t packed_timestamp_offset = 0;
+  static constexpr std::size_t packed_price_offset = 16;
+  static constexpr std::size_t packed_size_offset = 28;
+  using PackedData = detail::PackedBuffer<packed_size>;
+  enum AttributeIndex : std::size_t {
+    ticker_attribute,
+    timestamp_attribute,
+    sequence_number_attribute,
+    report_sequence_attribute,
+    price_attribute,
+    size_attribute,
+    correction_attribute,
+    exchange_attribute,
+    attribute_count,
+  };
+
+  std::string ticker;
+  double price = 0.0;
+  std::uint64_t timestamp = 0;
+  std::uint64_t sequence_number = 0;
+  std::uint32_t report_sequence = 0;
+  std::uint32_t size = 0;
+  std::int32_t correction = 0;
+  std::uint16_t exchange = 0;
+  mutable std::unique_ptr<detail::LazyPythonObjectCache<attribute_count>> object_cache_;
+
+  FuturesTrade() = default;
+
+  FuturesTrade(const FuturesTrade& other)
+      : ticker(other.ticker),
+        price(other.price),
+        timestamp(other.timestamp),
+        sequence_number(other.sequence_number),
+        report_sequence(other.report_sequence),
+        size(other.size),
+        correction(other.correction),
+        exchange(other.exchange) {}
+
+  FuturesTrade& operator=(const FuturesTrade& other) {
+    if (this == &other) {
+      return *this;
+    }
+    ticker = other.ticker;
+    price = other.price;
+    timestamp = other.timestamp;
+    sequence_number = other.sequence_number;
+    report_sequence = other.report_sequence;
+    size = other.size;
+    correction = other.correction;
+    exchange = other.exchange;
+    object_cache_.reset();
+    return *this;
+  }
+
+  FuturesTrade(FuturesTrade&&) noexcept = default;
+  FuturesTrade& operator=(FuturesTrade&&) noexcept = default;
+
+  FuturesTrade(std::string_view packed_data, std::string_view ticker_value) {
+    *this = from_packed(packed_data, ticker_value);
+  }
+
+  FuturesTrade(const char* packed_data, std::string_view ticker_value)
+      : FuturesTrade(std::string_view(packed_data, packed_size), ticker_value) {}
+
+  template <typename Specialization>
+  static FuturesTrade from_fields(const std::vector<std::string>& fields) {
+    detail::require_field_count("FuturesTrade", fields.size(), 9);
+    FuturesTrade result;
+    result.ticker = fields[0];
+    result.timestamp =
+        Specialization::template parse_integer<std::uint64_t>(fields[1], "timestamp");
+    result.sequence_number =
+        Specialization::template parse_integer<std::uint64_t>(fields[2], "sequence_number");
+    result.report_sequence =
+        Specialization::template parse_integer<std::uint32_t>(fields[3], "report_sequence");
+    result.price = Specialization::parse_double(fields[4], "price");
+    result.size =
+        Specialization::template parse_integer<std::uint32_t>(fields[5], "size");
+    result.correction =
+        Specialization::template parse_integer<std::int32_t>(fields[6], "correction");
+    result.exchange =
+        Specialization::template parse_integer<std::uint16_t>(fields[7], "exchange");
+    return result;
+  }
+
+  static FuturesTrade from_packed(std::string_view packed_data) {
+    detail::require_packed_size("FuturesTrade", packed_data.size(), packed_size);
+    FuturesTrade result;
+    std::size_t offset = 0;
+    result.timestamp = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
+    result.sequence_number = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
+    result.price = detail::read_double_le(packed_data, offset);
+    result.report_sequence = detail::read_unsigned_le<std::uint32_t>(packed_data, offset);
+    result.size = detail::read_unsigned_le<std::uint32_t>(packed_data, offset);
+    result.correction = detail::read_int32_le(packed_data, offset);
+    result.exchange = detail::read_unsigned_le<std::uint16_t>(packed_data, offset);
+    return result;
+  }
+
+  static FuturesTrade from_packed(std::string_view packed_data, std::string_view ticker_value) {
+    FuturesTrade result = from_packed(packed_data);
+    result.ticker.assign(ticker_value);
+    return result;
+  }
+
+  static FuturesTrade from_packed_data(const char* packed_data, std::string_view ticker_value) {
+    return from_packed(std::string_view(packed_data, packed_size), ticker_value);
+  }
+
+  static std::uint64_t timestamp_at(const void* packed_data) {
+    return detail::read_uint64_le_at(packed_data, packed_timestamp_offset);
+  }
+
+  static double price_at(const void* packed_data) {
+    return detail::read_double_le_at(packed_data, packed_price_offset);
+  }
+
+  static std::uint32_t size_at(const void* packed_data) {
+    return detail::read_uint32_le_at(packed_data, packed_size_offset);
+  }
+
+  PackedData pack() const {
+    PackedData output{};
+    std::size_t offset = 0;
+    detail::write_unsigned_le(output, offset, timestamp);
+    detail::write_unsigned_le(output, offset, sequence_number);
+    detail::write_double_le(output, offset, price);
+    detail::write_unsigned_le(output, offset, report_sequence);
+    detail::write_unsigned_le(output, offset, size);
+    detail::write_int32_le(output, offset, correction);
+    detail::write_unsigned_le(output, offset, exchange);
+    return output;
+  }
+
+  nanobind::bytes packed_bytes() const {
+    return detail::packed_bytes(pack());
+  }
+
+  nanobind::object ticker_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        ticker_attribute,
+        [&] { return detail::string_object_new_ref(ticker); });
+  }
+
+  nanobind::object timestamp_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        timestamp_attribute,
+        [&] { return detail::uint64_object_new_ref(timestamp); });
+  }
+
+  nanobind::object sequence_number_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        sequence_number_attribute,
+        [&] { return detail::uint64_object_new_ref(sequence_number); });
+  }
+
+  nanobind::object report_sequence_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        report_sequence_attribute,
+        [&] { return detail::uint64_object_new_ref(report_sequence); });
+  }
+
+  nanobind::object price_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        price_attribute,
+        [&] { return detail::double_object_new_ref(price); });
+  }
+
+  nanobind::object size_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        size_attribute,
+        [&] { return detail::uint64_object_new_ref(size); });
+  }
+
+  nanobind::object correction_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        correction_attribute,
+        [&] { return detail::int64_object_new_ref(correction); });
+  }
+
+  nanobind::object exchange_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        exchange_attribute,
+        [&] { return detail::uint64_object_new_ref(exchange); });
+  }
+
+  nanobind::list python_fields() const {
+    nanobind::list values;
+    values.append(ticker_object());
+    values.append(timestamp_object());
+    values.append(sequence_number_object());
+    values.append(report_sequence_object());
+    values.append(price_object());
+    values.append(size_object());
+    values.append(correction_object());
+    values.append(exchange_object());
+    return values;
+  }
+
+  bool operator==(const FuturesTrade& other) const {
+    return ticker == other.ticker &&
+           timestamp == other.timestamp &&
+           sequence_number == other.sequence_number &&
+           report_sequence == other.report_sequence &&
+           price == other.price &&
+           size == other.size &&
+           correction == other.correction &&
+           exchange == other.exchange;
+  }
+
+  std::size_t hash_value() const {
+    std::size_t seed = 0;
+    detail::hash_combine(seed, ticker);
+    detail::hash_combine(seed, timestamp);
+    detail::hash_combine(seed, sequence_number);
+    detail::hash_combine(seed, report_sequence);
+    detail::hash_combine(seed, price);
+    detail::hash_combine(seed, size);
+    detail::hash_combine(seed, correction);
+    detail::hash_combine(seed, exchange);
+    return seed;
+  }
+
+  std::string repr() const {
+    std::ostringstream out;
+    out << "FuturesTrade("
+        << "ticker='" << ticker << "', "
+        << "timestamp=" << timestamp << ", "
+        << "sequence_number=" << sequence_number << ", "
+        << "report_sequence=" << report_sequence << ", "
+        << "price=" << price << ", "
+        << "size=" << size << ", "
+        << "correction=" << correction << ", "
+        << "exchange=" << exchange << ")";
+    return out.str();
+  }
+};
+
+struct FuturesQuote {
+  static constexpr std::size_t packed_size = 62;
+  static constexpr std::size_t packed_timestamp_offset = 0;
+  static constexpr std::size_t packed_ask_price_offset = 32;
+  static constexpr std::size_t packed_bid_price_offset = 40;
+  static constexpr std::size_t packed_ask_size_offset = 52;
+  static constexpr std::size_t packed_bid_size_offset = 56;
+  using PackedData = detail::PackedBuffer<packed_size>;
+  enum AttributeIndex : std::size_t {
+    ticker_attribute,
+    timestamp_attribute,
+    sequence_number_attribute,
+    report_sequence_attribute,
+    ask_timestamp_attribute,
+    ask_price_attribute,
+    ask_size_attribute,
+    bid_timestamp_attribute,
+    bid_price_attribute,
+    bid_size_attribute,
+    exchange_attribute,
+    attribute_count,
+  };
+
+  std::string ticker;
+  double ask_price = std::numeric_limits<double>::quiet_NaN();
+  double bid_price = std::numeric_limits<double>::quiet_NaN();
+  std::uint64_t timestamp = 0;
+  std::uint64_t sequence_number = 0;
+  std::uint64_t ask_timestamp = 0;
+  std::uint64_t bid_timestamp = 0;
+  std::uint32_t report_sequence = 0;
+  std::uint32_t ask_size = 0;
+  std::uint32_t bid_size = 0;
+  std::uint16_t exchange = 0;
+  mutable std::unique_ptr<detail::LazyPythonObjectCache<attribute_count>> object_cache_;
+
+  FuturesQuote() = default;
+
+  FuturesQuote(const FuturesQuote& other)
+      : ticker(other.ticker),
+        ask_price(other.ask_price),
+        bid_price(other.bid_price),
+        timestamp(other.timestamp),
+        sequence_number(other.sequence_number),
+        ask_timestamp(other.ask_timestamp),
+        bid_timestamp(other.bid_timestamp),
+        report_sequence(other.report_sequence),
+        ask_size(other.ask_size),
+        bid_size(other.bid_size),
+        exchange(other.exchange) {}
+
+  FuturesQuote& operator=(const FuturesQuote& other) {
+    if (this == &other) {
+      return *this;
+    }
+    ticker = other.ticker;
+    ask_price = other.ask_price;
+    bid_price = other.bid_price;
+    timestamp = other.timestamp;
+    sequence_number = other.sequence_number;
+    ask_timestamp = other.ask_timestamp;
+    bid_timestamp = other.bid_timestamp;
+    report_sequence = other.report_sequence;
+    ask_size = other.ask_size;
+    bid_size = other.bid_size;
+    exchange = other.exchange;
+    object_cache_.reset();
+    return *this;
+  }
+
+  FuturesQuote(FuturesQuote&&) noexcept = default;
+  FuturesQuote& operator=(FuturesQuote&&) noexcept = default;
+
+  FuturesQuote(std::string_view packed_data, std::string_view ticker_value) {
+    *this = from_packed(packed_data, ticker_value);
+  }
+
+  FuturesQuote(const char* packed_data, std::string_view ticker_value)
+      : FuturesQuote(std::string_view(packed_data, packed_size), ticker_value) {}
+
+  template <typename Specialization>
+  static FuturesQuote from_fields(const std::vector<std::string>& fields) {
+    detail::require_field_count("FuturesQuote", fields.size(), 12);
+    FuturesQuote result;
+    result.ticker = fields[0];
+    result.timestamp =
+        Specialization::template parse_integer<std::uint64_t>(fields[1], "timestamp");
+    result.sequence_number =
+        Specialization::template parse_integer<std::uint64_t>(fields[2], "sequence_number");
+    result.report_sequence =
+        Specialization::template parse_integer<std::uint32_t>(fields[3], "report_sequence");
+    result.ask_timestamp =
+        Specialization::template parse_integer<std::uint64_t>(fields[4], "ask_timestamp");
+    result.ask_price = detail::parse_nullable_double(fields[5], "ask_price");
+    result.ask_size =
+        Specialization::template parse_integer<std::uint32_t>(fields[6], "ask_size");
+    result.bid_timestamp =
+        Specialization::template parse_integer<std::uint64_t>(fields[7], "bid_timestamp");
+    result.bid_price = detail::parse_nullable_double(fields[8], "bid_price");
+    result.bid_size =
+        Specialization::template parse_integer<std::uint32_t>(fields[9], "bid_size");
+    result.exchange =
+        Specialization::template parse_integer<std::uint16_t>(fields[10], "exchange");
+    return result;
+  }
+
+  static FuturesQuote from_packed(std::string_view packed_data) {
+    detail::require_packed_size("FuturesQuote", packed_data.size(), packed_size);
+    FuturesQuote result;
+    std::size_t offset = 0;
+    result.timestamp = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
+    result.sequence_number = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
+    result.ask_timestamp = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
+    result.bid_timestamp = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
+    result.ask_price = detail::read_double_le(packed_data, offset);
+    result.bid_price = detail::read_double_le(packed_data, offset);
+    result.report_sequence = detail::read_unsigned_le<std::uint32_t>(packed_data, offset);
+    result.ask_size = detail::read_unsigned_le<std::uint32_t>(packed_data, offset);
+    result.bid_size = detail::read_unsigned_le<std::uint32_t>(packed_data, offset);
+    result.exchange = detail::read_unsigned_le<std::uint16_t>(packed_data, offset);
+    return result;
+  }
+
+  static FuturesQuote from_packed(std::string_view packed_data, std::string_view ticker_value) {
+    FuturesQuote result = from_packed(packed_data);
+    result.ticker.assign(ticker_value);
+    return result;
+  }
+
+  static FuturesQuote from_packed_data(const char* packed_data, std::string_view ticker_value) {
+    return from_packed(std::string_view(packed_data, packed_size), ticker_value);
+  }
+
+  static std::uint64_t timestamp_at(const void* packed_data) {
+    return detail::read_uint64_le_at(packed_data, packed_timestamp_offset);
+  }
+
+  static double ask_price_at(const void* packed_data) {
+    return detail::read_double_le_at(packed_data, packed_ask_price_offset);
+  }
+
+  static double bid_price_at(const void* packed_data) {
+    return detail::read_double_le_at(packed_data, packed_bid_price_offset);
+  }
+
+  static std::uint32_t ask_size_at(const void* packed_data) {
+    return detail::read_uint32_le_at(packed_data, packed_ask_size_offset);
+  }
+
+  static std::uint32_t bid_size_at(const void* packed_data) {
+    return detail::read_uint32_le_at(packed_data, packed_bid_size_offset);
+  }
+
+  PackedData pack() const {
+    PackedData output{};
+    std::size_t offset = 0;
+    detail::write_unsigned_le(output, offset, timestamp);
+    detail::write_unsigned_le(output, offset, sequence_number);
+    detail::write_unsigned_le(output, offset, ask_timestamp);
+    detail::write_unsigned_le(output, offset, bid_timestamp);
+    detail::write_double_le(output, offset, ask_price);
+    detail::write_double_le(output, offset, bid_price);
+    detail::write_unsigned_le(output, offset, report_sequence);
+    detail::write_unsigned_le(output, offset, ask_size);
+    detail::write_unsigned_le(output, offset, bid_size);
+    detail::write_unsigned_le(output, offset, exchange);
+    return output;
+  }
+
+  nanobind::bytes packed_bytes() const {
+    return detail::packed_bytes(pack());
+  }
+
+  nanobind::object ticker_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        ticker_attribute,
+        [&] { return detail::string_object_new_ref(ticker); });
+  }
+
+  nanobind::object timestamp_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        timestamp_attribute,
+        [&] { return detail::uint64_object_new_ref(timestamp); });
+  }
+
+  nanobind::object sequence_number_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        sequence_number_attribute,
+        [&] { return detail::uint64_object_new_ref(sequence_number); });
+  }
+
+  nanobind::object report_sequence_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        report_sequence_attribute,
+        [&] { return detail::uint64_object_new_ref(report_sequence); });
+  }
+
+  nanobind::object ask_timestamp_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        ask_timestamp_attribute,
+        [&] { return detail::uint64_object_new_ref(ask_timestamp); });
+  }
+
+  nanobind::object ask_price_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        ask_price_attribute,
+        [&] { return detail::double_object_new_ref(ask_price); });
+  }
+
+  nanobind::object ask_size_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        ask_size_attribute,
+        [&] { return detail::uint64_object_new_ref(ask_size); });
+  }
+
+  nanobind::object bid_timestamp_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        bid_timestamp_attribute,
+        [&] { return detail::uint64_object_new_ref(bid_timestamp); });
+  }
+
+  nanobind::object bid_price_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        bid_price_attribute,
+        [&] { return detail::double_object_new_ref(bid_price); });
+  }
+
+  nanobind::object bid_size_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        bid_size_attribute,
+        [&] { return detail::uint64_object_new_ref(bid_size); });
+  }
+
+  nanobind::object exchange_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        exchange_attribute,
+        [&] { return detail::uint64_object_new_ref(exchange); });
+  }
+
+  nanobind::list python_fields() const {
+    nanobind::list values;
+    values.append(ticker_object());
+    values.append(timestamp_object());
+    values.append(sequence_number_object());
+    values.append(report_sequence_object());
+    values.append(ask_timestamp_object());
+    values.append(ask_price_object());
+    values.append(ask_size_object());
+    values.append(bid_timestamp_object());
+    values.append(bid_price_object());
+    values.append(bid_size_object());
+    values.append(exchange_object());
+    return values;
+  }
+
+  bool operator==(const FuturesQuote& other) const {
+    const bool ask_prices_equal =
+        ask_price == other.ask_price || (std::isnan(ask_price) && std::isnan(other.ask_price));
+    const bool bid_prices_equal =
+        bid_price == other.bid_price || (std::isnan(bid_price) && std::isnan(other.bid_price));
+    return ticker == other.ticker &&
+           timestamp == other.timestamp &&
+           sequence_number == other.sequence_number &&
+           report_sequence == other.report_sequence &&
+           ask_timestamp == other.ask_timestamp &&
+           ask_prices_equal &&
+           ask_size == other.ask_size &&
+           bid_timestamp == other.bid_timestamp &&
+           bid_prices_equal &&
+           bid_size == other.bid_size &&
+           exchange == other.exchange;
+  }
+
+  std::size_t hash_value() const {
+    std::size_t seed = 0;
+    detail::hash_combine(seed, ticker);
+    detail::hash_combine(seed, timestamp);
+    detail::hash_combine(seed, sequence_number);
+    detail::hash_combine(seed, report_sequence);
+    detail::hash_combine(seed, ask_timestamp);
+    detail::hash_combine(seed, ask_price);
+    detail::hash_combine(seed, ask_size);
+    detail::hash_combine(seed, bid_timestamp);
+    detail::hash_combine(seed, bid_price);
+    detail::hash_combine(seed, bid_size);
+    detail::hash_combine(seed, exchange);
+    return seed;
+  }
+
+  std::string repr() const {
+    std::ostringstream out;
+    out << "FuturesQuote("
+        << "ticker='" << ticker << "', "
+        << "timestamp=" << timestamp << ", "
+        << "sequence_number=" << sequence_number << ", "
+        << "report_sequence=" << report_sequence << ", "
+        << "ask_timestamp=" << ask_timestamp << ", "
+        << "ask_price=" << ask_price << ", "
+        << "ask_size=" << ask_size << ", "
+        << "bid_timestamp=" << bid_timestamp << ", "
+        << "bid_price=" << bid_price << ", "
+        << "bid_size=" << bid_size << ", "
+        << "exchange=" << exchange << ")";
     return out.str();
   }
 };
@@ -4126,7 +5968,10 @@ struct CurrencyQuoteAggregationState {
 
 class StockTradeDatabase;
 class StockQuoteDatabase;
+class CryptoTradeDatabase;
 class CurrencyQuoteDatabase;
+class OptionTradeDatabase;
+class OptionQuoteDatabase;
 
 struct StockTradeAggregationTraits {
   using RowType = StockTrade;
@@ -4379,12 +6224,57 @@ struct StockQuoteDatabaseTraits {
   }
 };
 
+struct CryptoTradeDatabaseTraits {
+  using row_type = CryptoTrade;
+  static constexpr std::string_view record_type = "crypto_trade";
+
+  static std::uint64_t search_timestamp_at(const void* packed_data) {
+    return CryptoTrade::participant_timestamp_at(packed_data);
+  }
+};
+
 struct CurrencyQuoteDatabaseTraits {
   using row_type = CurrencyQuote;
   static constexpr std::string_view record_type = "currency_quote";
 
   static std::uint64_t search_timestamp_at(const void* packed_data) {
     return CurrencyQuote::participant_timestamp_at(packed_data);
+  }
+};
+
+struct FuturesTradeDatabaseTraits {
+  using row_type = FuturesTrade;
+  static constexpr std::string_view record_type = "future_trade";
+
+  static std::uint64_t search_timestamp_at(const void* packed_data) {
+    return FuturesTrade::timestamp_at(packed_data);
+  }
+};
+
+struct FuturesQuoteDatabaseTraits {
+  using row_type = FuturesQuote;
+  static constexpr std::string_view record_type = "future_quote";
+
+  static std::uint64_t search_timestamp_at(const void* packed_data) {
+    return FuturesQuote::timestamp_at(packed_data);
+  }
+};
+
+struct OptionTradeDatabaseTraits {
+  using row_type = OptionTrade;
+  static constexpr std::string_view record_type = "option_trade";
+
+  static std::uint64_t search_timestamp_at(const void* packed_data) {
+    return OptionTrade::sip_timestamp_at(packed_data);
+  }
+};
+
+struct OptionQuoteDatabaseTraits {
+  using row_type = OptionQuote;
+  static constexpr std::string_view record_type = "option_quote";
+
+  static std::uint64_t search_timestamp_at(const void* packed_data) {
+    return OptionQuote::sip_timestamp_at(packed_data);
   }
 };
 
@@ -4425,10 +6315,22 @@ class DatabaseRecordFile {
       std::filesystem::path database_path,
       std::string date,
       std::string ticker)
+      : DatabaseRecordFile(
+            std::move(database_path),
+            std::move(date),
+            std::move(ticker),
+            std::string(Traits::record_type)) {}
+
+  DatabaseRecordFile(
+      std::filesystem::path database_path,
+      std::string date,
+      std::string ticker,
+      std::string record_type)
       : database_path_(std::move(database_path)),
         date_(std::move(date)),
         ticker_(std::move(ticker)),
-        file_path_(database_path_ / std::string(Traits::record_type) / date_ / ticker_),
+        record_type_(std::move(record_type)),
+        file_path_(database_path_ / record_type_ / date_ / ticker_),
         mapping_(file_path_) {
     if (mapping_.size() % RowType::packed_size != 0) {
       std::ostringstream message;
@@ -4442,6 +6344,7 @@ class DatabaseRecordFile {
 
   const std::string& ticker() const { return ticker_; }
   const std::string& date() const { return date_; }
+  const std::string& record_type() const { return record_type_; }
   const std::filesystem::path& database_path() const { return database_path_; }
   const std::filesystem::path& path() const { return file_path_; }
   std::size_t size() const { return size_; }
@@ -4791,6 +6694,7 @@ class DatabaseRecordFile {
   std::filesystem::path database_path_;
   std::string date_;
   std::string ticker_;
+  std::string record_type_;
   std::filesystem::path file_path_;
   detail::MappedFile mapping_;
   std::size_t size_ = 0;
@@ -4851,10 +6755,133 @@ class StockQuoteDatabase
   }
 };
 
+class CryptoTradeDatabase
+    : public DatabaseRecordFile<CryptoTradeDatabaseTraits> {
+ public:
+  using DatabaseRecordFile::DatabaseRecordFile;
+};
+
 class CurrencyQuoteDatabase
     : public DatabaseRecordFile<CurrencyQuoteDatabaseTraits> {
  public:
   using DatabaseRecordFile::DatabaseRecordFile;
+};
+
+template <typename Traits>
+class OptionDatabaseRecordFile : public DatabaseRecordFile<Traits> {
+ public:
+  using Base = DatabaseRecordFile<Traits>;
+  using RowType = typename Traits::row_type;
+
+  OptionDatabaseRecordFile(
+      std::filesystem::path database_path,
+      std::string date,
+      std::string root,
+      std::string expiration,
+      std::string right,
+      double strike)
+      : Base(
+            std::move(database_path),
+            std::move(date),
+            detail::option_contract_key(
+                root,
+                expiration,
+                right,
+                strike),
+            std::string(Traits::record_type)),
+        root_(std::move(root)),
+        expiration_(std::move(expiration)),
+        right_(std::move(right)),
+        strike_millis_(detail::strike_millis_from_double(strike)),
+        strike_(static_cast<double>(strike_millis_) / 1000.0) {}
+
+  const std::string& root() const { return root_; }
+  const std::string& expiration() const { return expiration_; }
+  const std::string& right() const { return right_; }
+  double strike() const { return strike_; }
+  std::uint32_t strike_millis() const { return strike_millis_; }
+  const std::string& contract_key() const { return Base::ticker(); }
+
+ private:
+  std::string root_;
+  std::string expiration_;
+  std::string right_;
+  std::uint32_t strike_millis_ = 0;
+  double strike_ = 0.0;
+};
+
+class OptionTradeDatabase
+    : public OptionDatabaseRecordFile<OptionTradeDatabaseTraits> {
+ public:
+  using OptionDatabaseRecordFile::OptionDatabaseRecordFile;
+};
+
+class OptionQuoteDatabase
+    : public OptionDatabaseRecordFile<OptionQuoteDatabaseTraits> {
+ public:
+  using OptionDatabaseRecordFile::OptionDatabaseRecordFile;
+};
+
+inline bool is_futures_exchange(std::string_view exchange) {
+  return exchange == "cbot" ||
+         exchange == "cme" ||
+         exchange == "comex" ||
+         exchange == "nymex";
+}
+
+inline std::string futures_database_record_type(
+    std::string_view exchange,
+    std::string_view kind) {
+  if (kind != "trade" && kind != "quote") {
+    throw std::invalid_argument("futures database kind must be trade or quote");
+  }
+  if (exchange.empty()) {
+    std::string record_type = "future_";
+    record_type += kind;
+    return record_type;
+  }
+  if (!is_futures_exchange(exchange)) {
+    std::ostringstream message;
+    message << "unknown futures exchange '" << exchange
+            << "'; expected one of cbot, cme, comex, nymex";
+    throw std::invalid_argument(message.str());
+  }
+
+  std::string record_type = "future_";
+  record_type += exchange;
+  record_type += '_';
+  record_type += kind;
+  return record_type;
+}
+
+class FuturesTradeDatabase
+    : public DatabaseRecordFile<FuturesTradeDatabaseTraits> {
+ public:
+  FuturesTradeDatabase(
+      std::filesystem::path database_path,
+      std::string date,
+      std::string ticker,
+      std::string exchange = {})
+      : DatabaseRecordFile(
+            std::move(database_path),
+            std::move(date),
+            std::move(ticker),
+            futures_database_record_type(exchange, "trade")) {}
+};
+
+class FuturesQuoteDatabase
+    : public DatabaseRecordFile<FuturesQuoteDatabaseTraits> {
+ public:
+  FuturesQuoteDatabase(
+      std::filesystem::path database_path,
+      std::string date,
+      std::string ticker,
+      std::string exchange = {})
+      : DatabaseRecordFile(
+            std::move(database_path),
+            std::move(date),
+            std::move(ticker),
+            futures_database_record_type(exchange, "quote")) {}
 };
 
 class StockTradeQuoteTimeline {
@@ -5157,7 +7184,11 @@ class SimpleMarket {
           continue;
         }
         current_broker_ = SimpleMarketBroker(state_, event.symbol_index, timestamp);
-        return make_event_tuple(event.symbol_index, std::nullopt, symbol_state.last_quote);
+        return make_event_tuple(
+            event.symbol_index,
+            timestamp,
+            std::nullopt,
+            symbol_state.last_quote);
       }
 
       if (symbol_state.trade_index >= symbol_state.trades->size()) {
@@ -5172,7 +7203,11 @@ class SimpleMarket {
           nanobind::cast(*symbol_state.last_trade);
       push_next_trade(event.symbol_index);
       current_broker_ = SimpleMarketBroker(state_, event.symbol_index, timestamp);
-      return make_event_tuple(event.symbol_index, symbol_state.last_trade, std::nullopt);
+      return make_event_tuple(
+          event.symbol_index,
+          timestamp,
+          symbol_state.last_trade,
+          std::nullopt);
     }
 
     throw nanobind::stop_iteration();
@@ -5280,9 +7315,10 @@ class SimpleMarket {
 
   nanobind::tuple make_event_tuple(
       std::size_t symbol_index,
+      std::uint64_t timestamp_ns,
       const std::optional<StockTrade>& trade,
       const std::optional<StockQuote>& quote) {
-    nanobind::tuple result = nanobind::steal<nanobind::tuple>(PyTuple_New(6));
+    nanobind::tuple result = nanobind::steal<nanobind::tuple>(PyTuple_New(7));
     if (!result.is_valid()) {
       throw nanobind::python_error();
     }
@@ -5293,31 +7329,38 @@ class SimpleMarket {
         0,
         nanobind::object(symbol_state.symbol_object).release().ptr());
 
-    if (trade) {
-      PyTuple_SET_ITEM(result.ptr(), 1, nanobind::cast(*trade).release().ptr());
-    } else {
-      Py_INCREF(Py_None);
-      PyTuple_SET_ITEM(result.ptr(), 1, Py_None);
-    }
+    PyTuple_SET_ITEM(
+        result.ptr(),
+        1,
+        nanobind::float_(static_cast<double>(timestamp_ns) / 1'000'000'000.0)
+            .release()
+            .ptr());
 
-    if (quote) {
-      PyTuple_SET_ITEM(result.ptr(), 2, nanobind::cast(*quote).release().ptr());
+    if (trade) {
+      PyTuple_SET_ITEM(result.ptr(), 2, nanobind::cast(*trade).release().ptr());
     } else {
       Py_INCREF(Py_None);
       PyTuple_SET_ITEM(result.ptr(), 2, Py_None);
     }
 
-    PyTuple_SET_ITEM(
-        result.ptr(),
-        3,
-        event_dict_object(state_->last_trades_by_symbol).release().ptr());
+    if (quote) {
+      PyTuple_SET_ITEM(result.ptr(), 3, nanobind::cast(*quote).release().ptr());
+    } else {
+      Py_INCREF(Py_None);
+      PyTuple_SET_ITEM(result.ptr(), 3, Py_None);
+    }
+
     PyTuple_SET_ITEM(
         result.ptr(),
         4,
-        event_dict_object(state_->last_quotes_by_symbol).release().ptr());
+        event_dict_object(state_->last_trades_by_symbol).release().ptr());
     PyTuple_SET_ITEM(
         result.ptr(),
         5,
+        event_dict_object(state_->last_quotes_by_symbol).release().ptr());
+    PyTuple_SET_ITEM(
+        result.ptr(),
+        6,
         nanobind::cast(*current_broker_).release().ptr());
     return result;
   }
@@ -5335,6 +7378,805 @@ class SimpleMarket {
 
   std::shared_ptr<SimpleMarketState> state_;
   std::optional<SimpleMarketBroker> current_broker_;
+};
+
+struct FuturesMarketState {
+  enum class EventKind : std::uint8_t {
+    Quote = 0,
+    Trade = 1,
+  };
+
+  struct Event {
+    std::uint64_t timestamp = 0;
+    std::size_t symbol_index = 0;
+    EventKind kind = EventKind::Trade;
+  };
+
+  struct EventGreater {
+    bool operator()(const Event& left, const Event& right) const {
+      if (left.timestamp != right.timestamp) {
+        return left.timestamp > right.timestamp;
+      }
+      if (left.symbol_index != right.symbol_index) {
+        return left.symbol_index > right.symbol_index;
+      }
+      return static_cast<std::uint8_t>(left.kind) >
+             static_cast<std::uint8_t>(right.kind);
+    }
+  };
+
+  struct SymbolState {
+    std::string symbol;
+    nanobind::object symbol_object;
+    std::unique_ptr<FuturesTradeDatabase> trades;
+    std::unique_ptr<FuturesQuoteDatabase> quotes;
+    std::size_t trade_index = 0;
+    std::size_t quote_index = 0;
+    std::int64_t last_quote_index = -1;
+    std::int64_t last_execution_quote_index = -1;
+    std::optional<FuturesTrade> last_trade;
+    std::optional<FuturesQuote> last_quote;
+  };
+
+  FuturesMarketState(
+      std::filesystem::path database_path,
+      std::string date,
+      std::string exchange,
+      const std::vector<std::string>& symbols,
+      std::uint64_t trade_latency_ns,
+      bool emit_quotes,
+      bool fast)
+      : database_path(std::move(database_path)),
+        date(std::move(date)),
+        exchange(std::move(exchange)),
+        trade_latency_ns(trade_latency_ns),
+        emit_quotes(emit_quotes),
+        fast(fast) {
+    symbol_states.reserve(symbols.size());
+    for (const auto& symbol : symbols) {
+      SymbolState state;
+      state.symbol = symbol;
+      state.symbol_object = intern_symbol(symbol);
+      state.trades = std::make_unique<FuturesTradeDatabase>(
+          this->database_path,
+          this->date,
+          symbol,
+          this->exchange);
+      state.quotes = std::make_unique<FuturesQuoteDatabase>(
+          this->database_path,
+          this->date,
+          symbol,
+          this->exchange);
+
+      const std::size_t symbol_index = symbol_states.size();
+      if (state.trades->size() > 0) {
+        event_queue.push(Event{
+            FuturesTrade::timestamp_at(state.trades->packed_data_at(0)),
+            symbol_index,
+            EventKind::Trade});
+      }
+      if (state.quotes->size() > 0) {
+        event_queue.push(Event{
+            FuturesQuote::timestamp_at(state.quotes->packed_data_at(0)),
+            symbol_index,
+            EventKind::Quote});
+      }
+
+      holdings.emplace(symbol, 0.0);
+      symbol_states.push_back(std::move(state));
+    }
+  }
+
+  static nanobind::object intern_symbol(const std::string& symbol) {
+    PyObject* object = PyUnicode_InternFromString(symbol.c_str());
+    if (object == nullptr) {
+      throw nanobind::python_error();
+    }
+    return nanobind::steal<nanobind::object>(object);
+  }
+
+  static std::uint64_t add_latency(
+      std::uint64_t timestamp,
+      std::uint64_t latency) {
+    const std::uint64_t maximum = std::numeric_limits<std::uint64_t>::max();
+    if (maximum - timestamp < latency) {
+      return maximum;
+    }
+    return timestamp + latency;
+  }
+
+  std::filesystem::path database_path;
+  std::string date;
+  std::string exchange;
+  std::uint64_t trade_latency_ns = 0;
+  bool emit_quotes = false;
+  bool fast = false;
+  nanobind::dict last_trades_by_symbol;
+  nanobind::dict last_quotes_by_symbol;
+  std::vector<SymbolState> symbol_states;
+  std::priority_queue<Event, std::vector<Event>, EventGreater> event_queue;
+  std::unordered_map<std::string, double> holdings;
+  double cash = 0.0;
+};
+
+class FuturesMarketBroker {
+ public:
+  FuturesMarketBroker(
+      std::shared_ptr<FuturesMarketState> state,
+      std::size_t symbol_index,
+      std::uint64_t timestamp)
+      : state_(std::move(state)),
+        symbol_index_(symbol_index),
+        timestamp_(timestamp) {}
+
+  nanobind::object symbol() const {
+    return state_->symbol_states.at(symbol_index_).symbol_object;
+  }
+
+  std::uint64_t timestamp() const { return timestamp_; }
+  std::uint64_t sip_timestamp() const { return timestamp_; }
+
+  void buy(double contracts, std::optional<std::string> symbol = std::nullopt) {
+    execute(contracts, symbol, Side::Buy);
+  }
+
+  void sell(double contracts, std::optional<std::string> symbol = std::nullopt) {
+    execute(contracts, symbol, Side::Sell);
+  }
+
+ private:
+  enum class Side {
+    Buy,
+    Sell,
+  };
+
+  std::size_t resolve_symbol_index(const std::optional<std::string>& symbol) const {
+    if (!symbol) {
+      return symbol_index_;
+    }
+    for (std::size_t index = 0; index < state_->symbol_states.size(); ++index) {
+      if (state_->symbol_states[index].symbol == *symbol) {
+        return index;
+      }
+    }
+    throw std::out_of_range("FuturesMarket broker received an unknown symbol");
+  }
+
+  void execute(
+      double contracts,
+      const std::optional<std::string>& symbol,
+      Side side) {
+    if (!std::isfinite(contracts) || contracts < 0.0) {
+      throw std::invalid_argument("contracts must be a finite non-negative number");
+    }
+
+    const std::size_t target_symbol_index = resolve_symbol_index(symbol);
+    auto& symbol_state = state_->symbol_states[target_symbol_index];
+    const std::uint64_t target_timestamp =
+        FuturesMarketState::add_latency(timestamp_, state_->trade_latency_ns);
+    const std::optional<std::int64_t> galloping =
+        symbol_state.last_execution_quote_index >= 0
+            ? std::optional<std::int64_t>(symbol_state.last_execution_quote_index)
+            : std::optional<std::int64_t>(
+                  symbol_state.last_quote_index >= 0 ? symbol_state.last_quote_index : 0);
+    const std::int64_t quote_index =
+        symbol_state.quotes->index_before_timestamp(target_timestamp, galloping);
+    if (quote_index < 0) {
+      throw std::out_of_range("no futures quote available at execution timestamp");
+    }
+    symbol_state.last_execution_quote_index = quote_index;
+
+    const void* quote_data =
+        symbol_state.quotes->packed_data_at(static_cast<std::size_t>(quote_index));
+    const double price = side == Side::Buy
+        ? FuturesQuote::ask_price_at(quote_data)
+        : FuturesQuote::bid_price_at(quote_data);
+    if (!std::isfinite(price) || price <= 0.0) {
+      throw std::out_of_range("execution futures quote has no usable price");
+    }
+
+    double& position = state_->holdings[symbol_state.symbol];
+    if (side == Side::Buy) {
+      position += contracts;
+      state_->cash -= contracts * price;
+    } else {
+      position -= contracts;
+      state_->cash += contracts * price;
+    }
+  }
+
+  std::shared_ptr<FuturesMarketState> state_;
+  std::size_t symbol_index_ = 0;
+  std::uint64_t timestamp_ = 0;
+};
+
+class FuturesMarket {
+ public:
+  FuturesMarket(
+      std::filesystem::path database_path,
+      std::string date,
+      const std::vector<std::string>& symbols,
+      std::uint64_t trade_latency_ns,
+      std::string exchange,
+      bool quotes,
+      bool fast)
+      : state_(std::make_shared<FuturesMarketState>(
+            std::move(database_path),
+            std::move(date),
+            std::move(exchange),
+            symbols,
+            trade_latency_ns,
+            quotes,
+            fast)) {}
+
+  FuturesMarket& iter() { return *this; }
+
+  nanobind::tuple next() {
+    while (!state_->event_queue.empty()) {
+      const FuturesMarketState::Event event = state_->event_queue.top();
+      state_->event_queue.pop();
+      auto& symbol_state = state_->symbol_states[event.symbol_index];
+
+      if (event.kind == FuturesMarketState::EventKind::Quote) {
+        if (symbol_state.quote_index >= symbol_state.quotes->size()) {
+          continue;
+        }
+        const auto quote_index = symbol_state.quote_index++;
+        const void* quote_data = symbol_state.quotes->packed_data_at(quote_index);
+        const std::uint64_t timestamp = FuturesQuote::timestamp_at(quote_data);
+        symbol_state.last_quote_index = static_cast<std::int64_t>(quote_index);
+        symbol_state.last_quote = symbol_state.quotes->get_item(
+            static_cast<std::int64_t>(quote_index));
+        state_->last_quotes_by_symbol[symbol_state.symbol_object] =
+            nanobind::cast(*symbol_state.last_quote);
+        push_next_quote(event.symbol_index);
+        if (!state_->emit_quotes) {
+          continue;
+        }
+        current_broker_ = FuturesMarketBroker(state_, event.symbol_index, timestamp);
+        return make_event_tuple(
+            event.symbol_index,
+            timestamp,
+            std::nullopt,
+            symbol_state.last_quote);
+      }
+
+      if (symbol_state.trade_index >= symbol_state.trades->size()) {
+        continue;
+      }
+      const auto trade_index = symbol_state.trade_index++;
+      const void* trade_data = symbol_state.trades->packed_data_at(trade_index);
+      const std::uint64_t timestamp = FuturesTrade::timestamp_at(trade_data);
+      symbol_state.last_trade = symbol_state.trades->get_item(
+          static_cast<std::int64_t>(trade_index));
+      state_->last_trades_by_symbol[symbol_state.symbol_object] =
+          nanobind::cast(*symbol_state.last_trade);
+      push_next_trade(event.symbol_index);
+      current_broker_ = FuturesMarketBroker(state_, event.symbol_index, timestamp);
+      return make_event_tuple(
+          event.symbol_index,
+          timestamp,
+          symbol_state.last_trade,
+          std::nullopt);
+    }
+
+    throw nanobind::stop_iteration();
+  }
+
+  double get_holding(nanobind::handle key) const {
+    if (key.is_none()) {
+      return state_->cash;
+    }
+    const std::string symbol = nanobind::cast<std::string>(key);
+    const auto iter = state_->holdings.find(symbol);
+    if (iter == state_->holdings.end()) {
+      throw std::out_of_range("FuturesMarket holdings key not found");
+    }
+    return iter->second;
+  }
+
+  bool contains(nanobind::handle key) const {
+    if (key.is_none()) {
+      return true;
+    }
+    if (!PyUnicode_Check(key.ptr())) {
+      return false;
+    }
+    const std::string symbol = nanobind::cast<std::string>(key);
+    return state_->holdings.find(symbol) != state_->holdings.end();
+  }
+
+  std::size_t size() const {
+    return state_->holdings.size() + 1;
+  }
+
+  nanobind::list keys() const {
+    nanobind::list result;
+    Py_INCREF(Py_None);
+    result.append(nanobind::borrow<nanobind::object>(Py_None));
+    for (const auto& symbol_state : state_->symbol_states) {
+      result.append(symbol_state.symbol_object);
+    }
+    return result;
+  }
+
+  nanobind::list values() const {
+    nanobind::list result;
+    result.append(state_->cash);
+    for (const auto& symbol_state : state_->symbol_states) {
+      const auto iter = state_->holdings.find(symbol_state.symbol);
+      result.append(iter == state_->holdings.end() ? 0.0 : iter->second);
+    }
+    return result;
+  }
+
+  nanobind::list items() const {
+    nanobind::list result;
+    result.append(nanobind::make_tuple(nanobind::none(), state_->cash));
+    for (const auto& symbol_state : state_->symbol_states) {
+      const auto iter = state_->holdings.find(symbol_state.symbol);
+      result.append(nanobind::make_tuple(
+          symbol_state.symbol_object,
+          iter == state_->holdings.end() ? 0.0 : iter->second));
+    }
+    return result;
+  }
+
+  nanobind::dict as_dict() const {
+    nanobind::dict result;
+    result[nanobind::none()] = state_->cash;
+    for (const auto& symbol_state : state_->symbol_states) {
+      const auto iter = state_->holdings.find(symbol_state.symbol);
+      result[symbol_state.symbol_object] =
+          iter == state_->holdings.end() ? 0.0 : iter->second;
+    }
+    return result;
+  }
+
+  FuturesMarketBroker broker() const {
+    if (!current_broker_) {
+      throw std::out_of_range("FuturesMarket broker is not available before iteration");
+    }
+    return *current_broker_;
+  }
+
+ private:
+  void push_next_trade(std::size_t symbol_index) {
+    auto& symbol_state = state_->symbol_states[symbol_index];
+    if (symbol_state.trade_index < symbol_state.trades->size()) {
+      state_->event_queue.push(FuturesMarketState::Event{
+          FuturesTrade::timestamp_at(
+              symbol_state.trades->packed_data_at(symbol_state.trade_index)),
+          symbol_index,
+          FuturesMarketState::EventKind::Trade});
+    }
+  }
+
+  void push_next_quote(std::size_t symbol_index) {
+    auto& symbol_state = state_->symbol_states[symbol_index];
+    if (symbol_state.quote_index < symbol_state.quotes->size()) {
+      state_->event_queue.push(FuturesMarketState::Event{
+          FuturesQuote::timestamp_at(
+              symbol_state.quotes->packed_data_at(symbol_state.quote_index)),
+          symbol_index,
+          FuturesMarketState::EventKind::Quote});
+    }
+  }
+
+  nanobind::tuple make_event_tuple(
+      std::size_t symbol_index,
+      std::uint64_t timestamp_ns,
+      const std::optional<FuturesTrade>& trade,
+      const std::optional<FuturesQuote>& quote) {
+    nanobind::tuple result = nanobind::steal<nanobind::tuple>(PyTuple_New(7));
+    if (!result.is_valid()) {
+      throw nanobind::python_error();
+    }
+
+    auto& symbol_state = state_->symbol_states[symbol_index];
+    PyTuple_SET_ITEM(
+        result.ptr(),
+        0,
+        nanobind::object(symbol_state.symbol_object).release().ptr());
+
+    PyTuple_SET_ITEM(
+        result.ptr(),
+        1,
+        nanobind::float_(static_cast<double>(timestamp_ns) / 1'000'000'000.0)
+            .release()
+            .ptr());
+
+    if (trade) {
+      PyTuple_SET_ITEM(result.ptr(), 2, nanobind::cast(*trade).release().ptr());
+    } else {
+      Py_INCREF(Py_None);
+      PyTuple_SET_ITEM(result.ptr(), 2, Py_None);
+    }
+
+    if (quote) {
+      PyTuple_SET_ITEM(result.ptr(), 3, nanobind::cast(*quote).release().ptr());
+    } else {
+      Py_INCREF(Py_None);
+      PyTuple_SET_ITEM(result.ptr(), 3, Py_None);
+    }
+
+    PyTuple_SET_ITEM(
+        result.ptr(),
+        4,
+        event_dict_object(state_->last_trades_by_symbol).release().ptr());
+    PyTuple_SET_ITEM(
+        result.ptr(),
+        5,
+        event_dict_object(state_->last_quotes_by_symbol).release().ptr());
+    PyTuple_SET_ITEM(
+        result.ptr(),
+        6,
+        nanobind::cast(*current_broker_).release().ptr());
+    return result;
+  }
+
+  nanobind::object event_dict_object(const nanobind::dict& source) const {
+    if (state_->fast) {
+      return nanobind::object(source);
+    }
+    PyObject* copy = PyDict_Copy(source.ptr());
+    if (copy == nullptr) {
+      throw nanobind::python_error();
+    }
+    return nanobind::steal<nanobind::object>(copy);
+  }
+
+  std::shared_ptr<FuturesMarketState> state_;
+  std::optional<FuturesMarketBroker> current_broker_;
+};
+
+struct OptionMarketState {
+  enum class EventKind : std::uint8_t {
+    Quote = 0,
+    Trade = 1,
+  };
+
+  OptionMarketState(
+      std::filesystem::path database_path,
+      std::string date,
+      std::string root,
+      std::string expiration,
+      std::string right,
+      double strike,
+      std::uint64_t trade_latency_ns,
+      bool emit_quotes,
+      bool fast)
+      : database_path(std::move(database_path)),
+        date(std::move(date)),
+        root(std::move(root)),
+        expiration(std::move(expiration)),
+        right(std::move(right)),
+        strike(strike),
+        strike_millis(detail::strike_millis_from_double(strike)),
+        contract_key(detail::option_contract_key(
+            this->root,
+            this->expiration,
+            this->right,
+            this->strike)),
+        contract_object(nanobind::make_tuple(
+            this->root,
+            this->expiration,
+            this->right,
+            static_cast<double>(this->strike_millis) / 1000.0)),
+        trades(std::make_unique<OptionTradeDatabase>(
+            this->database_path,
+            this->date,
+            this->root,
+            this->expiration,
+            this->right,
+            this->strike)),
+        quotes(std::make_unique<OptionQuoteDatabase>(
+            this->database_path,
+            this->date,
+            this->root,
+            this->expiration,
+            this->right,
+            this->strike)),
+        trade_latency_ns(trade_latency_ns),
+        emit_quotes(emit_quotes),
+        fast(fast) {}
+
+  static std::uint64_t add_latency(
+      std::uint64_t timestamp,
+      std::uint64_t latency) {
+    const std::uint64_t maximum = std::numeric_limits<std::uint64_t>::max();
+    if (maximum - timestamp < latency) {
+      return maximum;
+    }
+    return timestamp + latency;
+  }
+
+  std::filesystem::path database_path;
+  std::string date;
+  std::string root;
+  std::string expiration;
+  std::string right;
+  double strike = 0.0;
+  std::uint32_t strike_millis = 0;
+  std::string contract_key;
+  nanobind::object contract_object;
+  std::unique_ptr<OptionTradeDatabase> trades;
+  std::unique_ptr<OptionQuoteDatabase> quotes;
+  std::size_t trade_index = 0;
+  std::size_t quote_index = 0;
+  std::int64_t last_quote_index = -1;
+  std::int64_t last_execution_quote_index = -1;
+  std::optional<OptionTrade> last_trade;
+  std::optional<OptionQuote> last_quote;
+  std::uint64_t trade_latency_ns = 0;
+  bool emit_quotes = false;
+  bool fast = false;
+  nanobind::dict last_trades_by_contract;
+  nanobind::dict last_quotes_by_contract;
+  double position = 0.0;
+  double cash = 0.0;
+};
+
+class OptionMarketBroker {
+ public:
+  OptionMarketBroker(
+      std::shared_ptr<OptionMarketState> state,
+      std::uint64_t sip_timestamp)
+      : state_(std::move(state)),
+        sip_timestamp_(sip_timestamp) {}
+
+  nanobind::object contract() const {
+    return nanobind::object(state_->contract_object);
+  }
+
+  std::uint64_t sip_timestamp() const { return sip_timestamp_; }
+
+  void buy(double contracts) {
+    execute(contracts, Side::Buy);
+  }
+
+  void sell(double contracts) {
+    execute(contracts, Side::Sell);
+  }
+
+ private:
+  enum class Side {
+    Buy,
+    Sell,
+  };
+
+  void execute(double contracts, Side side) {
+    if (!std::isfinite(contracts) || contracts < 0.0) {
+      throw std::invalid_argument("contracts must be a finite non-negative number");
+    }
+
+    const std::uint64_t target_timestamp =
+        OptionMarketState::add_latency(sip_timestamp_, state_->trade_latency_ns);
+    const std::optional<std::int64_t> galloping =
+        state_->last_execution_quote_index >= 0
+            ? std::optional<std::int64_t>(state_->last_execution_quote_index)
+            : std::optional<std::int64_t>(
+                  state_->last_quote_index >= 0 ? state_->last_quote_index : 0);
+    const std::int64_t quote_index =
+        state_->quotes->index_before_timestamp(target_timestamp, galloping);
+    if (quote_index < 0) {
+      throw std::out_of_range("no option quote available at execution timestamp");
+    }
+    state_->last_execution_quote_index = quote_index;
+
+    const void* quote_data =
+        state_->quotes->packed_data_at(static_cast<std::size_t>(quote_index));
+    const double price = side == Side::Buy
+        ? OptionQuote::ask_price_at(quote_data)
+        : OptionQuote::bid_price_at(quote_data);
+    if (!std::isfinite(price) || price <= 0.0) {
+      throw std::out_of_range("execution option quote has no usable price");
+    }
+
+    if (side == Side::Buy) {
+      state_->position += contracts;
+      state_->cash -= contracts * price;
+    } else {
+      state_->position -= contracts;
+      state_->cash += contracts * price;
+    }
+  }
+
+  std::shared_ptr<OptionMarketState> state_;
+  std::uint64_t sip_timestamp_ = 0;
+};
+
+class OptionMarket {
+ public:
+  OptionMarket(
+      std::filesystem::path database_path,
+      std::string date,
+      std::string root,
+      std::string expiration,
+      std::string right,
+      double strike,
+      std::uint64_t trade_latency_ns,
+      bool quotes,
+      bool fast)
+      : state_(std::make_shared<OptionMarketState>(
+            std::move(database_path),
+            std::move(date),
+            std::move(root),
+            std::move(expiration),
+            std::move(right),
+            strike,
+            trade_latency_ns,
+            quotes,
+            fast)) {}
+
+  OptionMarket& iter() { return *this; }
+
+  nanobind::tuple next() {
+    while (state_->trade_index < state_->trades->size() ||
+           state_->quote_index < state_->quotes->size()) {
+      const bool next_is_quote =
+          state_->quote_index < state_->quotes->size() &&
+          (state_->trade_index >= state_->trades->size() ||
+           OptionQuote::sip_timestamp_at(state_->quotes->packed_data_at(state_->quote_index)) <=
+               OptionTrade::sip_timestamp_at(state_->trades->packed_data_at(state_->trade_index)));
+
+      if (next_is_quote) {
+        const std::size_t quote_index = state_->quote_index++;
+        const void* quote_data = state_->quotes->packed_data_at(quote_index);
+        const std::uint64_t timestamp = OptionQuote::sip_timestamp_at(quote_data);
+        state_->last_quote_index = static_cast<std::int64_t>(quote_index);
+        state_->last_quote =
+            state_->quotes->get_item(static_cast<std::int64_t>(quote_index));
+        state_->last_quotes_by_contract[state_->contract_object] =
+            nanobind::cast(*state_->last_quote);
+        if (!state_->emit_quotes) {
+          continue;
+        }
+        current_broker_ = OptionMarketBroker(state_, timestamp);
+        return make_event_tuple(timestamp, std::nullopt, state_->last_quote);
+      }
+
+      const std::size_t trade_index = state_->trade_index++;
+      const void* trade_data = state_->trades->packed_data_at(trade_index);
+      const std::uint64_t timestamp = OptionTrade::sip_timestamp_at(trade_data);
+      state_->last_trade =
+          state_->trades->get_item(static_cast<std::int64_t>(trade_index));
+      state_->last_trades_by_contract[state_->contract_object] =
+          nanobind::cast(*state_->last_trade);
+      current_broker_ = OptionMarketBroker(state_, timestamp);
+      return make_event_tuple(timestamp, state_->last_trade, std::nullopt);
+    }
+
+    throw nanobind::stop_iteration();
+  }
+
+  double get_holding(nanobind::handle key) const {
+    if (key.is_none()) {
+      return state_->cash;
+    }
+    if (is_contract_key(key)) {
+      return state_->position;
+    }
+    throw std::out_of_range("OptionMarket holdings key not found");
+  }
+
+  bool contains(nanobind::handle key) const {
+    return key.is_none() || is_contract_key(key);
+  }
+
+  std::size_t size() const { return 2; }
+
+  nanobind::list keys() const {
+    nanobind::list result;
+    Py_INCREF(Py_None);
+    result.append(nanobind::borrow<nanobind::object>(Py_None));
+    result.append(state_->contract_object);
+    return result;
+  }
+
+  nanobind::list values() const {
+    nanobind::list result;
+    result.append(state_->cash);
+    result.append(state_->position);
+    return result;
+  }
+
+  nanobind::list items() const {
+    nanobind::list result;
+    result.append(nanobind::make_tuple(nanobind::none(), state_->cash));
+    result.append(nanobind::make_tuple(state_->contract_object, state_->position));
+    return result;
+  }
+
+  nanobind::dict as_dict() const {
+    nanobind::dict result;
+    result[nanobind::none()] = state_->cash;
+    result[state_->contract_object] = state_->position;
+    return result;
+  }
+
+  OptionMarketBroker broker() const {
+    if (!current_broker_) {
+      throw std::out_of_range("OptionMarket broker is not available before iteration");
+    }
+    return *current_broker_;
+  }
+
+ private:
+  bool is_contract_key(nanobind::handle key) const {
+    if (PyUnicode_Check(key.ptr())) {
+      return nanobind::cast<std::string>(key) == state_->contract_key;
+    }
+    int equal = PyObject_RichCompareBool(key.ptr(), state_->contract_object.ptr(), Py_EQ);
+    if (equal < 0) {
+      throw nanobind::python_error();
+    }
+    return equal == 1;
+  }
+
+  nanobind::tuple make_event_tuple(
+      std::uint64_t timestamp_ns,
+      const std::optional<OptionTrade>& trade,
+      const std::optional<OptionQuote>& quote) {
+    nanobind::tuple result = nanobind::steal<nanobind::tuple>(PyTuple_New(7));
+    if (!result.is_valid()) {
+      throw nanobind::python_error();
+    }
+
+    PyTuple_SET_ITEM(
+        result.ptr(),
+        0,
+        nanobind::object(state_->contract_object).release().ptr());
+
+    PyTuple_SET_ITEM(
+        result.ptr(),
+        1,
+        nanobind::float_(static_cast<double>(timestamp_ns) / 1'000'000'000.0)
+            .release()
+            .ptr());
+
+    if (trade) {
+      PyTuple_SET_ITEM(result.ptr(), 2, nanobind::cast(*trade).release().ptr());
+    } else {
+      Py_INCREF(Py_None);
+      PyTuple_SET_ITEM(result.ptr(), 2, Py_None);
+    }
+
+    if (quote) {
+      PyTuple_SET_ITEM(result.ptr(), 3, nanobind::cast(*quote).release().ptr());
+    } else {
+      Py_INCREF(Py_None);
+      PyTuple_SET_ITEM(result.ptr(), 3, Py_None);
+    }
+
+    PyTuple_SET_ITEM(
+        result.ptr(),
+        4,
+        event_dict_object(state_->last_trades_by_contract).release().ptr());
+    PyTuple_SET_ITEM(
+        result.ptr(),
+        5,
+        event_dict_object(state_->last_quotes_by_contract).release().ptr());
+    PyTuple_SET_ITEM(
+        result.ptr(),
+        6,
+        nanobind::cast(*current_broker_).release().ptr());
+    return result;
+  }
+
+  nanobind::object event_dict_object(const nanobind::dict& source) const {
+    if (state_->fast) {
+      return nanobind::object(source);
+    }
+    PyObject* copy = PyDict_Copy(source.ptr());
+    if (copy == nullptr) {
+      throw nanobind::python_error();
+    }
+    return nanobind::steal<nanobind::object>(copy);
+  }
+
+  std::shared_ptr<OptionMarketState> state_;
+  std::optional<OptionMarketBroker> current_broker_;
 };
 
 struct NativeSpecialization {
@@ -5479,6 +8321,38 @@ struct NativeSpecialization {
   }
 };
 
+template <typename Specialization>
+class SharedRawLineRowsIterator {
+ public:
+  explicit SharedRawLineRowsIterator(const std::filesystem::path& path)
+      : reader_(path) {}
+
+  SharedRawLineRowsIterator& iter() { return *this; }
+
+  nanobind::bytes next() {
+    std::string_view line;
+
+    while (reader_.template next_line<Specialization>(line)) {
+      if (is_first_line_) {
+        is_first_line_ = false;
+        continue;
+      }
+
+      if (line.empty()) {
+        continue;
+      }
+
+      return nanobind::bytes(line.data(), line.size());
+    }
+
+    throw nanobind::stop_iteration();
+  }
+
+ private:
+  detail::BufferedGzipLineReader reader_;
+  bool is_first_line_ = true;
+};
+
 template <typename Base, typename Specialization = NativeSpecialization>
 class Implementation : public Base {
  public:
@@ -5487,10 +8361,14 @@ class Implementation : public Base {
   using GzipLineGenerator = std::generator<std::string>;
   using GzipLineIteratorType = decltype(std::declval<GzipLineGenerator&>().begin());
   using RawStockTrade = std::array<std::string, 13>;
+  using RawCryptoTrade = std::array<std::string, 7>;
+  using RawOptionTrade = std::array<std::string, 7>;
+  using RawOptionQuote = std::array<std::string, 9>;
   using RawStockQuote = std::array<std::string, 14>;
   using RawStockAggregate = std::array<std::string, 8>;
   using RawCurrencyQuote = std::array<std::string, 6>;
   using RawCurrencyAggregate = std::array<std::string, 8>;
+  using RawLineRowsIterator = SharedRawLineRowsIterator<Specialization>;
 
   class GzipLinesIterator {
    public:
@@ -5588,6 +8466,276 @@ class Implementation : public Base {
     detail::BufferedGzipLineReader reader_;
     bool is_first_line_ = true;
     detail::BitsetParseCache<96> bitset_cache_;
+  };
+
+  class CryptoTradeStreamState {
+   public:
+    explicit CryptoTradeStreamState(const std::filesystem::path& path)
+        : reader_(path) {}
+
+    bool next_row(CryptoTrade& row) {
+      std::string_view line;
+
+      while (reader_.template next_line<Specialization>(line)) {
+        if (is_first_line_) {
+          is_first_line_ = false;
+          continue;
+        }
+
+        if (line.empty()) {
+          continue;
+        }
+
+        row = Implementation::parse_crypto_trade_row(line, bitset_cache_);
+        return true;
+      }
+
+      return false;
+    }
+
+   private:
+    detail::BufferedGzipLineReader reader_;
+    bool is_first_line_ = true;
+    detail::BitsetParseCache<96> bitset_cache_;
+  };
+
+  class OptionTradeStreamState {
+   public:
+    explicit OptionTradeStreamState(const std::filesystem::path& path)
+        : reader_(path) {}
+
+    bool next_row(OptionTrade& row) {
+      while (true) {
+        if (row_index_ < rows_.size()) {
+          row = std::move(rows_[row_index_++]);
+          return true;
+        }
+
+        if (!load_next_root()) {
+          return false;
+        }
+      }
+    }
+
+   private:
+    bool load_next_root() {
+      rows_.clear();
+      row_index_ = 0;
+
+      OptionTrade first;
+      if (pending_row_) {
+        first = std::move(*pending_row_);
+        pending_row_.reset();
+      } else if (!read_next_parsed_row(first)) {
+        return false;
+      }
+
+      const std::string current_root = first.root;
+      rows_.push_back(std::move(first));
+
+      OptionTrade candidate;
+      while (read_next_parsed_row(candidate)) {
+        if (candidate.root != current_root) {
+          pending_row_ = std::move(candidate);
+          break;
+        }
+        rows_.push_back(std::move(candidate));
+      }
+
+      std::stable_sort(
+          rows_.begin(),
+          rows_.end(),
+          [](const OptionTrade& lhs, const OptionTrade& rhs) {
+            if (lhs.sip_timestamp != rhs.sip_timestamp) {
+              return lhs.sip_timestamp < rhs.sip_timestamp;
+            }
+            if (lhs.expiration != rhs.expiration) {
+              return lhs.expiration < rhs.expiration;
+            }
+            if (lhs.right != rhs.right) {
+              return lhs.right < rhs.right;
+            }
+            return lhs.strike_millis < rhs.strike_millis;
+          });
+      return true;
+    }
+
+    bool read_next_parsed_row(OptionTrade& row) {
+      std::string_view line;
+
+      while (reader_.template next_line<Specialization>(line)) {
+        if (is_first_line_) {
+          is_first_line_ = false;
+          continue;
+        }
+
+        if (line.empty()) {
+          continue;
+        }
+
+        row = Implementation::parse_option_trade_row(line);
+        return true;
+      }
+
+      return false;
+    }
+
+    detail::BufferedGzipLineReader reader_;
+    bool is_first_line_ = true;
+    std::optional<OptionTrade> pending_row_;
+    std::vector<OptionTrade> rows_;
+    std::size_t row_index_ = 0;
+  };
+
+  class OptionQuoteStreamState {
+   public:
+    explicit OptionQuoteStreamState(const std::filesystem::path& path)
+        : reader_(path) {}
+
+    bool next_row(OptionQuote& row) {
+      while (true) {
+        if (row_index_ < rows_.size()) {
+          row = std::move(rows_[row_index_++]);
+          return true;
+        }
+
+        if (!load_next_root()) {
+          return false;
+        }
+      }
+    }
+
+   private:
+    bool load_next_root() {
+      rows_.clear();
+      row_index_ = 0;
+
+      OptionQuote first;
+      if (pending_row_) {
+        first = std::move(*pending_row_);
+        pending_row_.reset();
+      } else if (!read_next_parsed_row(first)) {
+        return false;
+      }
+
+      const std::string current_root = first.root;
+      rows_.push_back(std::move(first));
+
+      OptionQuote candidate;
+      while (read_next_parsed_row(candidate)) {
+        if (candidate.root != current_root) {
+          pending_row_ = std::move(candidate);
+          break;
+        }
+        rows_.push_back(std::move(candidate));
+      }
+
+      std::stable_sort(
+          rows_.begin(),
+          rows_.end(),
+          [](const OptionQuote& lhs, const OptionQuote& rhs) {
+            if (lhs.sip_timestamp != rhs.sip_timestamp) {
+              return lhs.sip_timestamp < rhs.sip_timestamp;
+            }
+            if (lhs.expiration != rhs.expiration) {
+              return lhs.expiration < rhs.expiration;
+            }
+            if (lhs.right != rhs.right) {
+              return lhs.right < rhs.right;
+            }
+            if (lhs.strike_millis != rhs.strike_millis) {
+              return lhs.strike_millis < rhs.strike_millis;
+            }
+            return lhs.sequence_number < rhs.sequence_number;
+          });
+      return true;
+    }
+
+    bool read_next_parsed_row(OptionQuote& row) {
+      std::string_view line;
+
+      while (reader_.template next_line<Specialization>(line)) {
+        if (is_first_line_) {
+          is_first_line_ = false;
+          continue;
+        }
+
+        if (line.empty()) {
+          continue;
+        }
+
+        row = Implementation::parse_option_quote_row(line);
+        return true;
+      }
+
+      return false;
+    }
+
+    detail::BufferedGzipLineReader reader_;
+    bool is_first_line_ = true;
+    std::optional<OptionQuote> pending_row_;
+    std::vector<OptionQuote> rows_;
+    std::size_t row_index_ = 0;
+  };
+
+  class FuturesTradeStreamState {
+   public:
+    explicit FuturesTradeStreamState(const std::filesystem::path& path)
+        : reader_(path) {}
+
+    bool next_row(FuturesTrade& row) {
+      std::string_view line;
+
+      while (reader_.template next_line<Specialization>(line)) {
+        if (is_first_line_) {
+          is_first_line_ = false;
+          continue;
+        }
+
+        if (line.empty()) {
+          continue;
+        }
+
+        row = Implementation::parse_futures_trade_row(line);
+        return true;
+      }
+
+      return false;
+    }
+
+   private:
+    detail::BufferedGzipLineReader reader_;
+    bool is_first_line_ = true;
+  };
+
+  class FuturesQuoteStreamState {
+   public:
+    explicit FuturesQuoteStreamState(const std::filesystem::path& path)
+        : reader_(path) {}
+
+    bool next_row(FuturesQuote& row) {
+      std::string_view line;
+
+      while (reader_.template next_line<Specialization>(line)) {
+        if (is_first_line_) {
+          is_first_line_ = false;
+          continue;
+        }
+
+        if (line.empty()) {
+          continue;
+        }
+
+        row = Implementation::parse_futures_quote_row(line);
+        return true;
+      }
+
+      return false;
+    }
+
+   private:
+    detail::BufferedGzipLineReader reader_;
+    bool is_first_line_ = true;
   };
 
   class CurrencyQuoteStreamState {
@@ -5738,6 +8886,222 @@ class Implementation : public Base {
         }
 
         row = Implementation::parse_raw_trade_tuple(
+            line,
+            intern_cache_);
+        return true;
+      }
+
+      return false;
+    }
+
+   private:
+    detail::BufferedGzipLineReader reader_;
+    bool is_first_line_ = true;
+    detail::RawBytesInternCache intern_cache_;
+  };
+
+  class RawCryptoTradeStreamState {
+   public:
+    explicit RawCryptoTradeStreamState(const std::filesystem::path& path)
+        : reader_(path) {}
+
+    RawCryptoTradeStreamState(const RawCryptoTradeStreamState&) = delete;
+    RawCryptoTradeStreamState& operator=(const RawCryptoTradeStreamState&) = delete;
+
+    RawCryptoTradeStreamState(RawCryptoTradeStreamState&& other) noexcept
+        : reader_(std::move(other.reader_)),
+          is_first_line_(other.is_first_line_),
+          intern_cache_(std::move(other.intern_cache_)) {}
+
+    RawCryptoTradeStreamState& operator=(RawCryptoTradeStreamState&& other) noexcept {
+      if (this == &other) {
+        return *this;
+      }
+
+      reader_ = std::move(other.reader_);
+      is_first_line_ = other.is_first_line_;
+      intern_cache_ = std::move(other.intern_cache_);
+      return *this;
+    }
+
+    bool next_row(RawCryptoTrade& row) {
+      std::string_view line;
+
+      while (reader_.template next_line<Specialization>(line)) {
+        if (is_first_line_) {
+          is_first_line_ = false;
+          continue;
+        }
+
+        if (line.empty()) {
+          continue;
+        }
+
+        row = Implementation::parse_raw_crypto_trade_row(line);
+        return true;
+      }
+
+      return false;
+    }
+
+    bool next_tuple(nanobind::tuple& row) {
+      std::string_view line;
+
+      while (reader_.template next_line<Specialization>(line)) {
+        if (is_first_line_) {
+          is_first_line_ = false;
+          continue;
+        }
+
+        if (line.empty()) {
+          continue;
+        }
+
+        row = Implementation::parse_raw_crypto_trade_tuple(
+            line,
+            intern_cache_);
+        return true;
+      }
+
+      return false;
+    }
+
+   private:
+    detail::BufferedGzipLineReader reader_;
+    bool is_first_line_ = true;
+    detail::RawBytesInternCache intern_cache_;
+  };
+
+  class RawOptionTradeStreamState {
+   public:
+    explicit RawOptionTradeStreamState(const std::filesystem::path& path)
+        : reader_(path) {}
+
+    RawOptionTradeStreamState(const RawOptionTradeStreamState&) = delete;
+    RawOptionTradeStreamState& operator=(const RawOptionTradeStreamState&) = delete;
+
+    RawOptionTradeStreamState(RawOptionTradeStreamState&& other) noexcept
+        : reader_(std::move(other.reader_)),
+          is_first_line_(other.is_first_line_),
+          intern_cache_(std::move(other.intern_cache_)) {}
+
+    RawOptionTradeStreamState& operator=(RawOptionTradeStreamState&& other) noexcept {
+      if (this == &other) {
+        return *this;
+      }
+
+      reader_ = std::move(other.reader_);
+      is_first_line_ = other.is_first_line_;
+      intern_cache_ = std::move(other.intern_cache_);
+      return *this;
+    }
+
+    bool next_row(RawOptionTrade& row) {
+      std::string_view line;
+
+      while (reader_.template next_line<Specialization>(line)) {
+        if (is_first_line_) {
+          is_first_line_ = false;
+          continue;
+        }
+
+        if (line.empty()) {
+          continue;
+        }
+
+        row = Implementation::parse_raw_option_trade_row(line);
+        return true;
+      }
+
+      return false;
+    }
+
+    bool next_tuple(nanobind::tuple& row) {
+      std::string_view line;
+
+      while (reader_.template next_line<Specialization>(line)) {
+        if (is_first_line_) {
+          is_first_line_ = false;
+          continue;
+        }
+
+        if (line.empty()) {
+          continue;
+        }
+
+        row = Implementation::parse_raw_option_trade_tuple(
+            line,
+            intern_cache_);
+        return true;
+      }
+
+      return false;
+    }
+
+   private:
+    detail::BufferedGzipLineReader reader_;
+    bool is_first_line_ = true;
+    detail::RawBytesInternCache intern_cache_;
+  };
+
+  class RawOptionQuoteStreamState {
+   public:
+    explicit RawOptionQuoteStreamState(const std::filesystem::path& path)
+        : reader_(path) {}
+
+    RawOptionQuoteStreamState(const RawOptionQuoteStreamState&) = delete;
+    RawOptionQuoteStreamState& operator=(const RawOptionQuoteStreamState&) = delete;
+
+    RawOptionQuoteStreamState(RawOptionQuoteStreamState&& other) noexcept
+        : reader_(std::move(other.reader_)),
+          is_first_line_(other.is_first_line_),
+          intern_cache_(std::move(other.intern_cache_)) {}
+
+    RawOptionQuoteStreamState& operator=(RawOptionQuoteStreamState&& other) noexcept {
+      if (this == &other) {
+        return *this;
+      }
+
+      reader_ = std::move(other.reader_);
+      is_first_line_ = other.is_first_line_;
+      intern_cache_ = std::move(other.intern_cache_);
+      return *this;
+    }
+
+    bool next_row(RawOptionQuote& row) {
+      std::string_view line;
+
+      while (reader_.template next_line<Specialization>(line)) {
+        if (is_first_line_) {
+          is_first_line_ = false;
+          continue;
+        }
+
+        if (line.empty()) {
+          continue;
+        }
+
+        row = Implementation::parse_raw_option_quote_row(line);
+        return true;
+      }
+
+      return false;
+    }
+
+    bool next_tuple(nanobind::tuple& row) {
+      std::string_view line;
+
+      while (reader_.template next_line<Specialization>(line)) {
+        if (is_first_line_) {
+          is_first_line_ = false;
+          continue;
+        }
+
+        if (line.empty()) {
+          continue;
+        }
+
+        row = Implementation::parse_raw_option_quote_tuple(
             line,
             intern_cache_);
         return true;
@@ -6034,37 +9398,6 @@ class Implementation : public Base {
     detail::RawBytesInternCache intern_cache_;
   };
 
-  class RawLineRowsIterator {
-   public:
-    explicit RawLineRowsIterator(const std::filesystem::path& path)
-        : reader_(path) {}
-
-    RawLineRowsIterator& iter() { return *this; }
-
-    nanobind::bytes next() {
-      std::string_view line;
-
-      while (reader_.template next_line<Specialization>(line)) {
-        if (is_first_line_) {
-          is_first_line_ = false;
-          continue;
-        }
-
-        if (line.empty()) {
-          continue;
-        }
-
-        return nanobind::bytes(line.data(), line.size());
-      }
-
-      throw nanobind::stop_iteration();
-    }
-
-   private:
-    detail::BufferedGzipLineReader reader_;
-    bool is_first_line_ = true;
-  };
-
   class StockTradeRowsIterator {
    public:
     explicit StockTradeRowsIterator(
@@ -6102,6 +9435,98 @@ class Implementation : public Base {
     std::size_t row_index_ = 0;
   };
 
+  class CryptoTradeRowsIterator {
+   public:
+    explicit CryptoTradeRowsIterator(
+        const std::filesystem::path& path,
+        bool sort_by_participant_timestamp = false) {
+      if (sort_by_participant_timestamp) {
+        detail::BitsetParseCache<96> bitset_cache;
+        rows_ = load_rows<CryptoTrade>(
+            path,
+            [&bitset_cache](std::string_view line) {
+              return Implementation::parse_crypto_trade_row(line, bitset_cache);
+            });
+        std::stable_sort(
+            rows_.begin(),
+            rows_.end(),
+            [](const CryptoTrade& lhs, const CryptoTrade& rhs) {
+              if (lhs.participant_timestamp != rhs.participant_timestamp) {
+                return lhs.participant_timestamp < rhs.participant_timestamp;
+              }
+              if (lhs.ticker != rhs.ticker) {
+                return lhs.ticker < rhs.ticker;
+              }
+              return lhs.id < rhs.id;
+            });
+      } else {
+        stream_state_.emplace(path);
+      }
+    }
+
+    CryptoTradeRowsIterator& iter() { return *this; }
+
+    CryptoTrade next() {
+      return Implementation::template next_parsed_row<CryptoTrade, CryptoTradeStreamState>(
+          stream_state_,
+          rows_,
+          row_index_);
+    }
+
+   private:
+    std::optional<CryptoTradeStreamState> stream_state_;
+    std::vector<CryptoTrade> rows_;
+    std::size_t row_index_ = 0;
+  };
+
+  class OptionTradeRowsIterator {
+   public:
+    explicit OptionTradeRowsIterator(
+        const std::filesystem::path& path,
+        bool sort_by_sip_timestamp = false) {
+      static_cast<void>(sort_by_sip_timestamp);
+      stream_state_.emplace(path);
+    }
+
+    OptionTradeRowsIterator& iter() { return *this; }
+
+    OptionTrade next() {
+      return Implementation::template next_parsed_row<OptionTrade, OptionTradeStreamState>(
+          stream_state_,
+          rows_,
+          row_index_);
+    }
+
+   private:
+    std::optional<OptionTradeStreamState> stream_state_;
+    std::vector<OptionTrade> rows_;
+    std::size_t row_index_ = 0;
+  };
+
+  class OptionQuoteRowsIterator {
+   public:
+    explicit OptionQuoteRowsIterator(
+        const std::filesystem::path& path,
+        bool sort_by_sip_timestamp = false) {
+      static_cast<void>(sort_by_sip_timestamp);
+      stream_state_.emplace(path);
+    }
+
+    OptionQuoteRowsIterator& iter() { return *this; }
+
+    OptionQuote next() {
+      return Implementation::template next_parsed_row<OptionQuote, OptionQuoteStreamState>(
+          stream_state_,
+          rows_,
+          row_index_);
+    }
+
+   private:
+    std::optional<OptionQuoteStreamState> stream_state_;
+    std::vector<OptionQuote> rows_;
+    std::size_t row_index_ = 0;
+  };
+
   class StockQuoteRowsIterator {
    public:
     explicit StockQuoteRowsIterator(
@@ -6136,6 +9561,48 @@ class Implementation : public Base {
    private:
     std::optional<StockQuoteStreamState> stream_state_;
     std::vector<StockQuote> rows_;
+    std::size_t row_index_ = 0;
+  };
+
+  class FuturesTradeRowsIterator {
+   public:
+    explicit FuturesTradeRowsIterator(const std::filesystem::path& path) {
+      stream_state_.emplace(path);
+    }
+
+    FuturesTradeRowsIterator& iter() { return *this; }
+
+    FuturesTrade next() {
+      return Implementation::template next_parsed_row<FuturesTrade, FuturesTradeStreamState>(
+          stream_state_,
+          rows_,
+          row_index_);
+    }
+
+   private:
+    std::optional<FuturesTradeStreamState> stream_state_;
+    std::vector<FuturesTrade> rows_;
+    std::size_t row_index_ = 0;
+  };
+
+  class FuturesQuoteRowsIterator {
+   public:
+    explicit FuturesQuoteRowsIterator(const std::filesystem::path& path) {
+      stream_state_.emplace(path);
+    }
+
+    FuturesQuoteRowsIterator& iter() { return *this; }
+
+    FuturesQuote next() {
+      return Implementation::template next_parsed_row<FuturesQuote, FuturesQuoteStreamState>(
+          stream_state_,
+          rows_,
+          row_index_);
+    }
+
+   private:
+    std::optional<FuturesQuoteStreamState> stream_state_;
+    std::vector<FuturesQuote> rows_;
     std::size_t row_index_ = 0;
   };
 
@@ -6311,6 +9778,212 @@ class Implementation : public Base {
 
     std::optional<RawStockTradeStreamState> stream_state_;
     std::vector<RawStockTrade> rows_;
+    std::size_t row_index_ = 0;
+    detail::RawBytesInternCache intern_cache_;
+  };
+
+  class RawCryptoTradeRowsIterator {
+   public:
+    explicit RawCryptoTradeRowsIterator(
+        const std::filesystem::path& path,
+        bool sort_by_participant_timestamp = false) {
+      if (sort_by_participant_timestamp) {
+        rows_ = load_rows<RawCryptoTrade>(
+            path,
+            &Implementation::parse_raw_crypto_trade_row);
+        std::stable_sort(
+            rows_.begin(),
+            rows_.end(),
+            [](const RawCryptoTrade& lhs, const RawCryptoTrade& rhs) {
+              const auto lhs_participant_timestamp =
+                  Specialization::template parse_integer<std::uint64_t>(
+                      lhs[4],
+                      "participant_timestamp");
+              const auto rhs_participant_timestamp =
+                  Specialization::template parse_integer<std::uint64_t>(
+                      rhs[4],
+                      "participant_timestamp");
+              if (lhs_participant_timestamp != rhs_participant_timestamp) {
+                return lhs_participant_timestamp < rhs_participant_timestamp;
+              }
+              if (lhs[0] != rhs[0]) {
+                return lhs[0] < rhs[0];
+              }
+              return Specialization::template parse_integer<std::uint64_t>(lhs[3], "id") <
+                  Specialization::template parse_integer<std::uint64_t>(rhs[3], "id");
+            });
+      } else {
+        stream_state_.emplace(path);
+      }
+    }
+
+    RawCryptoTradeRowsIterator(const RawCryptoTradeRowsIterator&) = delete;
+    RawCryptoTradeRowsIterator& operator=(const RawCryptoTradeRowsIterator&) = delete;
+
+    RawCryptoTradeRowsIterator(RawCryptoTradeRowsIterator&& other) noexcept
+        : stream_state_(std::move(other.stream_state_)),
+          rows_(std::move(other.rows_)),
+          row_index_(other.row_index_),
+          intern_cache_(std::move(other.intern_cache_)) {}
+
+    RawCryptoTradeRowsIterator& operator=(RawCryptoTradeRowsIterator&& other) noexcept {
+      if (this == &other) {
+        return *this;
+      }
+
+      stream_state_ = std::move(other.stream_state_);
+      rows_ = std::move(other.rows_);
+      row_index_ = other.row_index_;
+      intern_cache_ = std::move(other.intern_cache_);
+      return *this;
+    }
+
+    RawCryptoTradeRowsIterator& iter() { return *this; }
+
+    nanobind::tuple next() {
+      if (stream_state_) {
+        nanobind::tuple row;
+        if (stream_state_->next_tuple(row)) {
+          return row;
+        }
+
+        stream_state_.reset();
+        throw nanobind::stop_iteration();
+      }
+
+      return Implementation::raw_crypto_trade_array_to_tuple(rows_next(), intern_cache_);
+    }
+
+   private:
+    RawCryptoTrade rows_next() {
+      if (row_index_ >= rows_.size()) {
+        throw nanobind::stop_iteration();
+      }
+      return std::move(rows_[row_index_++]);
+    }
+
+    std::optional<RawCryptoTradeStreamState> stream_state_;
+    std::vector<RawCryptoTrade> rows_;
+    std::size_t row_index_ = 0;
+    detail::RawBytesInternCache intern_cache_;
+  };
+
+  class RawOptionTradeRowsIterator {
+   public:
+    explicit RawOptionTradeRowsIterator(
+        const std::filesystem::path& path,
+        bool sort_by_sip_timestamp = false) {
+      static_cast<void>(sort_by_sip_timestamp);
+      stream_state_.emplace(path);
+    }
+
+    RawOptionTradeRowsIterator(const RawOptionTradeRowsIterator&) = delete;
+    RawOptionTradeRowsIterator& operator=(const RawOptionTradeRowsIterator&) = delete;
+
+    RawOptionTradeRowsIterator(RawOptionTradeRowsIterator&& other) noexcept
+        : stream_state_(std::move(other.stream_state_)),
+          rows_(std::move(other.rows_)),
+          row_index_(other.row_index_),
+          intern_cache_(std::move(other.intern_cache_)) {}
+
+    RawOptionTradeRowsIterator& operator=(RawOptionTradeRowsIterator&& other) noexcept {
+      if (this == &other) {
+        return *this;
+      }
+
+      stream_state_ = std::move(other.stream_state_);
+      rows_ = std::move(other.rows_);
+      row_index_ = other.row_index_;
+      intern_cache_ = std::move(other.intern_cache_);
+      return *this;
+    }
+
+    RawOptionTradeRowsIterator& iter() { return *this; }
+
+    nanobind::tuple next() {
+      if (stream_state_) {
+        nanobind::tuple row;
+        if (stream_state_->next_tuple(row)) {
+          return row;
+        }
+
+        stream_state_.reset();
+        throw nanobind::stop_iteration();
+      }
+
+      return Implementation::raw_option_trade_array_to_tuple(rows_next(), intern_cache_);
+    }
+
+   private:
+    RawOptionTrade rows_next() {
+      if (row_index_ >= rows_.size()) {
+        throw nanobind::stop_iteration();
+      }
+      return std::move(rows_[row_index_++]);
+    }
+
+    std::optional<RawOptionTradeStreamState> stream_state_;
+    std::vector<RawOptionTrade> rows_;
+    std::size_t row_index_ = 0;
+    detail::RawBytesInternCache intern_cache_;
+  };
+
+  class RawOptionQuoteRowsIterator {
+   public:
+    explicit RawOptionQuoteRowsIterator(
+        const std::filesystem::path& path,
+        bool sort_by_sip_timestamp = false) {
+      static_cast<void>(sort_by_sip_timestamp);
+      stream_state_.emplace(path);
+    }
+
+    RawOptionQuoteRowsIterator(const RawOptionQuoteRowsIterator&) = delete;
+    RawOptionQuoteRowsIterator& operator=(const RawOptionQuoteRowsIterator&) = delete;
+
+    RawOptionQuoteRowsIterator(RawOptionQuoteRowsIterator&& other) noexcept
+        : stream_state_(std::move(other.stream_state_)),
+          rows_(std::move(other.rows_)),
+          row_index_(other.row_index_),
+          intern_cache_(std::move(other.intern_cache_)) {}
+
+    RawOptionQuoteRowsIterator& operator=(RawOptionQuoteRowsIterator&& other) noexcept {
+      if (this == &other) {
+        return *this;
+      }
+
+      stream_state_ = std::move(other.stream_state_);
+      rows_ = std::move(other.rows_);
+      row_index_ = other.row_index_;
+      intern_cache_ = std::move(other.intern_cache_);
+      return *this;
+    }
+
+    RawOptionQuoteRowsIterator& iter() { return *this; }
+
+    nanobind::tuple next() {
+      if (stream_state_) {
+        nanobind::tuple row;
+        if (stream_state_->next_tuple(row)) {
+          return row;
+        }
+
+        stream_state_.reset();
+        throw nanobind::stop_iteration();
+      }
+
+      return Implementation::raw_option_quote_array_to_tuple(rows_next(), intern_cache_);
+    }
+
+   private:
+    RawOptionQuote rows_next() {
+      if (row_index_ >= rows_.size()) {
+        throw nanobind::stop_iteration();
+      }
+      return std::move(rows_[row_index_++]);
+    }
+
+    std::optional<RawOptionQuoteStreamState> stream_state_;
+    std::vector<RawOptionQuote> rows_;
     std::size_t row_index_ = 0;
     detail::RawBytesInternCache intern_cache_;
   };
@@ -6711,6 +10384,42 @@ class Implementation : public Base {
           force);
     }
 
+    if (record_type == "crypto_trade") {
+      detail::BitsetParseCache<96> bitset_cache;
+      return build_parsed_database<CryptoTrade>(
+          input_path,
+          database_path,
+          record_type,
+          [&bitset_cache](std::string_view line) {
+            return Implementation::parse_crypto_trade_row(line, bitset_cache);
+          },
+          [](const CryptoTrade& row) { return row.participant_timestamp; },
+          force,
+          true);
+    }
+
+    if (record_type == "option_trade") {
+      return build_option_database<OptionTrade>(
+          input_path,
+          database_path,
+          record_type,
+          [](std::string_view line) {
+            return Implementation::parse_option_trade_row(line);
+          },
+          force);
+    }
+
+    if (record_type == "option_quote") {
+      return build_option_database<OptionQuote>(
+          input_path,
+          database_path,
+          record_type,
+          [](std::string_view line) {
+            return Implementation::parse_option_quote_row(line);
+          },
+          force);
+    }
+
     if (record_type == "stock_quote") {
       detail::BitsetParseCache<96> bitset_cache;
       return build_parsed_database<StockQuote>(
@@ -6733,6 +10442,38 @@ class Implementation : public Base {
             return Implementation::parse_currency_quote_row(line);
           },
           [](const CurrencyQuote& row) { return row.participant_timestamp; },
+          force);
+    }
+
+    if (record_type == "future_trade" ||
+        record_type == "future_cbot_trade" ||
+        record_type == "future_cme_trade" ||
+        record_type == "future_comex_trade" ||
+        record_type == "future_nymex_trade") {
+      return build_parsed_database<FuturesTrade>(
+          input_path,
+          database_path,
+          record_type,
+          [](std::string_view line) {
+            return Implementation::parse_futures_trade_row(line);
+          },
+          [](const FuturesTrade& row) { return row.timestamp; },
+          force);
+    }
+
+    if (record_type == "future_quote" ||
+        record_type == "future_cbot_quote" ||
+        record_type == "future_cme_quote" ||
+        record_type == "future_comex_quote" ||
+        record_type == "future_nymex_quote") {
+      return build_parsed_database<FuturesQuote>(
+          input_path,
+          database_path,
+          record_type,
+          [](std::string_view line) {
+            return Implementation::parse_futures_quote_row(line);
+          },
+          [](const FuturesQuote& row) { return row.timestamp; },
           force);
     }
 
@@ -6770,18 +10511,23 @@ class Implementation : public Base {
       std::string_view record_type,
       ParseRowFn parse_row,
       DateTimestampFn date_timestamp,
-      bool force) {
+      bool force,
+      bool validate_ticker_timestamp_order = false) {
     std::filesystem::create_directories(database_path);
 
     detail::BufferedGzipLineReader reader(input_path);
     detail::BinaryRecordWriter writer;
     std::string_view line;
-    std::filesystem::path output_root;
+    const std::filesystem::path output_root =
+        database_path / std::string(record_type) /
+        detail::date_directory_name_from_filename(input_path);
     std::string current_ticker;
     bool is_first_line = true;
-    bool has_output_root = false;
     bool has_current_output = false;
     bool skip_current_output = false;
+    bool has_previous_row = false;
+    std::string previous_ticker;
+    std::uint64_t previous_timestamp = 0;
     std::uint64_t rows_written = 0;
 
     while (reader.template next_line<Specialization>(line)) {
@@ -6795,12 +10541,31 @@ class Implementation : public Base {
       }
 
       const RowType row = parse_row(line);
-      if (!has_output_root) {
-        output_root = database_path / std::string(record_type) /
-            detail::utc_date_directory_name(date_timestamp(row));
-        std::filesystem::create_directories(output_root);
-        has_output_root = true;
+      const std::uint64_t row_timestamp = date_timestamp(row);
+      if (validate_ticker_timestamp_order) {
+        if (has_previous_row) {
+          if (row.ticker < previous_ticker) {
+            std::ostringstream message;
+            message << "input rows are not ordered by ticker,participant_timestamp: "
+                    << "ticker '" << row.ticker << "' appeared after ticker '"
+                    << previous_ticker << "'";
+            throw std::invalid_argument(message.str());
+          }
+          if (row.ticker == previous_ticker && row_timestamp < previous_timestamp) {
+            std::ostringstream message;
+            message << "input rows are not ordered by ticker,participant_timestamp: "
+                    << "participant_timestamp " << row_timestamp
+                    << " appeared after " << previous_timestamp
+                    << " for ticker '" << row.ticker << "'";
+            throw std::invalid_argument(message.str());
+          }
+        }
+        previous_ticker = row.ticker;
+        previous_timestamp = row_timestamp;
+        has_previous_row = true;
       }
+
+      std::filesystem::create_directories(output_root);
 
       if (!has_current_output || row.ticker != current_ticker) {
         current_ticker = row.ticker;
@@ -6824,6 +10589,100 @@ class Implementation : public Base {
     }
 
     writer.close();
+    return rows_written;
+  }
+
+  template <typename RowType, typename ParseRowFn>
+  static std::uint64_t build_option_database(
+      const std::filesystem::path& input_path,
+      const std::filesystem::path& database_path,
+      std::string_view record_type,
+      ParseRowFn parse_row,
+      bool force) {
+    std::filesystem::create_directories(database_path);
+
+    detail::BufferedGzipLineReader reader(input_path);
+    std::string_view line;
+    const std::filesystem::path output_root =
+        database_path / std::string(record_type) /
+        detail::date_directory_name_from_filename(input_path);
+    bool is_first_line = true;
+    std::string current_root;
+    std::unordered_map<std::string, std::vector<RowType>> rows_by_key;
+    std::vector<std::string> key_order;
+    std::uint64_t rows_written = 0;
+
+    const auto flush_root = [&]() {
+      if (rows_by_key.empty()) {
+        return;
+      }
+
+      std::filesystem::create_directories(output_root);
+
+      for (const std::string& row_key : key_order) {
+        auto found = rows_by_key.find(row_key);
+        if (found == rows_by_key.end()) {
+          continue;
+        }
+
+        auto& rows = found->second;
+        std::stable_sort(
+            rows.begin(),
+            rows.end(),
+            [](const RowType& lhs, const RowType& rhs) {
+              return lhs.sip_timestamp < rhs.sip_timestamp;
+            });
+
+        const auto output_path = output_root / row_key;
+        std::filesystem::create_directories(output_path.parent_path());
+        if (!force && std::filesystem::exists(output_path)) {
+          continue;
+        }
+
+        detail::BinaryRecordWriter writer;
+        writer.open(output_path);
+        for (const RowType& row : rows) {
+          writer.write(row.pack());
+          ++rows_written;
+        }
+        writer.close();
+      }
+
+      rows_by_key.clear();
+      key_order.clear();
+    };
+
+    while (reader.template next_line<Specialization>(line)) {
+      if (is_first_line) {
+        is_first_line = false;
+        continue;
+      }
+
+      if (line.empty()) {
+        continue;
+      }
+
+      RowType row = parse_row(line);
+      if (!current_root.empty() && row.root != current_root) {
+        flush_root();
+      }
+      if (current_root.empty() || rows_by_key.empty()) {
+        current_root = row.root;
+      }
+
+      const std::string row_key = detail::option_contract_key(
+          row.root,
+          row.expiration,
+          row.right,
+          row.strike_millis);
+      auto [found, inserted] = rows_by_key.try_emplace(row_key);
+      if (inserted) {
+        key_order.push_back(row_key);
+      }
+      found->second.push_back(std::move(row));
+    }
+
+    flush_root();
     return rows_written;
   }
 
@@ -7019,6 +10878,299 @@ class Implementation : public Base {
     return result;
   }
 
+  static CryptoTrade parse_crypto_trade_row(
+      std::string_view line,
+      detail::BitsetParseCache<96>& bitset_cache) {
+    std::size_t cursor = 0;
+    CryptoTrade result;
+
+    result.ticker.assign(next_raw_unquoted_field<true>(line, cursor));
+    result.conditions = bitset_cache.get_or_parse(
+        next_raw_unquoted_field<true>(line, cursor),
+        "conditions");
+    result.exchange =
+        Specialization::template parse_integer<std::uint16_t>(
+            next_raw_unquoted_field<true>(line, cursor),
+            "exchange");
+    result.id =
+        Specialization::template parse_integer<std::uint64_t>(
+            next_raw_unquoted_field<true>(line, cursor),
+            "id");
+    result.participant_timestamp =
+        Specialization::template parse_integer<std::uint64_t>(
+            next_raw_unquoted_field<true>(line, cursor),
+            "participant_timestamp");
+    result.price = Specialization::parse_double(
+        next_raw_unquoted_field<true>(line, cursor),
+        "price");
+    result.size = Specialization::parse_double(
+        next_raw_unquoted_field<false>(line, cursor),
+        "size");
+
+    finish_raw_row(line, cursor);
+    return result;
+  }
+
+  static RawCryptoTrade parse_raw_crypto_trade_row(std::string_view line) {
+    std::size_t cursor = 0;
+    RawCryptoTrade result;
+    result[0].assign(next_raw_unquoted_field<true>(line, cursor));
+    result[1].assign(next_raw_unquoted_field<true>(line, cursor));
+    result[2].assign(next_raw_unquoted_field<true>(line, cursor));
+    result[3].assign(next_raw_unquoted_field<true>(line, cursor));
+    result[4].assign(next_raw_unquoted_field<true>(line, cursor));
+    result[5].assign(next_raw_unquoted_field<true>(line, cursor));
+    result[6].assign(next_raw_unquoted_field<false>(line, cursor));
+    finish_raw_row(line, cursor);
+    return result;
+  }
+
+  static nanobind::tuple parse_raw_crypto_trade_tuple(
+      std::string_view line,
+      detail::RawBytesInternCache& intern_cache) {
+    std::size_t cursor = 0;
+    nanobind::tuple result = make_raw_tuple<7>();
+
+    set_raw_ticker_field(
+        result,
+        next_raw_unquoted_field<true>(line, cursor),
+        intern_cache);
+    set_raw_small_uint_field(
+        result,
+        1,
+        next_raw_unquoted_field<true>(line, cursor),
+        intern_cache);
+    set_raw_small_uint_field(
+        result,
+        2,
+        next_raw_unquoted_field<true>(line, cursor),
+        intern_cache);
+    set_raw_bytes_field(result, 3, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_bytes_field(result, 4, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_bytes_field(result, 5, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_bytes_field(result, 6, next_raw_unquoted_field<false>(line, cursor));
+
+    finish_raw_row(line, cursor);
+    return result;
+  }
+
+  static nanobind::tuple raw_crypto_trade_array_to_tuple(
+      const RawCryptoTrade& fields,
+      detail::RawBytesInternCache& intern_cache) {
+    nanobind::tuple result = make_raw_tuple<7>();
+    set_raw_ticker_field(result, fields[0], intern_cache);
+    set_raw_small_uint_field(result, 1, fields[1], intern_cache);
+    set_raw_small_uint_field(result, 2, fields[2], intern_cache);
+    set_raw_bytes_field(result, 3, fields[3]);
+    set_raw_bytes_field(result, 4, fields[4]);
+    set_raw_bytes_field(result, 5, fields[5]);
+    set_raw_bytes_field(result, 6, fields[6]);
+    return result;
+  }
+
+  static OptionTrade parse_option_trade_row(std::string_view line) {
+    detail::CsvLineCursor cursor(line);
+    std::string scratch;
+    OptionTrade result;
+
+    result.assign_symbol(cursor.template next_field<Specialization, true>(scratch));
+    result.conditions = detail::parse_option_condition_bits(
+        cursor.template next_field<Specialization, true>(scratch),
+        "conditions");
+    result.correction =
+        Specialization::template parse_integer<std::int32_t>(
+            cursor.template next_field<Specialization, true>(scratch),
+            "correction");
+    result.exchange =
+        Specialization::template parse_integer<std::uint16_t>(
+            cursor.template next_field<Specialization, true>(scratch),
+            "exchange");
+    result.price = Specialization::parse_double(
+        cursor.template next_field<Specialization, true>(scratch),
+        "price");
+    result.sip_timestamp =
+        Specialization::template parse_integer<std::uint64_t>(
+            cursor.template next_field<Specialization, true>(scratch),
+            "sip_timestamp");
+    result.size =
+        Specialization::template parse_integer<std::uint32_t>(
+            cursor.template next_field<Specialization, false>(scratch),
+            "size");
+
+    cursor.finish();
+    return result;
+  }
+
+  static RawOptionTrade parse_raw_option_trade_row(std::string_view line) {
+    detail::CsvLineCursor cursor(line);
+    std::string scratch;
+    RawOptionTrade result;
+    result[0].assign(cursor.template next_field<Specialization, true>(scratch));
+    result[1].assign(cursor.template next_field<Specialization, true>(scratch));
+    result[2].assign(cursor.template next_field<Specialization, true>(scratch));
+    result[3].assign(cursor.template next_field<Specialization, true>(scratch));
+    result[4].assign(cursor.template next_field<Specialization, true>(scratch));
+    result[5].assign(cursor.template next_field<Specialization, true>(scratch));
+    result[6].assign(cursor.template next_field<Specialization, false>(scratch));
+    cursor.finish();
+    return result;
+  }
+
+  static nanobind::tuple parse_raw_option_trade_tuple(
+      std::string_view line,
+      detail::RawBytesInternCache& intern_cache) {
+    detail::CsvLineCursor cursor(line);
+    std::string scratch;
+    nanobind::tuple result = make_raw_tuple<7>();
+
+    set_raw_ticker_field(
+        result,
+        cursor.template next_field<Specialization, true>(scratch),
+        intern_cache);
+    set_raw_bytes_field(result, 1, cursor.template next_field<Specialization, true>(scratch));
+    set_raw_small_uint_field(
+        result,
+        2,
+        cursor.template next_field<Specialization, true>(scratch),
+        intern_cache);
+    set_raw_bytes_field(result, 3, cursor.template next_field<Specialization, true>(scratch));
+    set_raw_bytes_field(result, 4, cursor.template next_field<Specialization, true>(scratch));
+    set_raw_bytes_field(result, 5, cursor.template next_field<Specialization, true>(scratch));
+    set_raw_small_uint_field(
+        result,
+        6,
+        cursor.template next_field<Specialization, false>(scratch),
+        intern_cache);
+
+    cursor.finish();
+    return result;
+  }
+
+  static nanobind::tuple raw_option_trade_array_to_tuple(
+      const RawOptionTrade& fields,
+      detail::RawBytesInternCache& intern_cache) {
+    nanobind::tuple result = make_raw_tuple<7>();
+    set_raw_ticker_field(result, fields[0], intern_cache);
+    set_raw_bytes_field(result, 1, fields[1]);
+    set_raw_small_uint_field(result, 2, fields[2], intern_cache);
+    set_raw_bytes_field(result, 3, fields[3]);
+    set_raw_bytes_field(result, 4, fields[4]);
+    set_raw_bytes_field(result, 5, fields[5]);
+    set_raw_small_uint_field(result, 6, fields[6], intern_cache);
+    return result;
+  }
+
+  static OptionQuote parse_option_quote_row(std::string_view line) {
+    std::size_t cursor = 0;
+    OptionQuote result;
+
+    result.assign_symbol(next_raw_unquoted_field<true>(line, cursor));
+    result.ask_exchange =
+        Specialization::template parse_integer<std::uint16_t>(
+            next_raw_unquoted_field<true>(line, cursor),
+            "ask_exchange");
+    result.ask_price = detail::parse_nullable_double(
+        next_raw_unquoted_field<true>(line, cursor),
+        "ask_price");
+    result.ask_size =
+        Specialization::template parse_integer<std::uint32_t>(
+            next_raw_unquoted_field<true>(line, cursor),
+            "ask_size");
+    result.bid_exchange =
+        Specialization::template parse_integer<std::uint16_t>(
+            next_raw_unquoted_field<true>(line, cursor),
+            "bid_exchange");
+    result.bid_price = detail::parse_nullable_double(
+        next_raw_unquoted_field<true>(line, cursor),
+        "bid_price");
+    result.bid_size =
+        Specialization::template parse_integer<std::uint32_t>(
+            next_raw_unquoted_field<true>(line, cursor),
+            "bid_size");
+    result.sequence_number =
+        Specialization::template parse_integer<std::uint64_t>(
+            next_raw_unquoted_field<true>(line, cursor),
+            "sequence_number");
+    result.sip_timestamp =
+        Specialization::template parse_integer<std::uint64_t>(
+            next_raw_unquoted_field<false>(line, cursor),
+            "sip_timestamp");
+
+    finish_raw_row(line, cursor);
+    return result;
+  }
+
+  static RawOptionQuote parse_raw_option_quote_row(std::string_view line) {
+    std::size_t cursor = 0;
+    RawOptionQuote result;
+    result[0].assign(next_raw_unquoted_field<true>(line, cursor));
+    result[1].assign(next_raw_unquoted_field<true>(line, cursor));
+    result[2].assign(next_raw_unquoted_field<true>(line, cursor));
+    result[3].assign(next_raw_unquoted_field<true>(line, cursor));
+    result[4].assign(next_raw_unquoted_field<true>(line, cursor));
+    result[5].assign(next_raw_unquoted_field<true>(line, cursor));
+    result[6].assign(next_raw_unquoted_field<true>(line, cursor));
+    result[7].assign(next_raw_unquoted_field<true>(line, cursor));
+    result[8].assign(next_raw_unquoted_field<false>(line, cursor));
+    finish_raw_row(line, cursor);
+    return result;
+  }
+
+  static nanobind::tuple parse_raw_option_quote_tuple(
+      std::string_view line,
+      detail::RawBytesInternCache& intern_cache) {
+    std::size_t cursor = 0;
+    nanobind::tuple result = make_raw_tuple<9>();
+
+    set_raw_ticker_field(
+        result,
+        next_raw_unquoted_field<true>(line, cursor),
+        intern_cache);
+    set_raw_small_uint_field(
+        result,
+        1,
+        next_raw_unquoted_field<true>(line, cursor),
+        intern_cache);
+    set_raw_bytes_field(result, 2, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_small_uint_field(
+        result,
+        3,
+        next_raw_unquoted_field<true>(line, cursor),
+        intern_cache);
+    set_raw_small_uint_field(
+        result,
+        4,
+        next_raw_unquoted_field<true>(line, cursor),
+        intern_cache);
+    set_raw_bytes_field(result, 5, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_small_uint_field(
+        result,
+        6,
+        next_raw_unquoted_field<true>(line, cursor),
+        intern_cache);
+    set_raw_bytes_field(result, 7, next_raw_unquoted_field<true>(line, cursor));
+    set_raw_bytes_field(result, 8, next_raw_unquoted_field<false>(line, cursor));
+
+    finish_raw_row(line, cursor);
+    return result;
+  }
+
+  static nanobind::tuple raw_option_quote_array_to_tuple(
+      const RawOptionQuote& fields,
+      detail::RawBytesInternCache& intern_cache) {
+    nanobind::tuple result = make_raw_tuple<9>();
+    set_raw_ticker_field(result, fields[0], intern_cache);
+    set_raw_small_uint_field(result, 1, fields[1], intern_cache);
+    set_raw_bytes_field(result, 2, fields[2]);
+    set_raw_small_uint_field(result, 3, fields[3], intern_cache);
+    set_raw_small_uint_field(result, 4, fields[4], intern_cache);
+    set_raw_bytes_field(result, 5, fields[5]);
+    set_raw_small_uint_field(result, 6, fields[6], intern_cache);
+    set_raw_bytes_field(result, 7, fields[7]);
+    set_raw_bytes_field(result, 8, fields[8]);
+    return result;
+  }
+
   static StockQuote parse_quote_row(
       std::string_view line,
       detail::BitsetParseCache<96>& bitset_cache) {
@@ -7170,6 +11322,95 @@ class Implementation : public Base {
         Specialization::template parse_integer<std::uint64_t>(
             cursor.template next_field<Specialization, false>(scratch),
             "participant_timestamp");
+
+    cursor.finish();
+    return result;
+  }
+
+  static FuturesTrade parse_futures_trade_row(std::string_view line) {
+    detail::CsvLineCursor cursor(line);
+    std::string scratch;
+    FuturesTrade result;
+
+    result.ticker.assign(cursor.template next_field<Specialization, true>(scratch));
+    result.timestamp =
+        Specialization::template parse_integer<std::uint64_t>(
+            cursor.template next_field<Specialization, true>(scratch),
+            "timestamp");
+    result.sequence_number =
+        Specialization::template parse_integer<std::uint64_t>(
+            cursor.template next_field<Specialization, true>(scratch),
+            "sequence_number");
+    result.report_sequence =
+        Specialization::template parse_integer<std::uint32_t>(
+            cursor.template next_field<Specialization, true>(scratch),
+            "report_sequence");
+    result.price = Specialization::parse_double(
+        cursor.template next_field<Specialization, true>(scratch),
+        "price");
+    result.size =
+        Specialization::template parse_integer<std::uint32_t>(
+            cursor.template next_field<Specialization, true>(scratch),
+            "size");
+    result.correction =
+        Specialization::template parse_integer<std::int32_t>(
+            cursor.template next_field<Specialization, true>(scratch),
+            "correction");
+    result.exchange =
+        Specialization::template parse_integer<std::uint16_t>(
+            cursor.template next_field<Specialization, true>(scratch),
+            "exchange");
+    static_cast<void>(cursor.template next_field<Specialization, false>(scratch));
+
+    cursor.finish();
+    return result;
+  }
+
+  static FuturesQuote parse_futures_quote_row(std::string_view line) {
+    detail::CsvLineCursor cursor(line);
+    std::string scratch;
+    FuturesQuote result;
+
+    result.ticker.assign(cursor.template next_field<Specialization, true>(scratch));
+    result.timestamp =
+        Specialization::template parse_integer<std::uint64_t>(
+            cursor.template next_field<Specialization, true>(scratch),
+            "timestamp");
+    result.sequence_number =
+        Specialization::template parse_integer<std::uint64_t>(
+            cursor.template next_field<Specialization, true>(scratch),
+            "sequence_number");
+    result.report_sequence =
+        Specialization::template parse_integer<std::uint32_t>(
+            cursor.template next_field<Specialization, true>(scratch),
+            "report_sequence");
+    result.ask_timestamp =
+        Specialization::template parse_integer<std::uint64_t>(
+            cursor.template next_field<Specialization, true>(scratch),
+            "ask_timestamp");
+    result.ask_price = detail::parse_nullable_double(
+        cursor.template next_field<Specialization, true>(scratch),
+        "ask_price");
+    result.ask_size =
+        Specialization::template parse_integer<std::uint32_t>(
+            cursor.template next_field<Specialization, true>(scratch),
+            "ask_size");
+    result.bid_timestamp =
+        Specialization::template parse_integer<std::uint64_t>(
+            cursor.template next_field<Specialization, true>(scratch),
+            "bid_timestamp");
+    result.bid_price = detail::parse_nullable_double(
+        cursor.template next_field<Specialization, true>(scratch),
+        "bid_price");
+    result.bid_size =
+        Specialization::template parse_integer<std::uint32_t>(
+            cursor.template next_field<Specialization, true>(scratch),
+            "bid_size");
+    result.exchange =
+        Specialization::template parse_integer<std::uint16_t>(
+            cursor.template next_field<Specialization, true>(scratch),
+            "exchange");
+    static_cast<void>(cursor.template next_field<Specialization, false>(scratch));
 
     cursor.finish();
     return result;
@@ -7431,6 +11672,26 @@ class Implementation : public Base {
         "participant_timestamp");
   }
 
+  static std::uint64_t participant_timestamp_value(const RawOptionTrade& row) {
+    return Specialization::template parse_integer<std::uint64_t>(
+        row[5],
+        "sip_timestamp");
+  }
+
+  static std::uint64_t participant_timestamp_value(const RawOptionQuote& row) {
+    return Specialization::template parse_integer<std::uint64_t>(
+        row[8],
+        "sip_timestamp");
+  }
+
+  static std::uint64_t participant_timestamp_value(const OptionTrade& row) {
+    return row.sip_timestamp;
+  }
+
+  static std::uint64_t participant_timestamp_value(const OptionQuote& row) {
+    return row.sip_timestamp;
+  }
+
   template <typename RowType>
   static std::uint64_t participant_timestamp_value(const RowType& row) {
     return row.participant_timestamp;
@@ -7445,6 +11706,14 @@ class Implementation : public Base {
   }
 
   static std::uint64_t sip_timestamp_value(const RawCurrencyQuote& row) {
+    return participant_timestamp_value(row);
+  }
+
+  static std::uint64_t sip_timestamp_value(const RawOptionTrade& row) {
+    return participant_timestamp_value(row);
+  }
+
+  static std::uint64_t sip_timestamp_value(const RawOptionQuote& row) {
     return participant_timestamp_value(row);
   }
 
@@ -7466,6 +11735,14 @@ class Implementation : public Base {
   }
 
   static const std::string& ticker_value(const RawCurrencyQuote& row) {
+    return row[0];
+  }
+
+  static const std::string& ticker_value(const RawOptionTrade& row) {
+    return row[0];
+  }
+
+  static const std::string& ticker_value(const RawOptionQuote& row) {
     return row[0];
   }
 

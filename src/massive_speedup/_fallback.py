@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import csv
+import datetime as dt
 import gzip
+import math
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -141,6 +143,10 @@ def _parse_int(text: str) -> int:
 
 def _parse_float(text: str) -> float:
     return float(text) if text else 0.0
+
+
+def _parse_nullable_float(text: str) -> float:
+    return float(text) if text else float("nan")
 
 
 def _parse_bitset96(text: str) -> str:
@@ -317,6 +323,303 @@ class StockTrade:
             f"sequence_number={self.sequence_number}, sip_timestamp={self.sip_timestamp}, "
             f"size={self.size}, tape={self.tape}, trf_id={self.trf_id}, "
             f"trf_timestamp={self.trf_timestamp})"
+        )
+
+    __str__ = __repr__
+
+
+class CryptoTrade:
+    __slots__ = (
+        "ticker",
+        "conditions",
+        "exchange",
+        "id",
+        "participant_timestamp",
+        "price",
+        "size",
+    )
+
+    def __init__(self, fields: list[str]) -> None:
+        if len(fields) != 7:
+            raise ValueError(f"CryptoTrade expected 7 fields, received {len(fields)}")
+        self.ticker = fields[0]
+        self.conditions = _bitset_indices(fields[1])
+        self.exchange = _parse_int(fields[2])
+        self.id = _parse_int(fields[3])
+        self.participant_timestamp = _parse_int(fields[4])
+        self.price = _parse_float(fields[5])
+        self.size = _parse_float(fields[6])
+
+    def __iter__(self) -> Iterator[object]:
+        yield self.ticker
+        yield self.conditions
+        yield self.exchange
+        yield self.id
+        yield self.participant_timestamp
+        yield self.price
+        yield self.size
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, CryptoTrade):
+            return NotImplemented
+        return tuple(self) == tuple(other)
+
+    def __lt__(self, other: object) -> bool:
+        if not isinstance(other, CryptoTrade):
+            return NotImplemented
+        return self.participant_timestamp < other.participant_timestamp
+
+    def __le__(self, other: object) -> bool:
+        if not isinstance(other, CryptoTrade):
+            return NotImplemented
+        return self.participant_timestamp <= other.participant_timestamp
+
+    def __gt__(self, other: object) -> bool:
+        if not isinstance(other, CryptoTrade):
+            return NotImplemented
+        return self.participant_timestamp > other.participant_timestamp
+
+    def __ge__(self, other: object) -> bool:
+        if not isinstance(other, CryptoTrade):
+            return NotImplemented
+        return self.participant_timestamp >= other.participant_timestamp
+
+    def __hash__(self) -> int:
+        return hash(tuple(self))
+
+    def __repr__(self) -> str:
+        return (
+            "CryptoTrade("
+            f"ticker={self.ticker!r}, conditions={self.conditions!r}, "
+            f"exchange={self.exchange}, id={self.id}, "
+            f"participant_timestamp={self.participant_timestamp}, "
+            f"price={self.price}, size={self.size})"
+        )
+
+    __str__ = __repr__
+
+
+def _option_conditions(value: str) -> frozenset[int]:
+    if not value:
+        return frozenset()
+    result: set[int] = set()
+    for item in value.split(","):
+        if not item:
+            raise ValueError("empty option trade condition code")
+        code = _parse_int(item)
+        if code < 201 or code > 248:
+            raise ValueError(f"option trade condition code out of range: {code}")
+        result.add(code)
+    return frozenset(result)
+
+
+def _parse_option_symbol(ticker: str) -> tuple[str, str, str, float]:
+    if not ticker.startswith("O:"):
+        raise ValueError(f"option ticker must start with O: {ticker}")
+
+    body = ticker[2:]
+    suffix_size = 15
+    if len(body) <= suffix_size:
+        raise ValueError(f"option ticker is too short: {ticker}")
+
+    expiration = body[-suffix_size:-suffix_size + 6]
+    right = body[-9]
+    strike_text = body[-8:]
+    if right not in {"C", "P"}:
+        raise ValueError(f"option ticker right must be C or P: {ticker}")
+    if not expiration.isdecimal() or not strike_text.isdecimal():
+        raise ValueError(f"option ticker contains invalid numeric fields: {ticker}")
+
+    year = 2000 + int(expiration[:2])
+    month = int(expiration[2:4])
+    day = int(expiration[4:6])
+    return (
+        body[:-suffix_size],
+        dt.date(year, month, day).isoformat(),
+        right,
+        int(strike_text) / 1000.0,
+    )
+
+
+class OptionTrade:
+    __slots__ = (
+        "root",
+        "expiration",
+        "right",
+        "strike",
+        "conditions",
+        "correction",
+        "exchange",
+        "price",
+        "sip_timestamp",
+        "size",
+    )
+
+    def __init__(self, fields: list[str]) -> None:
+        if len(fields) != 7:
+            raise ValueError(f"OptionTrade expected 7 fields, received {len(fields)}")
+        self.root, self.expiration, self.right, self.strike = _parse_option_symbol(fields[0])
+        self.conditions = _option_conditions(fields[1])
+        self.correction = _parse_int(fields[2])
+        self.exchange = _parse_int(fields[3])
+        self.price = _parse_float(fields[4])
+        self.sip_timestamp = _parse_int(fields[5])
+        self.size = _parse_int(fields[6])
+
+    def __iter__(self) -> Iterator[object]:
+        yield self.root
+        yield self.expiration
+        yield self.right
+        yield self.strike
+        yield self.conditions
+        yield self.correction
+        yield self.exchange
+        yield self.price
+        yield self.sip_timestamp
+        yield self.size
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, OptionTrade):
+            return NotImplemented
+        return tuple(self) == tuple(other)
+
+    def __lt__(self, other: object) -> bool:
+        if not isinstance(other, OptionTrade):
+            return NotImplemented
+        return self.sip_timestamp < other.sip_timestamp
+
+    def __le__(self, other: object) -> bool:
+        if not isinstance(other, OptionTrade):
+            return NotImplemented
+        return self.sip_timestamp <= other.sip_timestamp
+
+    def __gt__(self, other: object) -> bool:
+        if not isinstance(other, OptionTrade):
+            return NotImplemented
+        return self.sip_timestamp > other.sip_timestamp
+
+    def __ge__(self, other: object) -> bool:
+        if not isinstance(other, OptionTrade):
+            return NotImplemented
+        return self.sip_timestamp >= other.sip_timestamp
+
+    def __hash__(self) -> int:
+        return hash(tuple(self))
+
+    def __repr__(self) -> str:
+        return (
+            "OptionTrade("
+            f"root={self.root!r}, expiration={self.expiration!r}, "
+            f"right={self.right!r}, strike={self.strike}, "
+            f"conditions={self.conditions!r}, "
+            f"correction={self.correction}, exchange={self.exchange}, "
+            f"price={self.price}, sip_timestamp={self.sip_timestamp}, "
+            f"size={self.size})"
+        )
+
+    __str__ = __repr__
+
+
+class OptionQuote:
+    __slots__ = (
+        "root",
+        "expiration",
+        "right",
+        "strike",
+        "ask_exchange",
+        "ask_price",
+        "ask_size",
+        "bid_exchange",
+        "bid_price",
+        "bid_size",
+        "sequence_number",
+        "sip_timestamp",
+    )
+
+    def __init__(self, fields: list[str]) -> None:
+        if len(fields) != 9:
+            raise ValueError(f"OptionQuote expected 9 fields, received {len(fields)}")
+        self.root, self.expiration, self.right, self.strike = _parse_option_symbol(fields[0])
+        self.ask_exchange = _parse_int(fields[1])
+        self.ask_price = _parse_nullable_float(fields[2])
+        self.ask_size = _parse_int(fields[3])
+        self.bid_exchange = _parse_int(fields[4])
+        self.bid_price = _parse_nullable_float(fields[5])
+        self.bid_size = _parse_int(fields[6])
+        self.sequence_number = _parse_int(fields[7])
+        self.sip_timestamp = _parse_int(fields[8])
+
+    def __iter__(self) -> Iterator[object]:
+        yield self.root
+        yield self.expiration
+        yield self.right
+        yield self.strike
+        yield self.ask_exchange
+        yield self.ask_price
+        yield self.ask_size
+        yield self.bid_exchange
+        yield self.bid_price
+        yield self.bid_size
+        yield self.sequence_number
+        yield self.sip_timestamp
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, OptionQuote):
+            return NotImplemented
+        ask_prices_equal = self.ask_price == other.ask_price or (
+            math.isnan(self.ask_price) and math.isnan(other.ask_price)
+        )
+        bid_prices_equal = self.bid_price == other.bid_price or (
+            math.isnan(self.bid_price) and math.isnan(other.bid_price)
+        )
+        return (
+            self.root == other.root
+            and self.expiration == other.expiration
+            and self.right == other.right
+            and self.strike == other.strike
+            and self.ask_exchange == other.ask_exchange
+            and ask_prices_equal
+            and self.ask_size == other.ask_size
+            and self.bid_exchange == other.bid_exchange
+            and bid_prices_equal
+            and self.bid_size == other.bid_size
+            and self.sequence_number == other.sequence_number
+            and self.sip_timestamp == other.sip_timestamp
+        )
+
+    def __lt__(self, other: object) -> bool:
+        if not isinstance(other, OptionQuote):
+            return NotImplemented
+        return self.sip_timestamp < other.sip_timestamp
+
+    def __le__(self, other: object) -> bool:
+        if not isinstance(other, OptionQuote):
+            return NotImplemented
+        return self.sip_timestamp <= other.sip_timestamp
+
+    def __gt__(self, other: object) -> bool:
+        if not isinstance(other, OptionQuote):
+            return NotImplemented
+        return self.sip_timestamp > other.sip_timestamp
+
+    def __ge__(self, other: object) -> bool:
+        if not isinstance(other, OptionQuote):
+            return NotImplemented
+        return self.sip_timestamp >= other.sip_timestamp
+
+    def __hash__(self) -> int:
+        return hash(tuple(self))
+
+    def __repr__(self) -> str:
+        return (
+            "OptionQuote("
+            f"root={self.root!r}, expiration={self.expiration!r}, "
+            f"right={self.right!r}, strike={self.strike}, "
+            f"ask_exchange={self.ask_exchange}, ask_price={self.ask_price}, "
+            f"ask_size={self.ask_size}, bid_exchange={self.bid_exchange}, "
+            f"bid_price={self.bid_price}, bid_size={self.bid_size}, "
+            f"sequence_number={self.sequence_number}, "
+            f"sip_timestamp={self.sip_timestamp})"
         )
 
     __str__ = __repr__
@@ -970,6 +1273,135 @@ class FlatFileStocksParser(FlatFileParser):
 class FlatFileOptionsParser(FlatFileParser):
     asset_class_name = "options"
 
+    @classmethod
+    def parse_trades(
+        cls,
+        payload: str | Path,
+        *,
+        sort_by_sip_timestamp: bool = False,
+    ) -> Iterator[OptionTrade]:
+        del sort_by_sip_timestamp
+        with gzip.open(payload, "rt", encoding="utf-8", newline="") as handle:
+            reader = csv.reader(handle)
+            next(reader, None)
+            current_root: str | None = None
+            rows: list[OptionTrade] = []
+            for fields in reader:
+                if not any(fields):
+                    continue
+                row = OptionTrade(fields)
+                if current_root is None:
+                    current_root = row.root
+                if row.root != current_root:
+                    rows.sort(
+                        key=lambda item: (
+                            item.sip_timestamp,
+                            item.expiration,
+                            item.right,
+                            item.strike,
+                        )
+                    )
+                    yield from rows
+                    rows = [row]
+                    current_root = row.root
+                else:
+                    rows.append(row)
+
+            rows.sort(
+                key=lambda item: (
+                    item.sip_timestamp,
+                    item.expiration,
+                    item.right,
+                    item.strike,
+                )
+            )
+            yield from rows
+
+    @classmethod
+    def parse_raw_trades(
+        cls,
+        payload: str | Path,
+        *,
+        sort_by_sip_timestamp: bool = False,
+    ) -> Iterator[tuple[bytes, ...]]:
+        del sort_by_sip_timestamp
+        with gzip.open(payload, "rt", encoding="utf-8", newline="") as handle:
+            reader = csv.reader(handle)
+            next(reader, None)
+            for fields in reader:
+                if any(fields):
+                    yield tuple(field.encode("utf-8") for field in fields)
+
+    @classmethod
+    def parse_quotes(
+        cls,
+        payload: str | Path,
+        *,
+        sort_by_sip_timestamp: bool = False,
+    ) -> Iterator[OptionQuote]:
+        del sort_by_sip_timestamp
+        with gzip.open(payload, "rt", encoding="utf-8", newline="") as handle:
+            reader = csv.reader(handle)
+            next(reader, None)
+            current_root: str | None = None
+            rows: list[OptionQuote] = []
+            for fields in reader:
+                if not any(fields):
+                    continue
+                row = OptionQuote(fields)
+                if current_root is None:
+                    current_root = row.root
+                if row.root != current_root:
+                    rows.sort(
+                        key=lambda item: (
+                            item.sip_timestamp,
+                            item.expiration,
+                            item.right,
+                            item.strike,
+                            item.sequence_number,
+                        )
+                    )
+                    yield from rows
+                    rows = [row]
+                    current_root = row.root
+                else:
+                    rows.append(row)
+
+            rows.sort(
+                key=lambda item: (
+                    item.sip_timestamp,
+                    item.expiration,
+                    item.right,
+                    item.strike,
+                    item.sequence_number,
+                )
+            )
+            yield from rows
+
+    @classmethod
+    def parse_raw_quotes(
+        cls,
+        payload: str | Path,
+        *,
+        sort_by_sip_timestamp: bool = False,
+    ) -> Iterator[tuple[bytes, ...]]:
+        del sort_by_sip_timestamp
+        with gzip.open(payload, "rt", encoding="utf-8", newline="") as handle:
+            reader = csv.reader(handle)
+            next(reader, None)
+            for fields in reader:
+                if any(fields):
+                    yield tuple(field.encode("utf-8") for field in fields)
+
+    @classmethod
+    def raw_lines(cls, payload: str | Path) -> Iterator[bytes]:
+        with gzip.open(payload, "rb") as handle:
+            next(handle, None)
+            for line in handle:
+                line = line.rstrip(b"\r\n")
+                if line:
+                    yield line
+
 
 class FlatFileFuturesParser(FlatFileParser):
     asset_class_name = "futures"
@@ -1122,6 +1554,50 @@ class FlatFileCurrenciesParser(FlatFileParser):
 class FlatFileCryptoParser(FlatFileParser):
     asset_class_name = "crypto"
 
+    @classmethod
+    def parse_trades(
+        cls,
+        payload: str | Path,
+        *,
+        sort_by_participant_timestamp: bool = False,
+    ) -> Iterator[CryptoTrade]:
+        with gzip.open(payload, "rt", encoding="utf-8", newline="") as handle:
+            reader = csv.reader(handle)
+            next(reader, None)
+            rows = [CryptoTrade(fields) for fields in reader if any(fields)]
+
+        if sort_by_participant_timestamp:
+            rows.sort(key=lambda row: (row.participant_timestamp, row.ticker, row.id))
+
+        yield from rows
+
+    @classmethod
+    def parse_raw_trades(
+        cls,
+        payload: str | Path,
+        *,
+        sort_by_participant_timestamp: bool = False,
+    ) -> Iterator[tuple[bytes, ...]]:
+        with gzip.open(payload, "rt", encoding="utf-8", newline="") as handle:
+            reader = csv.reader(handle)
+            next(reader, None)
+            rows = [tuple(fields) for fields in reader if any(fields)]
+
+        if sort_by_participant_timestamp:
+            rows.sort(key=lambda row: (_parse_int(row[4]), row[0], _parse_int(row[3])))
+
+        for row in rows:
+            yield tuple(field.encode("utf-8") for field in row)
+
+    @classmethod
+    def raw_lines(cls, payload: str | Path) -> Iterator[bytes]:
+        with gzip.open(payload, "rb") as handle:
+            next(handle, None)
+            for line in handle:
+                line = line.rstrip(b"\r\n")
+                if line:
+                    yield line
+
 
 class WebSocketMessagesParser(WebSocketParser):
     asset_class_name = "messages"
@@ -1172,6 +1648,9 @@ WebSocket = SimpleNamespace(
 )
 
 FlatFiles.StockTrade = StockTrade
+FlatFiles.CryptoTrade = CryptoTrade
+FlatFiles.OptionTrade = OptionTrade
+FlatFiles.OptionQuote = OptionQuote
 FlatFiles.StockQuote = StockQuote
 FlatFiles.StockAggregate = StockAggregate
 FlatFiles.StockQuotes = StockQuote
@@ -1236,6 +1715,24 @@ FlatFiles.currency.Aggregate = SimpleNamespace(
     raw_lines=FlatFileCurrenciesParser.raw_lines,
 )
 
+FlatFiles.Crypto.Trade = SimpleNamespace(
+    parse=FlatFileCryptoParser.parse_trades,
+    parse_raw=FlatFileCryptoParser.parse_raw_trades,
+    raw_lines=FlatFileCryptoParser.raw_lines,
+)
+
+FlatFiles.Options.Trade = SimpleNamespace(
+    parse=FlatFileOptionsParser.parse_trades,
+    parse_raw=FlatFileOptionsParser.parse_raw_trades,
+    raw_lines=FlatFileOptionsParser.raw_lines,
+)
+
+FlatFiles.Options.Quote = SimpleNamespace(
+    parse=FlatFileOptionsParser.parse_quotes,
+    parse_raw=FlatFileOptionsParser.parse_raw_quotes,
+    raw_lines=FlatFileOptionsParser.raw_lines,
+)
+
 
 def build_database_file(*args, **kwargs):
     raise RuntimeError("build_database_file requires the native massive_speedup extension")
@@ -1249,6 +1746,11 @@ class StockTradeDatabase:
 class StockQuoteDatabase:
     def __init__(self, *args, **kwargs):
         raise RuntimeError("StockQuoteDatabase requires the native massive_speedup extension")
+
+
+class CryptoTradeDatabase:
+    def __init__(self, *args, **kwargs):
+        raise RuntimeError("CryptoTradeDatabase requires the native massive_speedup extension")
 
 
 class StockTradeQuoteTimeline:
@@ -1273,3 +1775,43 @@ def stock_trade_quote_timeline(*args, **kwargs):
 class CurrencyQuoteDatabase:
     def __init__(self, *args, **kwargs):
         raise RuntimeError("CurrencyQuoteDatabase requires the native massive_speedup extension")
+
+
+class FuturesTradeDatabase:
+    def __init__(self, *args, **kwargs):
+        raise RuntimeError("FuturesTradeDatabase requires the native massive_speedup extension")
+
+
+class FuturesQuoteDatabase:
+    def __init__(self, *args, **kwargs):
+        raise RuntimeError("FuturesQuoteDatabase requires the native massive_speedup extension")
+
+
+class OptionTradeDatabase:
+    def __init__(self, *args, **kwargs):
+        raise RuntimeError("OptionTradeDatabase requires the native massive_speedup extension")
+
+
+class OptionQuoteDatabase:
+    def __init__(self, *args, **kwargs):
+        raise RuntimeError("OptionQuoteDatabase requires the native massive_speedup extension")
+
+
+class FuturesMarketBroker:
+    def __init__(self, *args, **kwargs):
+        raise RuntimeError("FuturesMarketBroker requires the native massive_speedup extension")
+
+
+class FuturesMarket:
+    def __init__(self, *args, **kwargs):
+        raise RuntimeError("FuturesMarket requires the native massive_speedup extension")
+
+
+class OptionMarketBroker:
+    def __init__(self, *args, **kwargs):
+        raise RuntimeError("OptionMarketBroker requires the native massive_speedup extension")
+
+
+class OptionMarket:
+    def __init__(self, *args, **kwargs):
+        raise RuntimeError("OptionMarket requires the native massive_speedup extension")

@@ -1,23 +1,105 @@
-"""Download massive flat-files for stock trades/quotes and currency quotes."""
+"""Download massive flat-files for selected trades/quotes products."""
 
 from __future__ import annotations
 
 import argparse
 import datetime as dt
-import multiprocessing.pool
 import os
 import sys
+import time
+from dataclasses import dataclass
 from pathlib import Path
-from threading import local
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import urlopen
 
 from tqdm import tqdm
 
+from ._process_title import set_process_title
+
 BUCKET = "flatfiles"
 ENDPOINT_URL = "https://files.massive.com"
+MASSIVE_API_URL = "https://api.massive.com"
+ALL_PRODUCTS = ("stocks", "currencies", "futures", "crypto", "options")
+PRODUCT_ALIASES = {
+    "stock": "stocks",
+    "stocks": "stocks",
+    "currency": "currencies",
+    "currencies": "currencies",
+    "future": "futures",
+    "futures": "futures",
+    "crypto": "crypto",
+    "cryptos": "crypto",
+    "option": "options",
+    "options": "options",
+}
+FUTURES_EXCHANGES = ("cbot", "cme", "comex", "nymex")
+FUTURES_PROBE_SYMBOLS = {
+    "cbot": "ZC",
+    "cme": "ES",
+    "comex": "GC",
+    "nymex": "CL",
+}
+FUTURES_PROBE_MONTHS = {
+    "cbot": (3, 5, 7, 9, 12),
+    "cme": (3, 6, 9, 12),
+    "comex": tuple(range(1, 13)),
+    "nymex": tuple(range(1, 13)),
+}
+FUTURES_MONTH_CODES = {
+    1: "F",
+    2: "G",
+    3: "H",
+    4: "J",
+    5: "K",
+    6: "M",
+    7: "N",
+    8: "Q",
+    9: "U",
+    10: "V",
+    11: "X",
+    12: "Z",
+}
 
-_CLIENT_LOCAL = local()
+_CLIENT: object | None = None
 _AWS_ACCESS_KEY_ID: str | None = None
 _AWS_SECRET_ACCESS_KEY: str | None = None
+_MASSIVE_API_KEY: str | None = None
+_INITIAL_DOWNLOAD_BACKOFF_SECONDS = 1
+_MAX_DOWNLOAD_BACKOFF_SECONDS = 89
+
+
+@dataclass(frozen=True)
+class Dataset:
+    product: str
+    category: str
+    prefix: str
+
+
+DATASETS: tuple[Dataset, ...] = (
+    Dataset("stocks", "stock_trade", "us_stocks_sip/trades_v1"),
+    Dataset("stocks", "stock_quote", "us_stocks_sip/quotes_v1"),
+    Dataset("currencies", "currency_quote", "global_forex/quotes_v1"),
+    Dataset("crypto", "crypto_trade", "global_crypto/trades_v1"),
+    Dataset("options", "option_trade", "us_options_opra/trades_v1"),
+    Dataset("options", "option_quote", "us_options_opra/quotes_v1"),
+    *(
+        Dataset(
+            "futures",
+            f"future_{exchange}_trade",
+            f"us_futures_{exchange}/trades_v1",
+        )
+        for exchange in FUTURES_EXCHANGES
+    ),
+    *(
+        Dataset(
+            "futures",
+            f"future_{exchange}_quote",
+            f"us_futures_{exchange}/quotes_v1",
+        )
+        for exchange in FUTURES_EXCHANGES
+    ),
+)
 
 
 class HelpOnErrorArgumentParser(argparse.ArgumentParser):
@@ -30,8 +112,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = HelpOnErrorArgumentParser(
         prog="massive-speedup-download",
         description=(
-            "Download stock trades/quotes and currency quotes from massive "
-            "flatfiles into a structured directory."
+            "Download selected massive trades/quotes flatfiles into a "
+            "structured directory."
         ),
     )
     parser.add_argument(
@@ -42,15 +124,20 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help=(
             "Root directory for downloads. Files are placed under "
-            "{download-path}/stock_trade, {download-path}/stock_quote, "
-            "and {download-path}/currency_quote."
+            "dataset-specific directories such as stock_trade, stock_quote, "
+            "currency_quote, crypto_trade, option_trade, option_quote, "
+            "and future_cme_trade."
         ),
     )
     parser.add_argument(
-        "--threads",
-        type=int,
-        default=10,
-        help="Number of downloader worker threads (default: 10).",
+        "--products",
+        nargs="+",
+        default=list(ALL_PRODUCTS),
+        help=(
+            "Products to download: stocks, currencies, futures, crypto, options. "
+            "Singular aliases are accepted. Values may be repeated or "
+            "comma-delimited. Defaults to all products."
+        ),
     )
     parser.add_argument(
         "--aws-access-key-id",
@@ -73,11 +160,22 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--massive-api-key",
+        "--massive_api_key",
+        dest="massive_api_key",
+        default=os.environ.get("MASSIVE_API_KEY") or os.environ.get("POLYGON_API_KEY"),
+        help=(
+            "Massive REST API key used for entitlement preflight. Defaults to "
+            "MASSIVE_API_KEY, then POLYGON_API_KEY, when set."
+        ),
+    )
+    parser.add_argument(
         "--end-date",
-        type=_parse_iso_date,
+        type=_parse_end_date,
         default=_default_end_date(),
         help=(
-            "Oldest date to include (inclusive), in YYYY-MM-DD format. "
+            "Oldest date to include (inclusive). Accepts YYYY-MM-DD or "
+            "English phrases such as 'three days ago' and 'a week ago'. "
             "Defaults to one month ago."
         ),
     )
@@ -103,13 +201,31 @@ def _days_in_month(year: int, month: int) -> int:
     return (next_month - dt.timedelta(days=1)).day
 
 
-def _parse_iso_date(value: str) -> dt.date:
+def _parse_end_date(value: str) -> dt.date:
     try:
         return dt.date.fromisoformat(value)
-    except ValueError as error:
+    except ValueError:
+        pass
+
+    try:
+        import dateparser
+    except ImportError as error:
         raise argparse.ArgumentTypeError(
-            f"invalid date '{value}', expected YYYY-MM-DD"
+            "dateparser is required to parse non-YYYY-MM-DD --end-date values"
         ) from error
+
+    parsed = dateparser.parse(
+        value,
+        settings={
+            "PREFER_DATES_FROM": "past",
+            "RETURN_AS_TIMEZONE_AWARE": False,
+        },
+    )
+    if parsed is None:
+        raise argparse.ArgumentTypeError(
+            f"invalid date '{value}', expected YYYY-MM-DD or an English date phrase"
+        )
+    return parsed.date()
 
 
 def _build_s3_client():
@@ -128,38 +244,79 @@ def _build_s3_client():
     )
 
 
-def _get_thread_client():
-    client = getattr(_CLIENT_LOCAL, "s3", None)
+def _get_client():
+    global _CLIENT
+    client = _CLIENT
     if client is None:
         client = _build_s3_client()
-        _CLIENT_LOCAL.s3 = client
+        _CLIENT = client
     return client
 
 
-def scan_keys() -> set[str]:
+def _normalize_products(products: list[str]) -> tuple[str, ...]:
+    normalized: list[str] = []
+    for value in products:
+        for product in value.split(","):
+            product = product.strip().lower()
+            if not product:
+                continue
+            try:
+                normalized.append(PRODUCT_ALIASES[product])
+            except KeyError as error:
+                choices = ", ".join(sorted(PRODUCT_ALIASES))
+                raise ValueError(
+                    f"unknown product '{product}', expected one of: {choices}"
+                ) from error
+    if not normalized:
+        raise ValueError("at least one product must be provided")
+    return tuple(dict.fromkeys(normalized))
+
+
+def _selected_datasets(products: tuple[str, ...]) -> tuple[Dataset, ...]:
+    selected = set(products)
+    return tuple(dataset for dataset in DATASETS if dataset.product in selected)
+
+
+def _dataset_for_key(key: str) -> Dataset | None:
+    for dataset in DATASETS:
+        if key.startswith(f"{dataset.prefix}/"):
+            return dataset
+    return None
+
+
+def _date_from_key(key: str) -> dt.date:
+    filename = key.rsplit("/", 1)[-1]
+    if not filename.endswith(".csv.gz"):
+        raise ValueError(f"cannot infer date from flatfile key: {key}")
+    return dt.date.fromisoformat(filename[:10])
+
+
+def scan_keys(products: tuple[str, ...] = ALL_PRODUCTS) -> set[str]:
     client = _build_s3_client()
     paginator = client.get_paginator("list_objects_v2")
+    prefixes = tuple(f"{dataset.prefix}/" for dataset in _selected_datasets(products))
 
     keys: set[str] = set()
     for page in paginator.paginate(Bucket=BUCKET):
         for obj in page.get("Contents", ()):
             key = obj["Key"]
-            if key.startswith("us_stocks_sip/trades_v1/"):
-                keys.add(key)
-            elif key.startswith("us_stocks_sip/quotes_v1/"):
-                keys.add(key)
-            elif key.startswith("global_forex/quotes_v1/"):
+            if key.startswith(prefixes):
                 keys.add(key)
     return keys
 
 
-def _date_key_candidates(current: dt.date) -> tuple[tuple[str, str], tuple[str, str], tuple[str, str]]:
+def _date_key_candidates(
+    current: dt.date,
+    products: tuple[str, ...] = ALL_PRODUCTS,
+) -> tuple[tuple[str, str], ...]:
     stem = f"{current.year}-{current.month:02d}-{current.day:02d}.csv.gz"
     month = f"{current.month:02d}"
-    return (
-        ("stock_trade", f"us_stocks_sip/trades_v1/{current.year}/{month}/{stem}"),
-        ("stock_quote", f"us_stocks_sip/quotes_v1/{current.year}/{month}/{stem}"),
-        ("currency_quote", f"global_forex/quotes_v1/{current.year}/{month}/{stem}"),
+    return tuple(
+        (
+            dataset.category,
+            f"{dataset.prefix}/{current.year}/{month}/{stem}",
+        )
+        for dataset in _selected_datasets(products)
     )
 
 
@@ -168,12 +325,12 @@ def build_download_jobs(
     keys: set[str],
     *,
     end_date: dt.date,
+    products: tuple[str, ...] = ALL_PRODUCTS,
 ) -> list[tuple[str, str]]:
     download_path = download_path.expanduser().resolve()
     targets = {
-        "stock_trade": download_path / "stock_trade",
-        "stock_quote": download_path / "stock_quote",
-        "currency_quote": download_path / "currency_quote",
+        dataset.category: download_path / dataset.category
+        for dataset in _selected_datasets(products)
     }
     for directory in targets.values():
         directory.mkdir(parents=True, exist_ok=True)
@@ -181,7 +338,7 @@ def build_download_jobs(
     jobs: list[tuple[str, str]] = []
     day = dt.date.today() - dt.timedelta(days=1)
     while day >= end_date:
-        for category, key in _date_key_candidates(day):
+        for category, key in _date_key_candidates(day, products):
             if key not in keys:
                 continue
             output_file = targets[category] / key.rsplit("/", 1)[-1]
@@ -192,25 +349,236 @@ def build_download_jobs(
     return jobs
 
 
-def _download_one(job: tuple[str, str]) -> str:
+def _client_error_code(error: BaseException) -> str | None:
+    response = getattr(error, "response", None)
+    if not isinstance(response, dict):
+        return None
+    error_data = response.get("Error")
+    if not isinstance(error_data, dict):
+        return None
+    code = error_data.get("Code")
+    return str(code) if code is not None else None
+
+
+def _is_forbidden_client_error(error: BaseException) -> bool:
+    code = _client_error_code(error)
+    if code is None:
+        return False
+    return code in {"403", "Forbidden", "AccessDenied"}
+
+
+def _is_endpoint_connection_error(error: BaseException) -> bool:
+    return error.__class__.__name__ == "EndpointConnectionError"
+
+
+def _should_retry_download_error(error: BaseException) -> bool:
+    return _is_forbidden_client_error(error) or _is_endpoint_connection_error(error)
+
+
+def _retry_reason(error: BaseException) -> str:
+    if _is_forbidden_client_error(error):
+        return "403 Forbidden"
+    if _is_endpoint_connection_error(error):
+        return "endpoint connection error"
+    return error.__class__.__name__
+
+
+@dataclass
+class FibonacciBackoff:
+    previous: int = 0
+    current: int = _INITIAL_DOWNLOAD_BACKOFF_SECONDS
+
+    def delay(self) -> int:
+        return self.current
+
+    def advance(self) -> None:
+        self.previous, self.current = (
+            self.current,
+            min(self.previous + self.current, _MAX_DOWNLOAD_BACKOFF_SECONDS),
+        )
+
+    def reached_cap(self) -> bool:
+        return self.current >= _MAX_DOWNLOAD_BACKOFF_SECONDS
+
+
+def _next_futures_probe_ticker(exchange: str, current: dt.date) -> str:
+    months = FUTURES_PROBE_MONTHS[exchange]
+    year = current.year
+    for month in months:
+        if month >= current.month:
+            break
+    else:
+        month = months[0]
+        year += 1
+    return f"{FUTURES_PROBE_SYMBOLS[exchange]}{FUTURES_MONTH_CODES[month]}{year % 10}"
+
+
+def _api_probe_request(dataset: Dataset, current: dt.date) -> tuple[str, dict[str, str | int]]:
+    date_text = current.isoformat()
+    category = dataset.category
+    if category == "stock_trade":
+        return "/v3/trades/AAPL", {
+            "timestamp": date_text,
+            "order": "asc",
+            "sort": "timestamp",
+            "limit": 1,
+        }
+    if category == "stock_quote":
+        return "/v3/quotes/AAPL", {
+            "timestamp": date_text,
+            "order": "asc",
+            "sort": "timestamp",
+            "limit": 1,
+        }
+    if category == "currency_quote":
+        return "/v3/quotes/C:EURUSD", {
+            "timestamp": date_text,
+            "order": "asc",
+            "sort": "timestamp",
+            "limit": 1,
+        }
+    if category == "crypto_trade":
+        return "/v3/trades/X:BTCUSD", {
+            "timestamp": date_text,
+            "order": "asc",
+            "sort": "timestamp",
+            "limit": 1,
+        }
+    if category == "option_trade":
+        return "/v3/trades/O:SPY260116C00600000", {
+            "timestamp": date_text,
+            "order": "asc",
+            "sort": "timestamp",
+            "limit": 1,
+        }
+    if category == "option_quote":
+        return "/v3/quotes/O:SPY260116C00600000", {
+            "timestamp": date_text,
+            "order": "asc",
+            "sort": "timestamp",
+            "limit": 1,
+        }
+    if dataset.product == "futures":
+        parts = dataset.category.split("_")
+        exchange = parts[1]
+        ticker = _next_futures_probe_ticker(exchange, current)
+        endpoint = "trades" if dataset.category.endswith("_trade") else "quotes"
+        return f"/futures/v1/{endpoint}/{ticker}", {
+            "timestamp": date_text,
+            "session_end_date": date_text,
+            "sort": "timestamp.asc",
+            "limit": 1,
+        }
+    raise ValueError(f"unsupported flatfile dataset: {dataset.category}")
+
+
+def _massive_api_url(path: str, params: dict[str, str | int]) -> str:
+    if _MASSIVE_API_KEY is None:
+        raise RuntimeError("Massive REST API key is not configured")
+    request_params = dict(params)
+    request_params["apiKey"] = _MASSIVE_API_KEY
+    return f"{MASSIVE_API_URL}{path}?{urlencode(request_params)}"
+
+
+def _massive_api_allows(url: str) -> bool:
+    backoff = FibonacciBackoff()
+    while True:
+        try:
+            with urlopen(url, timeout=30) as response:
+                response.read(1)
+            return True
+        except HTTPError as exc:
+            if exc.code in {401, 403}:
+                return False
+            if exc.code not in {429, 500, 502, 503, 504}:
+                raise
+            if backoff.reached_cap():
+                raise
+            tqdm.write(
+                f"Massive API returned HTTP {exc.code}; retrying in "
+                f"{backoff.delay()} seconds"
+            )
+            time.sleep(backoff.delay())
+            backoff.advance()
+        except URLError:
+            if backoff.reached_cap():
+                raise
+            tqdm.write(
+                f"Massive API connection error; retrying in "
+                f"{backoff.delay()} seconds"
+            )
+            time.sleep(backoff.delay())
+            backoff.advance()
+
+
+def _is_entitled_to_download(key: str) -> bool:
+    dataset = _dataset_for_key(key)
+    if dataset is None:
+        raise ValueError(f"unsupported flatfile key: {key}")
+    path, params = _api_probe_request(dataset, _date_from_key(key))
+    if _massive_api_allows(_massive_api_url(path, params)):
+        return True
+    tqdm.write(f"Skipping unauthorized flatfile {key}")
+    return False
+
+
+def _download_one(job: tuple[str, str]) -> str | None:
     destination, key = job
-    _get_thread_client().download_file(BUCKET, key, destination)
+    if not _is_entitled_to_download(key):
+        return None
+
+    backoff = FibonacciBackoff()
+    while True:
+        try:
+            _get_client().download_file(BUCKET, key, destination)
+            tqdm.write(f"Downloaded {key} -> {destination}")
+            break
+        except Exception as exc:
+            if _is_forbidden_client_error(exc):
+                if backoff.reached_cap():
+                    tqdm.write(f"Skipping unauthorized flatfile {key}")
+                    return None
+                tqdm.write(
+                    f"403 Forbidden downloading {key}; retrying in "
+                    f"{backoff.delay()} seconds"
+                )
+                time.sleep(backoff.delay())
+                backoff.advance()
+                continue
+            if not _should_retry_download_error(exc):
+                raise
+            tqdm.write(
+                f"{_retry_reason(exc)} downloading {key}; retrying in "
+                f"{backoff.delay()} seconds"
+            )
+            time.sleep(backoff.delay())
+            backoff.advance()
     return key
 
 
-def run_downloads(jobs: list[tuple[str, str]], threads: int) -> None:
-    if threads < 1:
-        raise ValueError("--threads must be >= 1")
-
+def run_downloads(jobs: list[tuple[str, str]]) -> None:
     if not jobs:
         return
 
-    with multiprocessing.pool.ThreadPool(processes=threads) as pool:
-        for _ in tqdm(pool.imap(_download_one, jobs), total=len(jobs), unit="file"):
-            pass
+    for _ in tqdm((_download_one(job) for job in jobs), total=len(jobs), unit="file"):
+        pass
+
+
+def _write_job_summary(jobs: list[tuple[str, str]], products: tuple[str, ...]) -> None:
+    counts = {dataset.category: 0 for dataset in _selected_datasets(products)}
+    for _, key in jobs:
+        dataset = _dataset_for_key(key)
+        if dataset is not None and dataset.category in counts:
+            counts[dataset.category] += 1
+    for dataset in _selected_datasets(products):
+        tqdm.write(
+            f"Queued {counts[dataset.category]} {dataset.category} files "
+            f"from {dataset.prefix}"
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
+    set_process_title("massive-dl")
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -220,18 +588,34 @@ def main(argv: list[str] | None = None) -> int:
             "--aws-secret-access-key, or set AWS_ACCESS_KEY_ID and "
             "AWS_SECRET_ACCESS_KEY"
         )
+    if not args.massive_api_key:
+        parser.error(
+            "missing Massive REST API key: provide --massive-api-key, or set "
+            "MASSIVE_API_KEY"
+        )
 
-    global _AWS_ACCESS_KEY_ID, _AWS_SECRET_ACCESS_KEY
+    global _AWS_ACCESS_KEY_ID, _AWS_SECRET_ACCESS_KEY, _MASSIVE_API_KEY
     _AWS_ACCESS_KEY_ID = args.aws_access_key_id
     _AWS_SECRET_ACCESS_KEY = args.aws_secret_access_key
+    _MASSIVE_API_KEY = args.massive_api_key
 
     end_date = args.end_date
     if end_date > dt.date.today() - dt.timedelta(days=1):
         parser.error("--end-date cannot be in the future")
 
-    keys = scan_keys()
-    jobs = build_download_jobs(args.download_path, keys, end_date=end_date)
-    run_downloads(jobs, args.threads)
+    try:
+        products = _normalize_products(args.products)
+    except ValueError as error:
+        parser.error(str(error))
+    keys = scan_keys(products)
+    jobs = build_download_jobs(
+        args.download_path,
+        keys,
+        end_date=end_date,
+        products=products,
+    )
+    _write_job_summary(jobs, products)
+    run_downloads(jobs)
     return 0
 
 

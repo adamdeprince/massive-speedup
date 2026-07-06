@@ -10,5 +10,7 @@ build/
 dist/
 dist-check/
 dist-pypi/
+dist-pypi-*/
+examples/
 *.egg-info/
 .codex

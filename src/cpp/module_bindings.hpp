@@ -77,13 +77,37 @@ template <typename ParserType>
 using StockTradeRowsIterator = typename ParserType::StockTradeRowsIterator;
 
 template <typename ParserType>
+using CryptoTradeRowsIterator = typename ParserType::CryptoTradeRowsIterator;
+
+template <typename ParserType>
+using OptionTradeRowsIterator = typename ParserType::OptionTradeRowsIterator;
+
+template <typename ParserType>
+using OptionQuoteRowsIterator = typename ParserType::OptionQuoteRowsIterator;
+
+template <typename ParserType>
 using StockQuoteRowsIterator = typename ParserType::StockQuoteRowsIterator;
+
+template <typename ParserType>
+using FuturesTradeRowsIterator = typename ParserType::FuturesTradeRowsIterator;
+
+template <typename ParserType>
+using FuturesQuoteRowsIterator = typename ParserType::FuturesQuoteRowsIterator;
 
 template <typename ParserType>
 using StockAggregateRowsIterator = typename ParserType::StockAggregateRowsIterator;
 
 template <typename ParserType>
 using RawStockTradeRowsIterator = typename ParserType::RawStockTradeRowsIterator;
+
+template <typename ParserType>
+using RawCryptoTradeRowsIterator = typename ParserType::RawCryptoTradeRowsIterator;
+
+template <typename ParserType>
+using RawOptionTradeRowsIterator = typename ParserType::RawOptionTradeRowsIterator;
+
+template <typename ParserType>
+using RawOptionQuoteRowsIterator = typename ParserType::RawOptionQuoteRowsIterator;
 
 template <typename ParserType>
 using RawStockQuoteRowsIterator = typename ParserType::RawStockQuoteRowsIterator;
@@ -110,10 +134,25 @@ template <typename ParserType>
 struct StockTradeApi {};
 
 template <typename ParserType>
+struct CryptoTradeApi {};
+
+template <typename ParserType>
+struct OptionTradeApi {};
+
+template <typename ParserType>
+struct OptionQuoteApi {};
+
+template <typename ParserType>
 struct StockQuoteApi {};
 
 template <typename ParserType>
 struct StockAggregateApi {};
+
+template <typename ParserType>
+struct FuturesTradeApi {};
+
+template <typename ParserType>
+struct FuturesQuoteApi {};
 
 template <typename ParserType>
 struct CurrencyQuoteApi {};
@@ -314,6 +353,7 @@ void bind_database_record_file(
           nb::arg("ticker"))
       .def_prop_ro("ticker", &DatabaseType::ticker)
       .def_prop_ro("date", &DatabaseType::date)
+      .def_prop_ro("record_type", &DatabaseType::record_type)
       .def_prop_ro("database_path", &DatabaseType::database_path)
       .def_prop_ro("path", &DatabaseType::path)
       .def("__len__", &DatabaseType::size)
@@ -405,6 +445,176 @@ void bind_database_record_file(
         .def_prop_ro("market_open", &DatabaseType::market_open)
         .def_prop_ro("market_close", &DatabaseType::market_close);
   }
+}
+
+template <typename DatabaseType>
+void bind_futures_database_record_file(
+    nb::module_& m,
+    const char* name,
+    const char* iterator_name) {
+  using IteratorType = typename DatabaseType::Iterator;
+
+  bind_iterator_type<IteratorType>(m, iterator_name);
+
+  nb::class_<DatabaseType>(m, name)
+      .def(
+          "__init__",
+          [](DatabaseType* self,
+             const std::filesystem::path& database_path,
+             nb::handle date,
+             const std::string& ticker,
+             const std::string& exchange) {
+            new (self) DatabaseType(
+                database_path,
+                date_argument_to_string(date),
+                ticker,
+                exchange);
+          },
+          nb::arg("database_path"),
+          nb::arg("date"),
+          nb::arg("ticker"),
+          nb::kw_only(),
+          nb::arg("exchange") = "")
+      .def_prop_ro("ticker", &DatabaseType::ticker)
+      .def_prop_ro("date", &DatabaseType::date)
+      .def_prop_ro("record_type", &DatabaseType::record_type)
+      .def_prop_ro("database_path", &DatabaseType::database_path)
+      .def_prop_ro("path", &DatabaseType::path)
+      .def("__len__", &DatabaseType::size)
+      .def("__getitem__", &DatabaseType::get_item, nb::arg("index"))
+      .def(
+          "__iter__",
+          [](const DatabaseType& self) { return self.iter(); },
+          nb::keep_alive<0, 1>())
+      .def(
+          "index_before_timestamp",
+          [](const DatabaseType& self, nb::handle timestamp, nb::handle galloping) {
+            return self.index_before_timestamp(
+                timestamp_argument_to_ns(self, timestamp),
+                galloping_argument_to_optional_index(galloping));
+          },
+          nb::arg("timestamp"),
+          nb::kw_only(),
+          nb::arg("galloping") = nb::none())
+      .def(
+          "index_after_timestamp",
+          [](const DatabaseType& self, nb::handle timestamp, nb::handle galloping) {
+            return self.index_after_timestamp(
+                timestamp_argument_to_ns(self, timestamp),
+                galloping_argument_to_optional_index(galloping));
+          },
+          nb::arg("timestamp"),
+          nb::kw_only(),
+          nb::arg("galloping") = nb::none())
+      .def(
+          "iterate_bounded",
+          [](const DatabaseType& self, nb::handle start_timestamp) {
+            return self.iterate_bounded(timestamp_argument_to_ns(self, start_timestamp));
+          },
+          nb::arg("start_timestamp"),
+          nb::keep_alive<0, 1>())
+      .def(
+          "iterate_bounded",
+          [](const DatabaseType& self,
+             nb::handle start_timestamp,
+             nb::handle stop_timestamp) {
+            return self.iterate_bounded(
+                timestamp_argument_to_ns(self, start_timestamp),
+                timestamp_argument_to_ns(self, stop_timestamp));
+          },
+          nb::arg("start_timestamp"),
+          nb::arg("stop_timestamp"),
+          nb::keep_alive<0, 1>());
+}
+
+template <typename DatabaseType>
+void bind_option_database_record_file(
+    nb::module_& m,
+    const char* name,
+    const char* iterator_name) {
+  using IteratorType = typename DatabaseType::Iterator;
+
+  bind_iterator_type<IteratorType>(m, iterator_name);
+
+  nb::class_<DatabaseType>(m, name)
+      .def(
+          "__init__",
+          [](DatabaseType* self,
+             const std::filesystem::path& database_path,
+             nb::handle date,
+             const std::string& root,
+             const std::string& expiration,
+             const std::string& right,
+             double strike) {
+            new (self) DatabaseType(
+                database_path,
+                date_argument_to_string(date),
+                root,
+                expiration,
+                right,
+                strike);
+          },
+          nb::arg("database_path"),
+          nb::arg("date"),
+          nb::arg("root"),
+          nb::arg("expiration"),
+          nb::arg("right"),
+          nb::arg("strike"))
+      .def_prop_ro("root", &DatabaseType::root)
+      .def_prop_ro("expiration", &DatabaseType::expiration)
+      .def_prop_ro("right", &DatabaseType::right)
+      .def_prop_ro("strike", &DatabaseType::strike)
+      .def_prop_ro("strike_millis", &DatabaseType::strike_millis)
+      .def_prop_ro("contract_key", &DatabaseType::contract_key)
+      .def_prop_ro("date", &DatabaseType::date)
+      .def_prop_ro("record_type", &DatabaseType::record_type)
+      .def_prop_ro("database_path", &DatabaseType::database_path)
+      .def_prop_ro("path", &DatabaseType::path)
+      .def("__len__", &DatabaseType::size)
+      .def("__getitem__", &DatabaseType::get_item, nb::arg("index"))
+      .def(
+          "__iter__",
+          [](const DatabaseType& self) { return self.iter(); },
+          nb::keep_alive<0, 1>())
+      .def(
+          "index_before_timestamp",
+          [](const DatabaseType& self, nb::handle timestamp, nb::handle galloping) {
+            return self.index_before_timestamp(
+                timestamp_argument_to_ns(self, timestamp),
+                galloping_argument_to_optional_index(galloping));
+          },
+          nb::arg("timestamp"),
+          nb::kw_only(),
+          nb::arg("galloping") = nb::none())
+      .def(
+          "index_after_timestamp",
+          [](const DatabaseType& self, nb::handle timestamp, nb::handle galloping) {
+            return self.index_after_timestamp(
+                timestamp_argument_to_ns(self, timestamp),
+                galloping_argument_to_optional_index(galloping));
+          },
+          nb::arg("timestamp"),
+          nb::kw_only(),
+          nb::arg("galloping") = nb::none())
+      .def(
+          "iterate_bounded",
+          [](const DatabaseType& self, nb::handle start_timestamp) {
+            return self.iterate_bounded(timestamp_argument_to_ns(self, start_timestamp));
+          },
+          nb::arg("start_timestamp"),
+          nb::keep_alive<0, 1>())
+      .def(
+          "iterate_bounded",
+          [](const DatabaseType& self,
+             nb::handle start_timestamp,
+             nb::handle stop_timestamp) {
+            return self.iterate_bounded(
+                timestamp_argument_to_ns(self, start_timestamp),
+                timestamp_argument_to_ns(self, stop_timestamp));
+          },
+          nb::arg("start_timestamp"),
+          nb::arg("stop_timestamp"),
+          nb::keep_alive<0, 1>());
 }
 
 inline void bind_stock_trade_quote_timeline(nb::module_& m) {
@@ -522,6 +732,153 @@ inline void bind_simple_market(nb::module_& m) {
       .def("values", &native::SimpleMarket::values)
       .def("items", &native::SimpleMarket::items)
       .def("as_dict", &native::SimpleMarket::as_dict);
+
+  nb::class_<native::FuturesMarketBroker>(m, "FuturesMarketBroker")
+      .def_prop_ro("symbol", &native::FuturesMarketBroker::symbol)
+      .def_prop_ro("timestamp", &native::FuturesMarketBroker::timestamp)
+      .def_prop_ro("sip_timestamp", &native::FuturesMarketBroker::sip_timestamp)
+      .def(
+          "buy",
+          [](native::FuturesMarketBroker& self, double contracts, nb::handle symbol) {
+            if (symbol.is_none()) {
+              self.buy(contracts);
+              return;
+            }
+            self.buy(contracts, nb::cast<std::string>(symbol));
+          },
+          nb::arg("contracts"),
+          nb::arg("symbol") = nb::none())
+      .def(
+          "sell",
+          [](native::FuturesMarketBroker& self, double contracts, nb::handle symbol) {
+            if (symbol.is_none()) {
+              self.sell(contracts);
+              return;
+            }
+            self.sell(contracts, nb::cast<std::string>(symbol));
+          },
+          nb::arg("contracts"),
+          nb::arg("symbol") = nb::none());
+
+  nb::class_<native::FuturesMarket>(m, "FuturesMarket")
+      .def(
+          "__init__",
+          [](native::FuturesMarket* self,
+             const std::filesystem::path& database_path,
+             nb::handle date,
+             const std::vector<std::string>& symbols,
+             std::uint64_t trade_latency_ns,
+             const std::string& exchange,
+             bool quotes,
+             bool fast) {
+            new (self) native::FuturesMarket(
+                database_path,
+                date_argument_to_string(date),
+                symbols,
+                trade_latency_ns,
+                exchange,
+                quotes,
+                fast);
+          },
+          nb::arg("database_path"),
+          nb::arg("date"),
+          nb::arg("symbols"),
+          nb::arg("trade_latency_ns"),
+          nb::kw_only(),
+          nb::arg("exchange") = "",
+          nb::arg("quotes") = false,
+          nb::arg("fast") = false)
+      .def(
+          "__iter__",
+          [](native::FuturesMarket& self) -> native::FuturesMarket& {
+            return self.iter();
+          },
+          nb::rv_policy::reference_internal)
+      .def("__next__", &native::FuturesMarket::next)
+      .def(
+          "__getitem__",
+          [](const native::FuturesMarket& self, nb::handle key) {
+            return self.get_holding(key);
+          },
+          nb::arg("key").none())
+      .def(
+          "__contains__",
+          [](const native::FuturesMarket& self, nb::handle key) {
+            return self.contains(key);
+          },
+          nb::arg("key").none())
+      .def("__len__", &native::FuturesMarket::size)
+      .def_prop_ro("broker", &native::FuturesMarket::broker)
+      .def("keys", &native::FuturesMarket::keys)
+      .def("values", &native::FuturesMarket::values)
+      .def("items", &native::FuturesMarket::items)
+      .def("as_dict", &native::FuturesMarket::as_dict);
+
+  nb::class_<native::OptionMarketBroker>(m, "OptionMarketBroker")
+      .def_prop_ro("contract", &native::OptionMarketBroker::contract)
+      .def_prop_ro("sip_timestamp", &native::OptionMarketBroker::sip_timestamp)
+      .def("buy", &native::OptionMarketBroker::buy, nb::arg("contracts"))
+      .def("sell", &native::OptionMarketBroker::sell, nb::arg("contracts"));
+
+  nb::class_<native::OptionMarket>(m, "OptionMarket")
+      .def(
+          "__init__",
+          [](native::OptionMarket* self,
+             const std::filesystem::path& database_path,
+             nb::handle date,
+             const std::string& root,
+             const std::string& expiration,
+             const std::string& right,
+             double strike,
+             std::uint64_t trade_latency_ns,
+             bool quotes,
+             bool fast) {
+            new (self) native::OptionMarket(
+                database_path,
+                date_argument_to_string(date),
+                root,
+                expiration,
+                right,
+                strike,
+                trade_latency_ns,
+                quotes,
+                fast);
+          },
+          nb::arg("database_path"),
+          nb::arg("date"),
+          nb::arg("root"),
+          nb::arg("expiration"),
+          nb::arg("right"),
+          nb::arg("strike"),
+          nb::arg("trade_latency_ns"),
+          nb::kw_only(),
+          nb::arg("quotes") = false,
+          nb::arg("fast") = false)
+      .def(
+          "__iter__",
+          [](native::OptionMarket& self) -> native::OptionMarket& {
+            return self.iter();
+          },
+          nb::rv_policy::reference_internal)
+      .def("__next__", &native::OptionMarket::next)
+      .def(
+          "__getitem__",
+          [](const native::OptionMarket& self, nb::handle key) {
+            return self.get_holding(key);
+          },
+          nb::arg("key").none())
+      .def(
+          "__contains__",
+          [](const native::OptionMarket& self, nb::handle key) {
+            return self.contains(key);
+          },
+          nb::arg("key").none())
+      .def("__len__", &native::OptionMarket::size)
+      .def_prop_ro("broker", &native::OptionMarket::broker)
+      .def("keys", &native::OptionMarket::keys)
+      .def("values", &native::OptionMarket::values)
+      .def("items", &native::OptionMarket::items)
+      .def("as_dict", &native::OptionMarket::as_dict);
 }
 
 template <typename AggregatorType>
@@ -889,8 +1246,33 @@ void bind_trade_rows_iterator(nb::module_& m, const char* iterator_name) {
 }
 
 template <typename ParserType>
+void bind_crypto_trade_rows_iterator(nb::module_& m, const char* iterator_name) {
+  bind_iterator_type<CryptoTradeRowsIterator<ParserType>>(m, iterator_name);
+}
+
+template <typename ParserType>
+void bind_option_trade_rows_iterator(nb::module_& m, const char* iterator_name) {
+  bind_iterator_type<OptionTradeRowsIterator<ParserType>>(m, iterator_name);
+}
+
+template <typename ParserType>
+void bind_option_quote_rows_iterator(nb::module_& m, const char* iterator_name) {
+  bind_iterator_type<OptionQuoteRowsIterator<ParserType>>(m, iterator_name);
+}
+
+template <typename ParserType>
 void bind_quote_rows_iterator(nb::module_& m, const char* iterator_name) {
   bind_iterator_type<StockQuoteRowsIterator<ParserType>>(m, iterator_name);
+}
+
+template <typename ParserType>
+void bind_futures_trade_rows_iterator(nb::module_& m, const char* iterator_name) {
+  bind_iterator_type<FuturesTradeRowsIterator<ParserType>>(m, iterator_name);
+}
+
+template <typename ParserType>
+void bind_futures_quote_rows_iterator(nb::module_& m, const char* iterator_name) {
+  bind_iterator_type<FuturesQuoteRowsIterator<ParserType>>(m, iterator_name);
 }
 
 template <typename ParserType>
@@ -901,6 +1283,21 @@ void bind_stock_aggregate_rows_iterator(nb::module_& m, const char* iterator_nam
 template <typename ParserType>
 void bind_raw_trade_rows_iterator(nb::module_& m, const char* iterator_name) {
   bind_iterator_type<RawStockTradeRowsIterator<ParserType>>(m, iterator_name);
+}
+
+template <typename ParserType>
+void bind_raw_crypto_trade_rows_iterator(nb::module_& m, const char* iterator_name) {
+  bind_iterator_type<RawCryptoTradeRowsIterator<ParserType>>(m, iterator_name);
+}
+
+template <typename ParserType>
+void bind_raw_option_trade_rows_iterator(nb::module_& m, const char* iterator_name) {
+  bind_iterator_type<RawOptionTradeRowsIterator<ParserType>>(m, iterator_name);
+}
+
+template <typename ParserType>
+void bind_raw_option_quote_rows_iterator(nb::module_& m, const char* iterator_name) {
+  bind_iterator_type<RawOptionQuoteRowsIterator<ParserType>>(m, iterator_name);
 }
 
 template <typename ParserType>
@@ -968,6 +1365,35 @@ void bind_participant_timestamp_ordering(nb::class_<RowType>& class_) {
 }
 
 template <typename RowType>
+void bind_sip_timestamp_ordering(nb::class_<RowType>& class_) {
+  class_
+      .def(
+          "__lt__",
+          [](const RowType& lhs, const RowType& rhs) {
+            return lhs.sip_timestamp < rhs.sip_timestamp;
+          },
+          nb::is_operator())
+      .def(
+          "__le__",
+          [](const RowType& lhs, const RowType& rhs) {
+            return lhs.sip_timestamp <= rhs.sip_timestamp;
+          },
+          nb::is_operator())
+      .def(
+          "__gt__",
+          [](const RowType& lhs, const RowType& rhs) {
+            return lhs.sip_timestamp > rhs.sip_timestamp;
+          },
+          nb::is_operator())
+      .def(
+          "__ge__",
+          [](const RowType& lhs, const RowType& rhs) {
+            return lhs.sip_timestamp >= rhs.sip_timestamp;
+          },
+          nb::is_operator());
+}
+
+template <typename RowType>
 void bind_window_start_ordering(nb::class_<RowType>& class_) {
   class_
       .def(
@@ -1016,6 +1442,39 @@ void construct_row_from_packed_with_ticker(
 template <typename RowType>
 RowType row_from_packed(nb::bytes packed, const std::string& ticker) {
   return RowType::from_packed(bytes_view(packed), ticker);
+}
+
+inline std::string option_contract_key_from_arguments(
+    const std::string& root,
+    const std::string& expiration,
+    const std::string& right,
+    double strike) {
+  return native::detail::option_contract_key(root, expiration, right, strike);
+}
+
+template <typename RowType>
+void construct_option_row_from_packed(
+    RowType* self,
+    nb::bytes packed,
+    const std::string& root,
+    const std::string& expiration,
+    const std::string& right,
+    double strike) {
+  new (self) RowType(RowType::from_packed(
+      bytes_view(packed),
+      option_contract_key_from_arguments(root, expiration, right, strike)));
+}
+
+template <typename RowType>
+RowType option_row_from_packed(
+    nb::bytes packed,
+    const std::string& root,
+    const std::string& expiration,
+    const std::string& right,
+    double strike) {
+  return RowType::from_packed(
+      bytes_view(packed),
+      option_contract_key_from_arguments(root, expiration, right, strike));
 }
 
 template <typename RowType>
@@ -1105,6 +1564,189 @@ inline void bind_row_models(nb::module_& m, nb::module_& flatfiles) {
       nb::int_(native::StockTrade::packed_size_offset);
   bind_participant_timestamp_ordering(stock_trade);
 
+  auto crypto_trade =
+      nb::class_<native::CryptoTrade>(m, "CryptoTrade")
+          .def(
+              "__init__",
+              [](native::CryptoTrade* self,
+                 const std::vector<std::string>& fields) {
+                new (self) native::CryptoTrade(
+                    native::CryptoTrade::template from_fields<Specialization>(fields));
+              },
+              nb::arg("fields"))
+          .def_prop_ro("ticker", &native::CryptoTrade::ticker_object)
+          .def_prop_ro("conditions", &native::CryptoTrade::conditions_object)
+          .def_prop_ro("exchange", &native::CryptoTrade::exchange_object)
+          .def_prop_ro("id", &native::CryptoTrade::id_object)
+          .def_prop_ro(
+              "participant_timestamp",
+              &native::CryptoTrade::participant_timestamp_object)
+          .def_prop_ro("price", &native::CryptoTrade::price_object)
+          .def_prop_ro("size", &native::CryptoTrade::size_object)
+          .def(
+              "__iter__",
+              [](const native::CryptoTrade& self) {
+                return native::detail::tuple_iterator(self.python_fields());
+              })
+          .def("pack", &native::CryptoTrade::packed_bytes)
+          .def_static(
+              "from_packed",
+              &row_from_packed<native::CryptoTrade>,
+              nb::arg("packed"),
+              nb::arg("ticker"))
+          .def_static(
+              "participant_timestamp_from_packed",
+              &participant_timestamp_from_packed<native::CryptoTrade>,
+              nb::arg("packed"))
+          .def("__hash__", &native::CryptoTrade::hash_value)
+          .def("__str__", &native::CryptoTrade::repr)
+          .def("__repr__", &native::CryptoTrade::repr)
+          .def(
+              "__eq__",
+              [](const native::CryptoTrade& lhs,
+                 const native::CryptoTrade& rhs) { return lhs == rhs; },
+              nb::is_operator());
+  crypto_trade.attr("packed_size") = nb::int_(native::CryptoTrade::packed_size);
+  crypto_trade.attr("packed_participant_timestamp_offset") =
+      nb::int_(native::CryptoTrade::packed_participant_timestamp_offset);
+  crypto_trade.attr("packed_size_offset") =
+      nb::int_(native::CryptoTrade::packed_size_offset);
+  bind_participant_timestamp_ordering(crypto_trade);
+
+  auto option_trade =
+      nb::class_<native::OptionTrade>(m, "OptionTrade")
+          .def(
+              "__init__",
+              [](native::OptionTrade* self,
+                 const std::vector<std::string>& fields) {
+                new (self) native::OptionTrade(
+                    native::OptionTrade::template from_fields<Specialization>(fields));
+              },
+              nb::arg("fields"))
+          .def(
+              "__init__",
+              &construct_option_row_from_packed<native::OptionTrade>,
+              nb::arg("packed"),
+              nb::arg("root"),
+              nb::arg("expiration"),
+              nb::arg("right"),
+              nb::arg("strike"))
+          .def_prop_ro("root", &native::OptionTrade::root_object)
+          .def_prop_ro("expiration", &native::OptionTrade::expiration_object)
+          .def_prop_ro("right", &native::OptionTrade::right_object)
+          .def_prop_ro("strike", &native::OptionTrade::strike_object)
+          .def_prop_ro("conditions", &native::OptionTrade::conditions_object)
+          .def_prop_ro("correction", &native::OptionTrade::correction_object)
+          .def_prop_ro("exchange", &native::OptionTrade::exchange_object)
+          .def_prop_ro("price", &native::OptionTrade::price_object)
+          .def_prop_ro("sip_timestamp", &native::OptionTrade::sip_timestamp_object)
+          .def_prop_ro("size", &native::OptionTrade::size_object)
+          .def(
+              "__iter__",
+              [](const native::OptionTrade& self) {
+                return native::detail::tuple_iterator(self.python_fields());
+              })
+          .def("pack", &native::OptionTrade::packed_bytes)
+          .def_static(
+              "from_packed",
+              &option_row_from_packed<native::OptionTrade>,
+              nb::arg("packed"),
+              nb::arg("root"),
+              nb::arg("expiration"),
+              nb::arg("right"),
+              nb::arg("strike"))
+          .def_static(
+              "sip_timestamp_from_packed",
+              [](nb::bytes packed) {
+                const auto view = bytes_view(packed);
+                native::detail::require_packed_size(
+                    "OptionTrade",
+                    view.size(),
+                    native::OptionTrade::packed_size);
+                return native::OptionTrade::sip_timestamp_at(view.data());
+              },
+              nb::arg("packed"))
+          .def("__hash__", &native::OptionTrade::hash_value)
+          .def("__str__", &native::OptionTrade::repr)
+          .def("__repr__", &native::OptionTrade::repr)
+          .def(
+              "__eq__",
+              [](const native::OptionTrade& lhs,
+                 const native::OptionTrade& rhs) { return lhs == rhs; },
+              nb::is_operator());
+  option_trade.attr("packed_size") = nb::int_(native::OptionTrade::packed_size);
+  option_trade.attr("packed_sip_timestamp_offset") =
+      nb::int_(native::OptionTrade::packed_sip_timestamp_offset);
+  bind_sip_timestamp_ordering(option_trade);
+
+  auto option_quote =
+      nb::class_<native::OptionQuote>(m, "OptionQuote")
+          .def(
+              "__init__",
+              [](native::OptionQuote* self,
+                 const std::vector<std::string>& fields) {
+                new (self) native::OptionQuote(
+                    native::OptionQuote::template from_fields<Specialization>(fields));
+              },
+              nb::arg("fields"))
+          .def(
+              "__init__",
+              &construct_option_row_from_packed<native::OptionQuote>,
+              nb::arg("packed"),
+              nb::arg("root"),
+              nb::arg("expiration"),
+              nb::arg("right"),
+              nb::arg("strike"))
+          .def_prop_ro("root", &native::OptionQuote::root_object)
+          .def_prop_ro("expiration", &native::OptionQuote::expiration_object)
+          .def_prop_ro("right", &native::OptionQuote::right_object)
+          .def_prop_ro("strike", &native::OptionQuote::strike_object)
+          .def_prop_ro("ask_exchange", &native::OptionQuote::ask_exchange_object)
+          .def_prop_ro("ask_price", &native::OptionQuote::ask_price_object)
+          .def_prop_ro("ask_size", &native::OptionQuote::ask_size_object)
+          .def_prop_ro("bid_exchange", &native::OptionQuote::bid_exchange_object)
+          .def_prop_ro("bid_price", &native::OptionQuote::bid_price_object)
+          .def_prop_ro("bid_size", &native::OptionQuote::bid_size_object)
+          .def_prop_ro("sequence_number", &native::OptionQuote::sequence_number_object)
+          .def_prop_ro("sip_timestamp", &native::OptionQuote::sip_timestamp_object)
+          .def(
+              "__iter__",
+              [](const native::OptionQuote& self) {
+                return native::detail::tuple_iterator(self.python_fields());
+              })
+          .def("pack", &native::OptionQuote::packed_bytes)
+          .def_static(
+              "from_packed",
+              &option_row_from_packed<native::OptionQuote>,
+              nb::arg("packed"),
+              nb::arg("root"),
+              nb::arg("expiration"),
+              nb::arg("right"),
+              nb::arg("strike"))
+          .def_static(
+              "sip_timestamp_from_packed",
+              [](nb::bytes packed) {
+                const auto view = bytes_view(packed);
+                native::detail::require_packed_size(
+                    "OptionQuote",
+                    view.size(),
+                    native::OptionQuote::packed_size);
+                return native::OptionQuote::sip_timestamp_at(view.data());
+              },
+              nb::arg("packed"))
+          .def("__hash__", &native::OptionQuote::hash_value)
+          .def("__str__", &native::OptionQuote::repr)
+          .def("__repr__", &native::OptionQuote::repr)
+          .def(
+              "__eq__",
+              [](const native::OptionQuote& lhs,
+                 const native::OptionQuote& rhs) { return lhs == rhs; },
+              nb::is_operator());
+  option_quote.attr("packed_size") = nb::int_(native::OptionQuote::packed_size);
+  option_quote.attr("packed_sip_timestamp_offset") =
+      nb::int_(native::OptionQuote::packed_sip_timestamp_offset);
+  bind_sip_timestamp_ordering(option_quote);
+
   auto stock_quote =
       nb::class_<native::StockQuote>(m, "StockQuote")
           .def(
@@ -1174,6 +1816,125 @@ inline void bind_row_models(nb::module_& m, nb::module_& flatfiles) {
   stock_quote.attr("packed_sip_timestamp_offset") =
       nb::int_(native::StockQuote::packed_sip_timestamp_offset);
   bind_participant_timestamp_ordering(stock_quote);
+
+  auto futures_trade =
+      nb::class_<native::FuturesTrade>(m, "FuturesTrade")
+          .def(
+              "__init__",
+              [](native::FuturesTrade* self,
+                 const std::vector<std::string>& fields) {
+                new (self) native::FuturesTrade(
+                    native::FuturesTrade::template from_fields<Specialization>(fields));
+              },
+              nb::arg("fields"))
+          .def(
+              "__init__",
+              &construct_row_from_packed_with_ticker<native::FuturesTrade>,
+              nb::arg("packed"),
+              nb::arg("ticker"))
+          .def_prop_ro("ticker", &native::FuturesTrade::ticker_object)
+          .def_prop_ro("timestamp", &native::FuturesTrade::timestamp_object)
+          .def_prop_ro("sequence_number", &native::FuturesTrade::sequence_number_object)
+          .def_prop_ro("report_sequence", &native::FuturesTrade::report_sequence_object)
+          .def_prop_ro("price", &native::FuturesTrade::price_object)
+          .def_prop_ro("size", &native::FuturesTrade::size_object)
+          .def_prop_ro("correction", &native::FuturesTrade::correction_object)
+          .def_prop_ro("exchange", &native::FuturesTrade::exchange_object)
+          .def(
+              "__iter__",
+              [](const native::FuturesTrade& self) {
+                return native::detail::tuple_iterator(self.python_fields());
+              })
+          .def("pack", &native::FuturesTrade::packed_bytes)
+          .def_static(
+              "from_packed",
+              &row_from_packed<native::FuturesTrade>,
+              nb::arg("packed"),
+              nb::arg("ticker"))
+          .def_static(
+              "timestamp_from_packed",
+              [](nb::bytes packed) {
+                const auto view = bytes_view(packed);
+                native::detail::require_packed_size(
+                    "FuturesTrade",
+                    view.size(),
+                    native::FuturesTrade::packed_size);
+                return native::FuturesTrade::timestamp_at(view.data());
+              },
+              nb::arg("packed"))
+          .def("__hash__", &native::FuturesTrade::hash_value)
+          .def("__str__", &native::FuturesTrade::repr)
+          .def("__repr__", &native::FuturesTrade::repr)
+          .def(
+              "__eq__",
+              [](const native::FuturesTrade& lhs,
+                 const native::FuturesTrade& rhs) { return lhs == rhs; },
+              nb::is_operator());
+  futures_trade.attr("packed_size") = nb::int_(native::FuturesTrade::packed_size);
+  futures_trade.attr("packed_timestamp_offset") =
+      nb::int_(native::FuturesTrade::packed_timestamp_offset);
+  futures_trade.attr("packed_size_offset") =
+      nb::int_(native::FuturesTrade::packed_size_offset);
+
+  auto futures_quote =
+      nb::class_<native::FuturesQuote>(m, "FuturesQuote")
+          .def(
+              "__init__",
+              [](native::FuturesQuote* self,
+                 const std::vector<std::string>& fields) {
+                new (self) native::FuturesQuote(
+                    native::FuturesQuote::template from_fields<Specialization>(fields));
+              },
+              nb::arg("fields"))
+          .def(
+              "__init__",
+              &construct_row_from_packed_with_ticker<native::FuturesQuote>,
+              nb::arg("packed"),
+              nb::arg("ticker"))
+          .def_prop_ro("ticker", &native::FuturesQuote::ticker_object)
+          .def_prop_ro("timestamp", &native::FuturesQuote::timestamp_object)
+          .def_prop_ro("sequence_number", &native::FuturesQuote::sequence_number_object)
+          .def_prop_ro("report_sequence", &native::FuturesQuote::report_sequence_object)
+          .def_prop_ro("ask_timestamp", &native::FuturesQuote::ask_timestamp_object)
+          .def_prop_ro("ask_price", &native::FuturesQuote::ask_price_object)
+          .def_prop_ro("ask_size", &native::FuturesQuote::ask_size_object)
+          .def_prop_ro("bid_timestamp", &native::FuturesQuote::bid_timestamp_object)
+          .def_prop_ro("bid_price", &native::FuturesQuote::bid_price_object)
+          .def_prop_ro("bid_size", &native::FuturesQuote::bid_size_object)
+          .def_prop_ro("exchange", &native::FuturesQuote::exchange_object)
+          .def(
+              "__iter__",
+              [](const native::FuturesQuote& self) {
+                return native::detail::tuple_iterator(self.python_fields());
+              })
+          .def("pack", &native::FuturesQuote::packed_bytes)
+          .def_static(
+              "from_packed",
+              &row_from_packed<native::FuturesQuote>,
+              nb::arg("packed"),
+              nb::arg("ticker"))
+          .def_static(
+              "timestamp_from_packed",
+              [](nb::bytes packed) {
+                const auto view = bytes_view(packed);
+                native::detail::require_packed_size(
+                    "FuturesQuote",
+                    view.size(),
+                    native::FuturesQuote::packed_size);
+                return native::FuturesQuote::timestamp_at(view.data());
+              },
+              nb::arg("packed"))
+          .def("__hash__", &native::FuturesQuote::hash_value)
+          .def("__str__", &native::FuturesQuote::repr)
+          .def("__repr__", &native::FuturesQuote::repr)
+          .def(
+              "__eq__",
+              [](const native::FuturesQuote& lhs,
+                 const native::FuturesQuote& rhs) { return lhs == rhs; },
+              nb::is_operator());
+  futures_quote.attr("packed_size") = nb::int_(native::FuturesQuote::packed_size);
+  futures_quote.attr("packed_timestamp_offset") =
+      nb::int_(native::FuturesQuote::packed_timestamp_offset);
 
   auto currency_quote =
       nb::class_<native::CurrencyQuote>(m, "CurrencyQuote")
@@ -1319,6 +2080,9 @@ inline void bind_row_models(nb::module_& m, nb::module_& flatfiles) {
   bind_window_start_ordering(currency_aggregate);
 
   flatfiles.attr("StockTrade") = m.attr("StockTrade");
+  flatfiles.attr("CryptoTrade") = m.attr("CryptoTrade");
+  flatfiles.attr("OptionTrade") = m.attr("OptionTrade");
+  flatfiles.attr("OptionQuote") = m.attr("OptionQuote");
   flatfiles.attr("StockQuote") = m.attr("StockQuote");
   flatfiles.attr("StockAggregate") = m.attr("StockAggregate");
   flatfiles.attr("CurrencyQuote") = m.attr("CurrencyQuote");
@@ -1400,7 +2164,7 @@ void bind_stock_flatfile_asset(
   bind_raw_trade_rows_iterator<ImplAsset>(module, raw_trade_iterator_name);
   bind_raw_quote_rows_iterator<ImplAsset>(module, raw_quote_iterator_name);
   bind_raw_stock_aggregate_rows_iterator<ImplAsset>(module, raw_aggregate_iterator_name);
-  bind_raw_line_rows_iterator<ImplAsset>(module, raw_line_iterator_name);
+  static_cast<void>(raw_line_iterator_name);
 
   nb::class_<ImplAsset, BaseAsset> stock_class(module, name);
   stock_class
@@ -1604,6 +2368,257 @@ void bind_stock_flatfile_asset(
 }
 
 template <typename BaseAsset, typename ImplAsset>
+void bind_futures_flatfile_asset(
+    nb::module_& module,
+    const char* name,
+    const char* trade_iterator_name,
+    const char* quote_iterator_name,
+    const char* trade_api_name,
+    const char* quote_api_name) {
+  using TradeIterator = FuturesTradeRowsIterator<ImplAsset>;
+  using QuoteIterator = FuturesQuoteRowsIterator<ImplAsset>;
+  using TradeApi = FuturesTradeApi<ImplAsset>;
+  using QuoteApi = FuturesQuoteApi<ImplAsset>;
+
+  bind_futures_trade_rows_iterator<ImplAsset>(module, trade_iterator_name);
+  bind_futures_quote_rows_iterator<ImplAsset>(module, quote_iterator_name);
+
+  nb::class_<ImplAsset, BaseAsset> futures_class(module, name);
+  futures_class
+      .def(nb::init<>())
+      .def_static(
+          "parse_trades",
+          [](const std::filesystem::path& path) {
+            return TradeIterator(path);
+          },
+          nb::arg("path"))
+      .def_static(
+          "parse_quotes",
+          [](const std::filesystem::path& path) {
+            return QuoteIterator(path);
+          },
+          nb::arg("path"))
+      .def_static("serialize", &serialize_static<ImplAsset>)
+      .def_static("processor_name", &processor_name_static<ImplAsset>);
+
+  nb::class_<TradeApi>(module, trade_api_name)
+      .def_static(
+          "parse",
+          [](const std::filesystem::path& path) {
+            return TradeIterator(path);
+          },
+          nb::arg("path"));
+
+  nb::class_<QuoteApi>(module, quote_api_name)
+      .def_static(
+          "parse",
+          [](const std::filesystem::path& path) {
+            return QuoteIterator(path);
+          },
+          nb::arg("path"));
+
+  futures_class.attr("Trade") = module.attr(trade_api_name);
+  futures_class.attr("Quote") = module.attr(quote_api_name);
+}
+
+template <typename BaseAsset, typename ImplAsset>
+void bind_crypto_flatfile_asset(
+    nb::module_& module,
+    const char* name,
+    const char* trade_iterator_name,
+    const char* raw_trade_iterator_name,
+    const char* raw_line_iterator_name,
+    const char* trade_api_name) {
+  using TradeIterator = CryptoTradeRowsIterator<ImplAsset>;
+  using RawTradeIterator = RawCryptoTradeRowsIterator<ImplAsset>;
+  using RawLineIterator = RawLineRowsIterator<ImplAsset>;
+  using TradeApi = CryptoTradeApi<ImplAsset>;
+
+  bind_crypto_trade_rows_iterator<ImplAsset>(module, trade_iterator_name);
+  bind_raw_crypto_trade_rows_iterator<ImplAsset>(module, raw_trade_iterator_name);
+  static_cast<void>(raw_line_iterator_name);
+
+  nb::class_<ImplAsset, BaseAsset> crypto_class(module, name);
+  crypto_class
+      .def(nb::init<>())
+      .def_static(
+          "parse_trades",
+          [](const std::filesystem::path& path,
+             bool sort_by_participant_timestamp) {
+            return TradeIterator(path, sort_by_participant_timestamp);
+          },
+          nb::arg("path"),
+          nb::kw_only(),
+          nb::arg("sort_by_participant_timestamp") = false)
+      .def_static(
+          "parse_raw_trades",
+          [](const std::filesystem::path& path,
+             bool sort_by_participant_timestamp) {
+            return RawTradeIterator(path, sort_by_participant_timestamp);
+          },
+          nb::arg("path"),
+          nb::kw_only(),
+          nb::arg("sort_by_participant_timestamp") = false)
+      .def_static(
+          "raw_lines",
+          [](const std::filesystem::path& path) {
+            return RawLineIterator(path);
+          },
+          nb::arg("path"))
+      .def_static("serialize", &serialize_static<ImplAsset>)
+      .def_static("processor_name", &processor_name_static<ImplAsset>);
+
+  nb::class_<TradeApi>(module, trade_api_name)
+      .def_static(
+          "parse",
+          [](const std::filesystem::path& path,
+             bool sort_by_participant_timestamp) {
+            return TradeIterator(path, sort_by_participant_timestamp);
+          },
+          nb::arg("path"),
+          nb::kw_only(),
+          nb::arg("sort_by_participant_timestamp") = false)
+      .def_static(
+          "parse_raw",
+          [](const std::filesystem::path& path,
+             bool sort_by_participant_timestamp) {
+            return RawTradeIterator(path, sort_by_participant_timestamp);
+          },
+          nb::arg("path"),
+          nb::kw_only(),
+          nb::arg("sort_by_participant_timestamp") = false)
+      .def_static(
+          "raw_lines",
+          [](const std::filesystem::path& path) {
+            return RawLineIterator(path);
+          },
+          nb::arg("path"));
+
+  crypto_class.attr("Trade") = module.attr(trade_api_name);
+}
+
+template <typename BaseAsset, typename ImplAsset>
+void bind_options_flatfile_asset(
+    nb::module_& module,
+    const char* name,
+    const char* trade_iterator_name,
+    const char* quote_iterator_name,
+    const char* raw_trade_iterator_name,
+    const char* raw_quote_iterator_name,
+    const char* raw_line_iterator_name,
+    const char* trade_api_name,
+    const char* quote_api_name) {
+  using TradeIterator = OptionTradeRowsIterator<ImplAsset>;
+  using QuoteIterator = OptionQuoteRowsIterator<ImplAsset>;
+  using RawTradeIterator = RawOptionTradeRowsIterator<ImplAsset>;
+  using RawQuoteIterator = RawOptionQuoteRowsIterator<ImplAsset>;
+  using RawLineIterator = RawLineRowsIterator<ImplAsset>;
+  using TradeApi = OptionTradeApi<ImplAsset>;
+  using QuoteApi = OptionQuoteApi<ImplAsset>;
+
+  bind_option_trade_rows_iterator<ImplAsset>(module, trade_iterator_name);
+  bind_option_quote_rows_iterator<ImplAsset>(module, quote_iterator_name);
+  bind_raw_option_trade_rows_iterator<ImplAsset>(module, raw_trade_iterator_name);
+  bind_raw_option_quote_rows_iterator<ImplAsset>(module, raw_quote_iterator_name);
+  static_cast<void>(raw_line_iterator_name);
+
+  nb::class_<ImplAsset, BaseAsset> options_class(module, name);
+  options_class
+      .def(nb::init<>())
+      .def_static(
+          "parse_trades",
+          [](const std::filesystem::path& path, bool sort_by_sip_timestamp) {
+            return TradeIterator(path, sort_by_sip_timestamp);
+          },
+          nb::arg("path"),
+          nb::kw_only(),
+          nb::arg("sort_by_sip_timestamp") = false)
+      .def_static(
+          "parse_raw_trades",
+          [](const std::filesystem::path& path, bool sort_by_sip_timestamp) {
+            return RawTradeIterator(path, sort_by_sip_timestamp);
+          },
+          nb::arg("path"),
+          nb::kw_only(),
+          nb::arg("sort_by_sip_timestamp") = false)
+      .def_static(
+          "parse_quotes",
+          [](const std::filesystem::path& path, bool sort_by_sip_timestamp) {
+            return QuoteIterator(path, sort_by_sip_timestamp);
+          },
+          nb::arg("path"),
+          nb::kw_only(),
+          nb::arg("sort_by_sip_timestamp") = false)
+      .def_static(
+          "parse_raw_quotes",
+          [](const std::filesystem::path& path, bool sort_by_sip_timestamp) {
+            return RawQuoteIterator(path, sort_by_sip_timestamp);
+          },
+          nb::arg("path"),
+          nb::kw_only(),
+          nb::arg("sort_by_sip_timestamp") = false)
+      .def_static(
+          "raw_lines",
+          [](const std::filesystem::path& path) {
+            return RawLineIterator(path);
+          },
+          nb::arg("path"))
+      .def_static("serialize", &serialize_static<ImplAsset>)
+      .def_static("processor_name", &processor_name_static<ImplAsset>);
+
+  nb::class_<TradeApi>(module, trade_api_name)
+      .def_static(
+          "parse",
+          [](const std::filesystem::path& path, bool sort_by_sip_timestamp) {
+            return TradeIterator(path, sort_by_sip_timestamp);
+          },
+          nb::arg("path"),
+          nb::kw_only(),
+          nb::arg("sort_by_sip_timestamp") = false)
+      .def_static(
+          "parse_raw",
+          [](const std::filesystem::path& path, bool sort_by_sip_timestamp) {
+            return RawTradeIterator(path, sort_by_sip_timestamp);
+          },
+          nb::arg("path"),
+          nb::kw_only(),
+          nb::arg("sort_by_sip_timestamp") = false)
+      .def_static(
+          "raw_lines",
+          [](const std::filesystem::path& path) {
+            return RawLineIterator(path);
+          },
+          nb::arg("path"));
+
+  nb::class_<QuoteApi>(module, quote_api_name)
+      .def_static(
+          "parse",
+          [](const std::filesystem::path& path, bool sort_by_sip_timestamp) {
+            return QuoteIterator(path, sort_by_sip_timestamp);
+          },
+          nb::arg("path"),
+          nb::kw_only(),
+          nb::arg("sort_by_sip_timestamp") = false)
+      .def_static(
+          "parse_raw",
+          [](const std::filesystem::path& path, bool sort_by_sip_timestamp) {
+            return RawQuoteIterator(path, sort_by_sip_timestamp);
+          },
+          nb::arg("path"),
+          nb::kw_only(),
+          nb::arg("sort_by_sip_timestamp") = false)
+      .def_static(
+          "raw_lines",
+          [](const std::filesystem::path& path) {
+            return RawLineIterator(path);
+          },
+          nb::arg("path"));
+
+  options_class.attr("Trade") = module.attr(trade_api_name);
+  options_class.attr("Quote") = module.attr(quote_api_name);
+}
+
+template <typename BaseAsset, typename ImplAsset>
 void bind_websocket_asset(nb::module_& module, const char* name) {
   nb::class_<ImplAsset, BaseAsset>(module, name)
       .def(nb::init<>())
@@ -1635,6 +2650,7 @@ void bind_currency_flatfile_asset(
   bind_raw_currency_quote_rows_iterator<ImplAsset>(module, raw_quote_iterator_name);
   bind_currency_aggregate_rows_iterator<ImplAsset>(module, aggregate_iterator_name);
   bind_raw_currency_aggregate_rows_iterator<ImplAsset>(module, raw_aggregate_iterator_name);
+  static_cast<void>(raw_line_iterator_name);
 
   nb::class_<ImplAsset, BaseAsset> currency_class(module, name);
   currency_class
@@ -1778,12 +2794,28 @@ void bind_native_module(nb::module_& m, const char* alias_prefix) {
   const std::string gzip_iterator_name = std::string(alias_prefix) + "GzipLinesIterator";
   const std::string stock_trade_iterator_name =
       std::string(alias_prefix) + "StockTradeRowsIterator";
+  const std::string crypto_trade_iterator_name =
+      std::string(alias_prefix) + "CryptoTradeRowsIterator";
+  const std::string option_trade_iterator_name =
+      std::string(alias_prefix) + "OptionTradeRowsIterator";
+  const std::string option_quote_iterator_name =
+      std::string(alias_prefix) + "OptionQuoteRowsIterator";
   const std::string stock_quote_iterator_name =
       std::string(alias_prefix) + "StockQuoteRowsIterator";
   const std::string stock_aggregate_iterator_name =
       std::string(alias_prefix) + "StockAggregateRowsIterator";
+  const std::string futures_trade_iterator_name =
+      std::string(alias_prefix) + "FuturesTradeRowsIterator";
+  const std::string futures_quote_iterator_name =
+      std::string(alias_prefix) + "FuturesQuoteRowsIterator";
   const std::string raw_stock_trade_iterator_name =
       std::string(alias_prefix) + "RawStockTradeRowsIterator";
+  const std::string raw_crypto_trade_iterator_name =
+      std::string(alias_prefix) + "RawCryptoTradeRowsIterator";
+  const std::string raw_option_trade_iterator_name =
+      std::string(alias_prefix) + "RawOptionTradeRowsIterator";
+  const std::string raw_option_quote_iterator_name =
+      std::string(alias_prefix) + "RawOptionQuoteRowsIterator";
   const std::string raw_stock_quote_iterator_name =
       std::string(alias_prefix) + "RawStockQuoteRowsIterator";
   const std::string raw_stock_aggregate_iterator_name =
@@ -1800,10 +2832,20 @@ void bind_native_module(nb::module_& m, const char* alias_prefix) {
       std::string(alias_prefix) + "RawLineRowsIterator";
   const std::string stock_trade_api_name =
       std::string(alias_prefix) + "StockTradeApi";
+  const std::string crypto_trade_api_name =
+      std::string(alias_prefix) + "CryptoTradeApi";
+  const std::string option_trade_api_name =
+      std::string(alias_prefix) + "OptionTradeApi";
+  const std::string option_quote_api_name =
+      std::string(alias_prefix) + "OptionQuoteApi";
   const std::string stock_quote_api_name =
       std::string(alias_prefix) + "StockQuoteApi";
   const std::string stock_aggregate_api_name =
       std::string(alias_prefix) + "StockAggregateApi";
+  const std::string futures_trade_api_name =
+      std::string(alias_prefix) + "FuturesTradeApi";
+  const std::string futures_quote_api_name =
+      std::string(alias_prefix) + "FuturesQuoteApi";
   const std::string currency_quote_api_name =
       std::string(alias_prefix) + "CurrencyQuoteApi";
   const std::string currency_aggregate_api_name =
@@ -1812,8 +2854,18 @@ void bind_native_module(nb::module_& m, const char* alias_prefix) {
       std::string(alias_prefix) + "StockTradeDatabaseIterator";
   const std::string stock_quote_database_iterator_name =
       std::string(alias_prefix) + "StockQuoteDatabaseIterator";
+  const std::string crypto_trade_database_iterator_name =
+      std::string(alias_prefix) + "CryptoTradeDatabaseIterator";
   const std::string currency_quote_database_iterator_name =
       std::string(alias_prefix) + "CurrencyQuoteDatabaseIterator";
+  const std::string futures_trade_database_iterator_name =
+      std::string(alias_prefix) + "FuturesTradeDatabaseIterator";
+  const std::string futures_quote_database_iterator_name =
+      std::string(alias_prefix) + "FuturesQuoteDatabaseIterator";
+  const std::string option_trade_database_iterator_name =
+      std::string(alias_prefix) + "OptionTradeDatabaseIterator";
+  const std::string option_quote_database_iterator_name =
+      std::string(alias_prefix) + "OptionQuoteDatabaseIterator";
 
   m.def(
       "read_gzip_lines_bytes",
@@ -1842,6 +2894,9 @@ void bind_native_module(nb::module_& m, const char* alias_prefix) {
 
   bind_condition_enums(m);
   bind_gzip_lines<Impl<FlatFileStocksParser>>(m, gzip_iterator_name.c_str());
+  bind_raw_line_rows_iterator<Impl<FlatFileStocksParser>>(
+      m,
+      raw_line_iterator_name.c_str());
   bind_common_bases(m);
   bind_database_record_file<native::StockTradeDatabase>(
       m,
@@ -1851,10 +2906,30 @@ void bind_native_module(nb::module_& m, const char* alias_prefix) {
       m,
       "StockQuoteDatabase",
       stock_quote_database_iterator_name.c_str());
+  bind_database_record_file<native::CryptoTradeDatabase>(
+      m,
+      "CryptoTradeDatabase",
+      crypto_trade_database_iterator_name.c_str());
   bind_database_record_file<native::CurrencyQuoteDatabase>(
       m,
       "CurrencyQuoteDatabase",
       currency_quote_database_iterator_name.c_str());
+  bind_futures_database_record_file<native::FuturesTradeDatabase>(
+      m,
+      "FuturesTradeDatabase",
+      futures_trade_database_iterator_name.c_str());
+  bind_futures_database_record_file<native::FuturesQuoteDatabase>(
+      m,
+      "FuturesQuoteDatabase",
+      futures_quote_database_iterator_name.c_str());
+  bind_option_database_record_file<native::OptionTradeDatabase>(
+      m,
+      "OptionTradeDatabase",
+      option_trade_database_iterator_name.c_str());
+  bind_option_database_record_file<native::OptionQuoteDatabase>(
+      m,
+      "OptionQuoteDatabase",
+      option_quote_database_iterator_name.c_str());
   bind_stock_trade_quote_timeline(m);
   bind_simple_market(m);
 
@@ -1872,8 +2947,23 @@ void bind_native_module(nb::module_& m, const char* alias_prefix) {
       stock_trade_api_name.c_str(),
       stock_quote_api_name.c_str(),
       stock_aggregate_api_name.c_str());
-  bind_flatfile_asset<FlatFileOptionsParser, Impl<FlatFileOptionsParser>>(flatfiles, "Options");
-  bind_flatfile_asset<FlatFileFuturesParser, Impl<FlatFileFuturesParser>>(flatfiles, "Futures");
+  bind_options_flatfile_asset<FlatFileOptionsParser, Impl<FlatFileOptionsParser>>(
+      flatfiles,
+      "Options",
+      option_trade_iterator_name.c_str(),
+      option_quote_iterator_name.c_str(),
+      raw_option_trade_iterator_name.c_str(),
+      raw_option_quote_iterator_name.c_str(),
+      raw_line_iterator_name.c_str(),
+      option_trade_api_name.c_str(),
+      option_quote_api_name.c_str());
+  bind_futures_flatfile_asset<FlatFileFuturesParser, Impl<FlatFileFuturesParser>>(
+      flatfiles,
+      "Futures",
+      futures_trade_iterator_name.c_str(),
+      futures_quote_iterator_name.c_str(),
+      futures_trade_api_name.c_str(),
+      futures_quote_api_name.c_str());
   bind_flatfile_asset<FlatFileIndicesParser, Impl<FlatFileIndicesParser>>(flatfiles, "Indices");
   bind_flatfile_asset<FlatFileForexParser, Impl<FlatFileForexParser>>(flatfiles, "Forex");
   bind_currency_flatfile_asset<FlatFileCurrenciesParser, Impl<FlatFileCurrenciesParser>>(
@@ -1886,7 +2976,13 @@ void bind_native_module(nb::module_& m, const char* alias_prefix) {
       raw_line_iterator_name.c_str(),
       currency_quote_api_name.c_str(),
       currency_aggregate_api_name.c_str());
-  bind_flatfile_asset<FlatFileCryptoParser, Impl<FlatFileCryptoParser>>(flatfiles, "Crypto");
+  bind_crypto_flatfile_asset<FlatFileCryptoParser, Impl<FlatFileCryptoParser>>(
+      flatfiles,
+      "Crypto",
+      crypto_trade_iterator_name.c_str(),
+      raw_crypto_trade_iterator_name.c_str(),
+      raw_line_iterator_name.c_str(),
+      crypto_trade_api_name.c_str());
 
   auto websocket = m.def_submodule("WebSocket", "Websocket parser classes.");
   bind_websocket_asset<WebSocketMessagesParser, Impl<WebSocketMessagesParser>>(websocket, "Messages");

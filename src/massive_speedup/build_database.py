@@ -3,17 +3,16 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import datetime as dt
 import gzip
-import multiprocessing.pool
-import os
 import sys
 import time
 import zlib
 from pathlib import Path
 
 from tqdm import tqdm
+
+from ._process_title import set_process_title
 
 
 class HelpOnErrorArgumentParser(argparse.ArgumentParser):
@@ -34,12 +33,33 @@ STOCK_TRADE_HEADER = (
 CURRENCY_QUOTE_HEADER = (
     "ticker,ask_exchange,ask_price,bid_exchange,bid_price,participant_timestamp"
 )
+CRYPTO_TRADE_HEADER = (
+    "ticker,conditions,exchange,id,participant_timestamp,price,size"
+)
+OPTION_TRADE_HEADER = (
+    "ticker,conditions,correction,exchange,price,sip_timestamp,size"
+)
+OPTION_QUOTE_HEADER = (
+    "ticker,ask_exchange,ask_price,ask_size,bid_exchange,bid_price,bid_size,"
+    "sequence_number,sip_timestamp"
+)
+FUTURES_TRADE_HEADER = (
+    "ticker,timestamp,sequence_number,report_sequence,price,size,correction,"
+    "exchange,session_end_date"
+)
+FUTURES_QUOTE_HEADER = (
+    "ticker,timestamp,sequence_number,report_sequence,ask_timestamp,ask_price,"
+    "ask_size,bid_timestamp,bid_price,bid_size,exchange,session_end_date"
+)
 HEADER_RECORD_TYPES = {
     STOCK_TRADE_HEADER: "stock_trade",
     STOCK_QUOTE_HEADER: "stock_quote",
     CURRENCY_QUOTE_HEADER: "currency_quote",
+    CRYPTO_TRADE_HEADER: "crypto_trade",
+    OPTION_TRADE_HEADER: "option_trade",
+    OPTION_QUOTE_HEADER: "option_quote",
 }
-DEFAULT_THREADS = max(16, (os.cpu_count() or 1) * 4)
+FUTURES_EXCHANGES = ("cbot", "cme", "comex", "nymex")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -69,16 +89,28 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Overwrite existing per-symbol database files.",
     )
-    parser.add_argument(
-        "--threads",
-        type=int,
-        default=DEFAULT_THREADS,
-        help=(
-            "Number of worker threads used to process input files "
-            f"(default: {DEFAULT_THREADS})."
-        ),
-    )
     return parser
+
+
+def _infer_futures_exchange(input_path: Path) -> str | None:
+    for part in reversed(input_path.parts):
+        lowered = part.lower()
+        for exchange in FUTURES_EXCHANGES:
+            if lowered in {
+                f"future_{exchange}",
+                f"future_{exchange}_trade",
+                f"future_{exchange}_quote",
+                f"us_futures_{exchange}",
+            }:
+                return exchange
+    return None
+
+
+def _futures_record_type(input_path: Path, kind: str) -> str:
+    exchange = _infer_futures_exchange(input_path)
+    if exchange is None:
+        return f"future_{kind}"
+    return f"future_{exchange}_{kind}"
 
 
 def infer_record_type(input_path: Path) -> str:
@@ -88,6 +120,11 @@ def infer_record_type(input_path: Path) -> str:
     if not header:
         raise ValueError(f"input file has no header: {input_path}")
 
+    if header == FUTURES_TRADE_HEADER:
+        return _futures_record_type(input_path, "trade")
+    if header == FUTURES_QUOTE_HEADER:
+        return _futures_record_type(input_path, "quote")
+
     try:
         return HEADER_RECORD_TYPES[header]
     except KeyError as error:
@@ -95,22 +132,14 @@ def infer_record_type(input_path: Path) -> str:
 
 
 def infer_record_date(input_path: Path, record_type: str) -> str | None:
-    timestamp_index = {
-        "stock_trade": 8,
-        "stock_quote": 11,
-        "currency_quote": 5,
-    }[record_type]
-
-    with gzip.open(input_path, "rt", encoding="utf-8", newline="") as handle:
-        handle.readline()
-        for row in csv.reader(handle):
-            if not row:
-                continue
-            timestamp_ns = int(row[timestamp_index])
-            seconds = timestamp_ns // 1_000_000_000
-            return dt.datetime.fromtimestamp(seconds, tz=dt.timezone.utc).date().isoformat()
-
-    return None
+    del record_type
+    filename = input_path.name
+    try:
+        return dt.date.fromisoformat(filename[:10]).isoformat()
+    except ValueError as error:
+        raise ValueError(
+            f"database input filename must begin with YYYY-MM-DD: {input_path}"
+        ) from error
 
 
 def prepare_incomplete_marker(
@@ -228,11 +257,9 @@ def _process_input_file(
 
 
 def main(argv: list[str] | None = None) -> int:
+    set_process_title("massive-builddb")
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.threads < 1:
-        parser.error("--threads must be >= 1")
-
     tasks: list[tuple[Path, Path, str, bool, Path | None]] = []
     for input_file in expand_input_files(args.input_files):
         try:
@@ -266,21 +293,20 @@ def main(argv: list[str] | None = None) -> int:
     if not tasks:
         return 0
 
-    with multiprocessing.pool.ThreadPool(processes=args.threads) as pool:
-        iterator = pool.imap(_process_input_file, tasks)
-        for input_file, record_type, lines, seconds, error_message in tqdm(
-            iterator,
-            total=len(tasks),
-            unit="file",
-        ):
-            if lines < 0:
-                tqdm.write(
-                    f"Skipping malformed gzip {input_file}: "
-                    f"{error_message or 'failure while decoding compressed rows'}"
-                )
-                continue
-            if args.benchmark:
-                _print_benchmark(input_file, record_type, lines, seconds)
+    for result in tqdm(
+        (_process_input_file(task) for task in tasks),
+        total=len(tasks),
+        unit="file",
+    ):
+        input_file, record_type, lines, seconds, error_message = result
+        if lines < 0:
+            tqdm.write(
+                f"Skipping malformed gzip {input_file}: "
+                f"{error_message or 'failure while decoding compressed rows'}"
+            )
+            continue
+        if args.benchmark:
+            _print_benchmark(input_file, record_type, lines, seconds)
 
     return 0
 

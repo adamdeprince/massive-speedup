@@ -35,6 +35,7 @@ CURRENCY_QUOTE_HEADER = (
 CRYPTO_TRADE_HEADER = (
     "ticker,conditions,exchange,id,participant_timestamp,price,size"
 )
+INDEX_VALUE_HEADER = "ticker,value,timestamp"
 OPTION_TRADE_HEADER = (
     "ticker,conditions,correction,exchange,price,sip_timestamp,size"
 )
@@ -55,6 +56,7 @@ HEADER_RECORD_TYPES = {
     STOCK_QUOTE_HEADER: "stock_quote",
     CURRENCY_QUOTE_HEADER: "currency_quote",
     CRYPTO_TRADE_HEADER: "crypto_trade",
+    INDEX_VALUE_HEADER: "index_value",
     OPTION_TRADE_HEADER: "option_trade",
     OPTION_QUOTE_HEADER: "option_quote",
 }

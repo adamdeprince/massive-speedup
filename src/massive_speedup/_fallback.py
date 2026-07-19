@@ -929,6 +929,58 @@ class CurrencyQuote:
     __str__ = __repr__
 
 
+class IndexValue:
+    __slots__ = ("ticker", "value", "timestamp")
+
+    def __init__(self, fields: list[str]) -> None:
+        if len(fields) != 3:
+            raise ValueError(f"IndexValue expected 3 fields, received {len(fields)}")
+        self.ticker = fields[0]
+        self.value = _parse_float(fields[1])
+        self.timestamp = _parse_int(fields[2])
+
+    def __iter__(self) -> Iterator[object]:
+        yield self.ticker
+        yield self.value
+        yield self.timestamp
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, IndexValue):
+            return NotImplemented
+        return tuple(self) == tuple(other)
+
+    def __lt__(self, other: object) -> bool:
+        if not isinstance(other, IndexValue):
+            return NotImplemented
+        return self.timestamp < other.timestamp
+
+    def __le__(self, other: object) -> bool:
+        if not isinstance(other, IndexValue):
+            return NotImplemented
+        return self.timestamp <= other.timestamp
+
+    def __gt__(self, other: object) -> bool:
+        if not isinstance(other, IndexValue):
+            return NotImplemented
+        return self.timestamp > other.timestamp
+
+    def __ge__(self, other: object) -> bool:
+        if not isinstance(other, IndexValue):
+            return NotImplemented
+        return self.timestamp >= other.timestamp
+
+    def __hash__(self) -> int:
+        return hash(tuple(self))
+
+    def __repr__(self) -> str:
+        return (
+            "IndexValue("
+            f"ticker={self.ticker!r}, value={self.value}, timestamp={self.timestamp})"
+        )
+
+    __str__ = __repr__
+
+
 class CurrencyAggregate:
     __slots__ = (
         "ticker",
@@ -1456,6 +1508,50 @@ class FlatFileFuturesParser(FlatFileParser):
 class FlatFileIndicesParser(FlatFileParser):
     asset_class_name = "indices"
 
+    @classmethod
+    def parse_values(
+        cls,
+        payload: str | Path,
+        *,
+        sort_by_timestamp: bool = False,
+    ) -> Iterator[IndexValue]:
+        with gzip.open(payload, "rt", encoding="utf-8", newline="") as handle:
+            reader = csv.reader(handle)
+            next(reader, None)
+            rows = [IndexValue(fields) for fields in reader if any(fields)]
+
+        if sort_by_timestamp:
+            rows.sort(key=lambda row: (row.timestamp, row.ticker))
+
+        yield from rows
+
+    @classmethod
+    def parse_raw_values(
+        cls,
+        payload: str | Path,
+        *,
+        sort_by_timestamp: bool = False,
+    ) -> Iterator[tuple[bytes, ...]]:
+        with gzip.open(payload, "rt", encoding="utf-8", newline="") as handle:
+            reader = csv.reader(handle)
+            next(reader, None)
+            rows = [tuple(fields) for fields in reader if any(fields)]
+
+        if sort_by_timestamp:
+            rows.sort(key=lambda row: (_parse_int(row[2]), row[0]))
+
+        for row in rows:
+            yield tuple(field.encode("utf-8") for field in row)
+
+    @classmethod
+    def raw_lines(cls, payload: str | Path) -> Iterator[bytes]:
+        with gzip.open(payload, "rb") as handle:
+            next(handle, None)
+            for line in handle:
+                line = line.rstrip(b"\r\n")
+                if line:
+                    yield line
+
 
 class FlatFileForexParser(FlatFileParser):
     asset_class_name = "forex"
@@ -1702,6 +1798,7 @@ FlatFiles.StockAggregate = StockAggregate
 FlatFiles.StockQuotes = StockQuote
 FlatFiles.CurrencyQuote = CurrencyQuote
 FlatFiles.CurrencyAggregate = CurrencyAggregate
+FlatFiles.IndexValue = IndexValue
 
 class StockTradeAggregation:
     __slots__ = ()
@@ -1779,6 +1876,12 @@ FlatFiles.Options.Quote = SimpleNamespace(
     raw_lines=FlatFileOptionsParser.raw_lines,
 )
 
+FlatFiles.Indices.Value = SimpleNamespace(
+    parse=FlatFileIndicesParser.parse_values,
+    parse_raw=FlatFileIndicesParser.parse_raw_values,
+    raw_lines=FlatFileIndicesParser.raw_lines,
+)
+
 
 def build_database_file(*args, **kwargs):
     raise RuntimeError("build_database_file requires the native massive_speedup extension")
@@ -1821,6 +1924,11 @@ def stock_trade_quote_timeline(*args, **kwargs):
 class CurrencyQuoteDatabase:
     def __init__(self, *args, **kwargs):
         raise RuntimeError("CurrencyQuoteDatabase requires the native massive_speedup extension")
+
+
+class IndexValueDatabase:
+    def __init__(self, *args, **kwargs):
+        raise RuntimeError("IndexValueDatabase requires the native massive_speedup extension")
 
 
 class FuturesTradeDatabase:

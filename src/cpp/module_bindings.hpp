@@ -122,6 +122,12 @@ template <typename ParserType>
 using RawCurrencyQuoteRowsIterator = typename ParserType::RawCurrencyQuoteRowsIterator;
 
 template <typename ParserType>
+using IndexValueRowsIterator = typename ParserType::IndexValueRowsIterator;
+
+template <typename ParserType>
+using RawIndexValueRowsIterator = typename ParserType::RawIndexValueRowsIterator;
+
+template <typename ParserType>
 using CurrencyAggregateRowsIterator = typename ParserType::CurrencyAggregateRowsIterator;
 
 template <typename ParserType>
@@ -156,6 +162,9 @@ struct FuturesQuoteApi {};
 
 template <typename ParserType>
 struct CurrencyQuoteApi {};
+
+template <typename ParserType>
+struct IndexValueApi {};
 
 template <typename ParserType>
 struct CurrencyAggregateApi {};
@@ -1321,6 +1330,16 @@ void bind_raw_currency_quote_rows_iterator(nb::module_& m, const char* iterator_
 }
 
 template <typename ParserType>
+void bind_index_value_rows_iterator(nb::module_& m, const char* iterator_name) {
+  bind_iterator_type<IndexValueRowsIterator<ParserType>>(m, iterator_name);
+}
+
+template <typename ParserType>
+void bind_raw_index_value_rows_iterator(nb::module_& m, const char* iterator_name) {
+  bind_iterator_type<RawIndexValueRowsIterator<ParserType>>(m, iterator_name);
+}
+
+template <typename ParserType>
 void bind_currency_aggregate_rows_iterator(nb::module_& m, const char* iterator_name) {
   bind_iterator_type<CurrencyAggregateRowsIterator<ParserType>>(m, iterator_name);
 }
@@ -1418,6 +1437,35 @@ void bind_window_start_ordering(nb::class_<RowType>& class_) {
           "__ge__",
           [](const RowType& lhs, const RowType& rhs) {
             return lhs.window_start >= rhs.window_start;
+          },
+          nb::is_operator());
+}
+
+template <typename RowType>
+void bind_timestamp_ordering(nb::class_<RowType>& class_) {
+  class_
+      .def(
+          "__lt__",
+          [](const RowType& lhs, const RowType& rhs) {
+            return lhs.timestamp < rhs.timestamp;
+          },
+          nb::is_operator())
+      .def(
+          "__le__",
+          [](const RowType& lhs, const RowType& rhs) {
+            return lhs.timestamp <= rhs.timestamp;
+          },
+          nb::is_operator())
+      .def(
+          "__gt__",
+          [](const RowType& lhs, const RowType& rhs) {
+            return lhs.timestamp > rhs.timestamp;
+          },
+          nb::is_operator())
+      .def(
+          "__ge__",
+          [](const RowType& lhs, const RowType& rhs) {
+            return lhs.timestamp >= rhs.timestamp;
           },
           nb::is_operator());
 }
@@ -1995,6 +2043,61 @@ inline void bind_row_models(nb::module_& m, nb::module_& flatfiles) {
       nb::int_(native::CurrencyQuote::packed_participant_timestamp_offset);
   bind_participant_timestamp_ordering(currency_quote);
 
+  auto index_value =
+      nb::class_<native::IndexValue>(m, "IndexValue")
+          .def(
+              "__init__",
+              [](native::IndexValue* self,
+                 const std::vector<std::string>& fields) {
+                new (self) native::IndexValue(
+                    native::IndexValue::template from_fields<Specialization>(fields));
+              },
+              nb::arg("fields"))
+          .def(
+              "__init__",
+              &construct_row_from_packed_with_ticker<native::IndexValue>,
+              nb::arg("packed"),
+              nb::arg("ticker"))
+          .def_prop_ro("ticker", &native::IndexValue::ticker_object)
+          .def_prop_ro("value", &native::IndexValue::value_object)
+          .def_prop_ro("timestamp", &native::IndexValue::timestamp_object)
+          .def(
+              "__iter__",
+              [](const native::IndexValue& self) {
+                return native::detail::tuple_iterator(self.python_fields());
+              })
+          .def("pack", &native::IndexValue::packed_bytes)
+          .def_static(
+              "from_packed",
+              &row_from_packed<native::IndexValue>,
+              nb::arg("packed"),
+              nb::arg("ticker"))
+          .def_static(
+              "timestamp_from_packed",
+              [](nb::bytes packed) {
+                const auto view = bytes_view(packed);
+                native::detail::require_packed_size(
+                    "IndexValue",
+                    view.size(),
+                    native::IndexValue::packed_size);
+                return native::IndexValue::timestamp_at(view.data());
+              },
+              nb::arg("packed"))
+          .def("__hash__", &native::IndexValue::hash_value)
+          .def("__str__", &native::IndexValue::repr)
+          .def("__repr__", &native::IndexValue::repr)
+          .def(
+              "__eq__",
+              [](const native::IndexValue& lhs,
+                 const native::IndexValue& rhs) { return lhs == rhs; },
+              nb::is_operator());
+  index_value.attr("packed_size") = nb::int_(native::IndexValue::packed_size);
+  index_value.attr("packed_timestamp_offset") =
+      nb::int_(native::IndexValue::packed_timestamp_offset);
+  index_value.attr("packed_value_offset") =
+      nb::int_(native::IndexValue::packed_value_offset);
+  bind_timestamp_ordering(index_value);
+
   auto stock_aggregate =
       nb::class_<native::StockAggregate>(m, "StockAggregate")
           .def(
@@ -2093,6 +2196,7 @@ inline void bind_row_models(nb::module_& m, nb::module_& flatfiles) {
   flatfiles.attr("StockQuote") = m.attr("StockQuote");
   flatfiles.attr("StockAggregate") = m.attr("StockAggregate");
   flatfiles.attr("CurrencyQuote") = m.attr("CurrencyQuote");
+  flatfiles.attr("IndexValue") = m.attr("IndexValue");
   flatfiles.attr("CurrencyAggregate") = m.attr("CurrencyAggregate");
   flatfiles.attr("StockQuotes") = m.attr("StockQuote");
   m.attr("StockQuotes") = m.attr("StockQuote");
@@ -2635,6 +2739,76 @@ void bind_websocket_asset(nb::module_& module, const char* name) {
 }
 
 template <typename BaseAsset, typename ImplAsset>
+void bind_indices_flatfile_asset(
+    nb::module_& module,
+    const char* name,
+    const char* value_iterator_name,
+    const char* raw_value_iterator_name,
+    const char* value_api_name) {
+  using ValueIterator = IndexValueRowsIterator<ImplAsset>;
+  using RawValueIterator = RawIndexValueRowsIterator<ImplAsset>;
+  using RawLineIterator = RawLineRowsIterator<ImplAsset>;
+  using ValueApi = IndexValueApi<ImplAsset>;
+
+  bind_index_value_rows_iterator<ImplAsset>(module, value_iterator_name);
+  bind_raw_index_value_rows_iterator<ImplAsset>(module, raw_value_iterator_name);
+
+  nb::class_<ImplAsset, BaseAsset> indices_class(module, name);
+  indices_class
+      .def(nb::init<>())
+      .def_static(
+          "parse_values",
+          [](const std::filesystem::path& path, bool sort_by_timestamp) {
+            return ValueIterator(path, sort_by_timestamp);
+          },
+          nb::arg("path"),
+          nb::kw_only(),
+          nb::arg("sort_by_timestamp") = false)
+      .def_static(
+          "parse_raw_values",
+          [](const std::filesystem::path& path, bool sort_by_timestamp) {
+            return RawValueIterator(path, sort_by_timestamp);
+          },
+          nb::arg("path"),
+          nb::kw_only(),
+          nb::arg("sort_by_timestamp") = false)
+      .def_static(
+          "raw_lines",
+          [](const std::filesystem::path& path) {
+            return RawLineIterator(path);
+          },
+          nb::arg("path"))
+      .def_static("serialize", &serialize_static<ImplAsset>)
+      .def_static("processor_name", &processor_name_static<ImplAsset>);
+
+  nb::class_<ValueApi>(module, value_api_name)
+      .def_static(
+          "parse",
+          [](const std::filesystem::path& path, bool sort_by_timestamp) {
+            return ValueIterator(path, sort_by_timestamp);
+          },
+          nb::arg("path"),
+          nb::kw_only(),
+          nb::arg("sort_by_timestamp") = false)
+      .def_static(
+          "parse_raw",
+          [](const std::filesystem::path& path, bool sort_by_timestamp) {
+            return RawValueIterator(path, sort_by_timestamp);
+          },
+          nb::arg("path"),
+          nb::kw_only(),
+          nb::arg("sort_by_timestamp") = false)
+      .def_static(
+          "raw_lines",
+          [](const std::filesystem::path& path) {
+            return RawLineIterator(path);
+          },
+          nb::arg("path"));
+
+  indices_class.attr("Value") = module.attr(value_api_name);
+}
+
+template <typename BaseAsset, typename ImplAsset>
 void bind_currency_flatfile_asset(
     nb::module_& module,
     const char* name,
@@ -2831,6 +3005,10 @@ void bind_native_module(nb::module_& m, const char* alias_prefix) {
       std::string(alias_prefix) + "CurrencyQuoteRowsIterator";
   const std::string raw_currency_quote_iterator_name =
       std::string(alias_prefix) + "RawCurrencyQuoteRowsIterator";
+  const std::string index_value_iterator_name =
+      std::string(alias_prefix) + "IndexValueRowsIterator";
+  const std::string raw_index_value_iterator_name =
+      std::string(alias_prefix) + "RawIndexValueRowsIterator";
   const std::string currency_aggregate_iterator_name =
       std::string(alias_prefix) + "CurrencyAggregateRowsIterator";
   const std::string raw_currency_aggregate_iterator_name =
@@ -2855,6 +3033,8 @@ void bind_native_module(nb::module_& m, const char* alias_prefix) {
       std::string(alias_prefix) + "FuturesQuoteApi";
   const std::string currency_quote_api_name =
       std::string(alias_prefix) + "CurrencyQuoteApi";
+  const std::string index_value_api_name =
+      std::string(alias_prefix) + "IndexValueApi";
   const std::string currency_aggregate_api_name =
       std::string(alias_prefix) + "CurrencyAggregateApi";
   const std::string stock_trade_database_iterator_name =
@@ -2865,6 +3045,8 @@ void bind_native_module(nb::module_& m, const char* alias_prefix) {
       std::string(alias_prefix) + "CryptoTradeDatabaseIterator";
   const std::string currency_quote_database_iterator_name =
       std::string(alias_prefix) + "CurrencyQuoteDatabaseIterator";
+  const std::string index_value_database_iterator_name =
+      std::string(alias_prefix) + "IndexValueDatabaseIterator";
   const std::string futures_trade_database_iterator_name =
       std::string(alias_prefix) + "FuturesTradeDatabaseIterator";
   const std::string futures_quote_database_iterator_name =
@@ -2921,6 +3103,10 @@ void bind_native_module(nb::module_& m, const char* alias_prefix) {
       m,
       "CurrencyQuoteDatabase",
       currency_quote_database_iterator_name.c_str());
+  bind_database_record_file<native::IndexValueDatabase>(
+      m,
+      "IndexValueDatabase",
+      index_value_database_iterator_name.c_str());
   bind_futures_database_record_file<native::FuturesTradeDatabase>(
       m,
       "FuturesTradeDatabase",
@@ -2971,7 +3157,12 @@ void bind_native_module(nb::module_& m, const char* alias_prefix) {
       futures_quote_iterator_name.c_str(),
       futures_trade_api_name.c_str(),
       futures_quote_api_name.c_str());
-  bind_flatfile_asset<FlatFileIndicesParser, Impl<FlatFileIndicesParser>>(flatfiles, "Indices");
+  bind_indices_flatfile_asset<FlatFileIndicesParser, Impl<FlatFileIndicesParser>>(
+      flatfiles,
+      "Indices",
+      index_value_iterator_name.c_str(),
+      raw_index_value_iterator_name.c_str(),
+      index_value_api_name.c_str());
   bind_flatfile_asset<FlatFileForexParser, Impl<FlatFileForexParser>>(flatfiles, "Forex");
   bind_currency_flatfile_asset<FlatFileCurrenciesParser, Impl<FlatFileCurrenciesParser>>(
       flatfiles,

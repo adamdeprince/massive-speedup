@@ -4848,6 +4848,159 @@ struct CurrencyQuote {
   }
 };
 
+struct IndexValue {
+  static constexpr std::size_t packed_size = 16;
+  static constexpr std::size_t packed_timestamp_offset = 0;
+  static constexpr std::size_t packed_value_offset = 8;
+  using PackedData = detail::PackedBuffer<packed_size>;
+  enum AttributeIndex : std::size_t {
+    ticker_attribute,
+    value_attribute,
+    timestamp_attribute,
+    attribute_count,
+  };
+
+  std::string ticker;
+  double value = 0.0;
+  std::uint64_t timestamp = 0;
+  mutable std::unique_ptr<detail::LazyPythonObjectCache<attribute_count>> object_cache_;
+
+  IndexValue() = default;
+
+  IndexValue(const IndexValue& other)
+      : ticker(other.ticker), value(other.value), timestamp(other.timestamp) {}
+
+  IndexValue& operator=(const IndexValue& other) {
+    if (this == &other) {
+      return *this;
+    }
+    ticker = other.ticker;
+    value = other.value;
+    timestamp = other.timestamp;
+    object_cache_.reset();
+    return *this;
+  }
+
+  IndexValue(IndexValue&&) noexcept = default;
+  IndexValue& operator=(IndexValue&&) noexcept = default;
+
+  IndexValue(std::string_view packed_data, std::string_view ticker_value) {
+    *this = from_packed(packed_data, ticker_value);
+  }
+
+  IndexValue(const char* packed_data, std::string_view ticker_value)
+      : IndexValue(std::string_view(packed_data, packed_size), ticker_value) {}
+
+  template <typename Specialization>
+  static IndexValue from_fields(const std::vector<std::string>& fields) {
+    detail::require_field_count("IndexValue", fields.size(), 3);
+    IndexValue result;
+    result.ticker = fields[0];
+    result.value = Specialization::parse_double(fields[1], "value");
+    result.timestamp = Specialization::template parse_integer<std::uint64_t>(
+        fields[2],
+        "timestamp");
+    return result;
+  }
+
+  static IndexValue from_packed(std::string_view packed_data) {
+    detail::require_packed_size("IndexValue", packed_data.size(), packed_size);
+    IndexValue result;
+    std::size_t offset = 0;
+    result.timestamp = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
+    result.value = detail::read_double_le(packed_data, offset);
+    return result;
+  }
+
+  static IndexValue from_packed(
+      std::string_view packed_data,
+      std::string_view ticker_value) {
+    IndexValue result = from_packed(packed_data);
+    result.ticker.assign(ticker_value);
+    return result;
+  }
+
+  static IndexValue from_packed_data(
+      const char* packed_data,
+      std::string_view ticker_value) {
+    return from_packed(std::string_view(packed_data, packed_size), ticker_value);
+  }
+
+  static std::uint64_t timestamp_at(const void* packed_data) {
+    return detail::read_uint64_le_at(packed_data, packed_timestamp_offset);
+  }
+
+  static std::uint64_t participant_timestamp_at(const void* packed_data) {
+    return timestamp_at(packed_data);
+  }
+
+  static double value_at(const void* packed_data) {
+    return detail::read_double_le_at(packed_data, packed_value_offset);
+  }
+
+  PackedData pack() const {
+    PackedData output{};
+    std::size_t offset = 0;
+    detail::write_unsigned_le(output, offset, timestamp);
+    detail::write_double_le(output, offset, value);
+    return output;
+  }
+
+  nanobind::bytes packed_bytes() const {
+    return detail::packed_bytes(pack());
+  }
+
+  bool operator==(const IndexValue& other) const {
+    return ticker == other.ticker && value == other.value && timestamp == other.timestamp;
+  }
+
+  nanobind::object ticker_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        ticker_attribute,
+        [&] { return detail::string_object_new_ref(ticker); });
+  }
+
+  nanobind::object value_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        value_attribute,
+        [&] { return detail::double_object_new_ref(value); });
+  }
+
+  nanobind::object timestamp_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        timestamp_attribute,
+        [&] { return detail::uint64_object_new_ref(timestamp); });
+  }
+
+  nanobind::list python_fields() const {
+    nanobind::list values;
+    values.append(ticker_object());
+    values.append(value_object());
+    values.append(timestamp_object());
+    return values;
+  }
+
+  std::size_t hash_value() const {
+    std::size_t seed = 0;
+    detail::hash_combine(seed, ticker);
+    detail::hash_combine(seed, value);
+    detail::hash_combine(seed, timestamp);
+    return seed;
+  }
+
+  std::string repr() const {
+    std::ostringstream out;
+    out << "IndexValue("
+        << "ticker='" << ticker << "', "
+        << "value=" << value << ", "
+        << "timestamp=" << timestamp << ")";
+    return out.str();
+  }
+};
+
 struct StockAggregate {
   static constexpr std::size_t packed_size = 56;
   using PackedData = detail::PackedBuffer<packed_size>;
@@ -6447,6 +6600,15 @@ struct CurrencyQuoteDatabaseTraits {
   }
 };
 
+struct IndexValueDatabaseTraits {
+  using row_type = IndexValue;
+  static constexpr std::string_view record_type = "index_value";
+
+  static std::uint64_t search_timestamp_at(const void* packed_data) {
+    return IndexValue::timestamp_at(packed_data);
+  }
+};
+
 struct FuturesTradeDatabaseTraits {
   using row_type = FuturesTrade;
   static constexpr std::string_view record_type = "future_trade";
@@ -6968,6 +7130,12 @@ class CryptoTradeDatabase
 
 class CurrencyQuoteDatabase
     : public DatabaseRecordFile<CurrencyQuoteDatabaseTraits> {
+ public:
+  using DatabaseRecordFile::DatabaseRecordFile;
+};
+
+class IndexValueDatabase
+    : public DatabaseRecordFile<IndexValueDatabaseTraits> {
  public:
   using DatabaseRecordFile::DatabaseRecordFile;
 };
@@ -8572,6 +8740,7 @@ class Implementation : public Base {
   using RawStockQuote = std::array<std::string, 14>;
   using RawStockAggregate = std::array<std::string, 8>;
   using RawCurrencyQuote = std::array<std::string, 6>;
+  using RawIndexValue = std::array<std::string, 3>;
   using RawCurrencyAggregate = std::array<std::string, 8>;
   using RawLineRowsIterator = SharedRawLineRowsIterator<Specialization>;
 
@@ -8962,6 +9131,36 @@ class Implementation : public Base {
         }
 
         row = Implementation::parse_currency_quote_row(line);
+        return true;
+      }
+
+      return false;
+    }
+
+   private:
+    detail::BufferedGzipLineReader reader_;
+    bool is_first_line_ = true;
+  };
+
+  class IndexValueStreamState {
+   public:
+    explicit IndexValueStreamState(const std::filesystem::path& path)
+        : reader_(path) {}
+
+    bool next_row(IndexValue& row) {
+      std::string_view line;
+
+      while (reader_.template next_line<Specialization>(line)) {
+        if (is_first_line_) {
+          is_first_line_ = false;
+          continue;
+        }
+
+        if (line.empty()) {
+          continue;
+        }
+
+        row = Implementation::parse_index_value_row(line);
         return true;
       }
 
@@ -9463,6 +9662,54 @@ class Implementation : public Base {
     detail::RawBytesInternCache intern_cache_;
   };
 
+  class RawIndexValueStreamState {
+   public:
+    explicit RawIndexValueStreamState(const std::filesystem::path& path)
+        : reader_(path) {}
+
+    RawIndexValueStreamState(const RawIndexValueStreamState&) = delete;
+    RawIndexValueStreamState& operator=(const RawIndexValueStreamState&) = delete;
+    RawIndexValueStreamState(RawIndexValueStreamState&&) noexcept = default;
+    RawIndexValueStreamState& operator=(RawIndexValueStreamState&&) noexcept = default;
+
+    bool next_row(RawIndexValue& row) {
+      std::string_view line;
+      while (reader_.template next_line<Specialization>(line)) {
+        if (is_first_line_) {
+          is_first_line_ = false;
+          continue;
+        }
+        if (line.empty()) {
+          continue;
+        }
+        row = Implementation::parse_raw_index_value_row(line);
+        return true;
+      }
+      return false;
+    }
+
+    bool next_tuple(nanobind::tuple& row) {
+      std::string_view line;
+      while (reader_.template next_line<Specialization>(line)) {
+        if (is_first_line_) {
+          is_first_line_ = false;
+          continue;
+        }
+        if (line.empty()) {
+          continue;
+        }
+        row = Implementation::parse_raw_index_value_tuple(line, intern_cache_);
+        return true;
+      }
+      return false;
+    }
+
+   private:
+    detail::BufferedGzipLineReader reader_;
+    bool is_first_line_ = true;
+    detail::RawBytesInternCache intern_cache_;
+  };
+
   class RawStockAggregateStreamState {
    public:
     explicit RawStockAggregateStreamState(const std::filesystem::path& path)
@@ -9842,6 +10089,42 @@ class Implementation : public Base {
    private:
     std::optional<CurrencyQuoteStreamState> stream_state_;
     std::vector<CurrencyQuote> rows_;
+    std::size_t row_index_ = 0;
+  };
+
+  class IndexValueRowsIterator {
+   public:
+    explicit IndexValueRowsIterator(
+        const std::filesystem::path& path,
+        bool sort_by_timestamp = false) {
+      if (sort_by_timestamp) {
+        rows_ = load_rows<IndexValue>(path, &Implementation::parse_index_value_row);
+        std::stable_sort(
+            rows_.begin(),
+            rows_.end(),
+            [](const IndexValue& lhs, const IndexValue& rhs) {
+              if (lhs.timestamp != rhs.timestamp) {
+                return lhs.timestamp < rhs.timestamp;
+              }
+              return lhs.ticker < rhs.ticker;
+            });
+      } else {
+        stream_state_.emplace(path);
+      }
+    }
+
+    IndexValueRowsIterator& iter() { return *this; }
+
+    IndexValue next() {
+      return Implementation::template next_parsed_row<IndexValue, IndexValueStreamState>(
+          stream_state_,
+          rows_,
+          row_index_);
+    }
+
+   private:
+    std::optional<IndexValueStreamState> stream_state_;
+    std::vector<IndexValue> rows_;
     std::size_t row_index_ = 0;
   };
 
@@ -10333,6 +10616,69 @@ class Implementation : public Base {
     detail::RawBytesInternCache intern_cache_;
   };
 
+  class RawIndexValueRowsIterator {
+   public:
+    explicit RawIndexValueRowsIterator(
+        const std::filesystem::path& path,
+        bool sort_by_timestamp = false) {
+      if (sort_by_timestamp) {
+        rows_ = load_rows<RawIndexValue>(
+            path,
+            &Implementation::parse_raw_index_value_row);
+        std::stable_sort(
+            rows_.begin(),
+            rows_.end(),
+            [](const RawIndexValue& lhs, const RawIndexValue& rhs) {
+              const auto lhs_timestamp =
+                  Specialization::template parse_integer<std::uint64_t>(
+                      lhs[2],
+                      "timestamp");
+              const auto rhs_timestamp =
+                  Specialization::template parse_integer<std::uint64_t>(
+                      rhs[2],
+                      "timestamp");
+              if (lhs_timestamp != rhs_timestamp) {
+                return lhs_timestamp < rhs_timestamp;
+              }
+              return lhs[0] < rhs[0];
+            });
+      } else {
+        stream_state_.emplace(path);
+      }
+    }
+
+    RawIndexValueRowsIterator(const RawIndexValueRowsIterator&) = delete;
+    RawIndexValueRowsIterator& operator=(const RawIndexValueRowsIterator&) = delete;
+    RawIndexValueRowsIterator(RawIndexValueRowsIterator&&) noexcept = default;
+    RawIndexValueRowsIterator& operator=(RawIndexValueRowsIterator&&) noexcept = default;
+
+    RawIndexValueRowsIterator& iter() { return *this; }
+
+    nanobind::tuple next() {
+      if (stream_state_) {
+        nanobind::tuple row;
+        if (stream_state_->next_tuple(row)) {
+          return row;
+        }
+        stream_state_.reset();
+        throw nanobind::stop_iteration();
+      }
+
+      if (row_index_ >= rows_.size()) {
+        throw nanobind::stop_iteration();
+      }
+      return Implementation::raw_index_value_array_to_tuple(
+          rows_[row_index_++],
+          intern_cache_);
+    }
+
+   private:
+    std::optional<RawIndexValueStreamState> stream_state_;
+    std::vector<RawIndexValue> rows_;
+    std::size_t row_index_ = 0;
+    detail::RawBytesInternCache intern_cache_;
+  };
+
   class RawStockAggregateRowsIterator {
    public:
     explicit RawStockAggregateRowsIterator(
@@ -10648,6 +10994,19 @@ class Implementation : public Base {
           },
           [](const CurrencyQuote& row) { return row.participant_timestamp; },
           force);
+    }
+
+    if (record_type == "index_value") {
+      return build_parsed_database<IndexValue>(
+          input_path,
+          database_path,
+          record_type,
+          [](std::string_view line) {
+            return Implementation::parse_index_value_row(line);
+          },
+          [](const IndexValue& row) { return row.timestamp; },
+          force,
+          true);
     }
 
     if (record_type == "future_trade" ||
@@ -11528,6 +11887,67 @@ class Implementation : public Base {
             "participant_timestamp");
 
     cursor.finish();
+    return result;
+  }
+
+  static IndexValue parse_index_value_row(std::string_view line) {
+    detail::CsvLineCursor cursor(line);
+    std::string scratch;
+    IndexValue result;
+
+    result.ticker.assign(cursor.template next_field<Specialization, true>(scratch));
+    result.value = Specialization::parse_double(
+        cursor.template next_field<Specialization, true>(scratch),
+        "value");
+    result.timestamp =
+        Specialization::template parse_integer<std::uint64_t>(
+            cursor.template next_field<Specialization, false>(scratch),
+            "timestamp");
+
+    cursor.finish();
+    return result;
+  }
+
+  static RawIndexValue parse_raw_index_value_row(std::string_view line) {
+    detail::CsvLineCursor cursor(line);
+    std::string scratch;
+    RawIndexValue result;
+    result[0].assign(cursor.template next_field<Specialization, true>(scratch));
+    result[1].assign(cursor.template next_field<Specialization, true>(scratch));
+    result[2].assign(cursor.template next_field<Specialization, false>(scratch));
+    cursor.finish();
+    return result;
+  }
+
+  static nanobind::tuple parse_raw_index_value_tuple(
+      std::string_view line,
+      detail::RawBytesInternCache& intern_cache) {
+    detail::CsvLineCursor cursor(line);
+    std::string scratch;
+    nanobind::tuple result = make_raw_tuple<3>();
+    set_raw_ticker_field(
+        result,
+        cursor.template next_field<Specialization, true>(scratch),
+        intern_cache);
+    set_raw_bytes_field(
+        result,
+        1,
+        cursor.template next_field<Specialization, true>(scratch));
+    set_raw_bytes_field(
+        result,
+        2,
+        cursor.template next_field<Specialization, false>(scratch));
+    cursor.finish();
+    return result;
+  }
+
+  static nanobind::tuple raw_index_value_array_to_tuple(
+      const RawIndexValue& fields,
+      detail::RawBytesInternCache& intern_cache) {
+    nanobind::tuple result = make_raw_tuple<3>();
+    set_raw_ticker_field(result, fields[0], intern_cache);
+    set_raw_bytes_field(result, 1, fields[1]);
+    set_raw_bytes_field(result, 2, fields[2]);
     return result;
   }
 

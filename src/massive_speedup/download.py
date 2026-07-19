@@ -20,7 +20,7 @@ from ._process_title import set_process_title
 BUCKET = "flatfiles"
 ENDPOINT_URL = "https://files.massive.com"
 MASSIVE_API_URL = "https://api.massive.com"
-ALL_PRODUCTS = ("stocks", "currencies", "futures", "crypto", "options")
+ALL_PRODUCTS = ("stocks", "currencies", "futures", "crypto", "options", "indices")
 PRODUCT_ALIASES = {
     "stock": "stocks",
     "stocks": "stocks",
@@ -32,6 +32,8 @@ PRODUCT_ALIASES = {
     "cryptos": "crypto",
     "option": "options",
     "options": "options",
+    "index": "indices",
+    "indices": "indices",
 }
 FUTURES_EXCHANGES = ("cbot", "cme", "comex", "nymex")
 FUTURES_PROBE_SYMBOLS = {
@@ -83,6 +85,7 @@ DATASETS: tuple[Dataset, ...] = (
     Dataset("crypto", "crypto_trade", "global_crypto/trades_v1"),
     Dataset("options", "option_trade", "us_options_opra/trades_v1"),
     Dataset("options", "option_quote", "us_options_opra/quotes_v1"),
+    Dataset("indices", "index_value", "us_indices/values_v1"),
     *(
         Dataset(
             "futures",
@@ -126,7 +129,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Root directory for downloads. Files are placed under "
             "dataset-specific directories such as stock_trade, stock_quote, "
             "currency_quote, crypto_trade, option_trade, option_quote, "
-            "and future_cme_trade."
+            "future_cme_trade, and index_value."
         ),
     )
     parser.add_argument(
@@ -134,7 +137,8 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         default=list(ALL_PRODUCTS),
         help=(
-            "Products to download: stocks, currencies, futures, crypto, options. "
+            "Products to download: stocks, currencies, futures, crypto, options, "
+            "indices. "
             "Singular aliases are accepted. Values may be repeated or "
             "comma-delimited. Defaults to all products."
         ),
@@ -456,6 +460,13 @@ def _api_probe_request(dataset: Dataset, current: dt.date) -> tuple[str, dict[st
             "timestamp": date_text,
             "order": "asc",
             "sort": "timestamp",
+            "limit": 1,
+        }
+    if category == "index_value":
+        return "/v3/snapshot/indices", {
+            "ticker": "I:SPX",
+            "order": "asc",
+            "sort": "ticker",
             "limit": 1,
         }
     if dataset.product == "futures":

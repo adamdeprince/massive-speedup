@@ -13,6 +13,7 @@ from massive_speedup import (
     CurrencyAggregate,
     CurrencyQuote,
     FlatFiles,
+    IndexValue,
     OptionQuote,
     OptionTrade,
     StockAggregate,
@@ -303,6 +304,37 @@ def test_flatfiles_currencies_quote_parse_and_parse_raw(tmp_path: Path) -> None:
         b"1757552407000000000",
     )
     assert quote.tickers == ("AED", "AUD")
+
+
+def test_flatfiles_indices_value_parse_and_parse_raw(tmp_path: Path) -> None:
+    path = tmp_path / "index_values.csv.gz"
+    with gzip.open(path, "wt", encoding="utf-8", newline="") as handle:
+        handle.write("ticker,value,timestamp\n")
+        handle.write("I:AAPLCW,87.27,1784295061137000000\n")
+
+    value = next(FlatFiles.Indices.Value.parse(path))
+    raw_value = next(FlatFiles.Indices.Value.parse_raw(path))
+
+    assert isinstance(value, IndexValue)
+    assert tuple(value) == ("I:AAPLCW", 87.27, 1784295061137000000)
+    assert raw_value == (b"I:AAPLCW", b"87.27", b"1784295061137000000")
+    assert list(FlatFiles.Indices.Value.raw_lines(path)) == [
+        b"I:AAPLCW,87.27,1784295061137000000"
+    ]
+
+
+def test_flatfiles_indices_values_sort_by_timestamp(tmp_path: Path) -> None:
+    path = tmp_path / "index_values.csv.gz"
+    with gzip.open(path, "wt", encoding="utf-8", newline="") as handle:
+        handle.write("ticker,value,timestamp\n")
+        handle.write("I:LATE,2.0,20\n")
+        handle.write("I:EARLY,1.0,10\n")
+
+    values = list(FlatFiles.Indices.Value.parse(path, sort_by_timestamp=True))
+    raw_values = list(FlatFiles.Indices.Value.parse_raw(path, sort_by_timestamp=True))
+
+    assert [row.ticker for row in values] == ["I:EARLY", "I:LATE"]
+    assert [row[0] for row in raw_values] == [b"I:EARLY", b"I:LATE"]
 
 
 def test_flatfiles_currencies_aggregate_parse_and_parse_raw(tmp_path: Path) -> None:
@@ -933,6 +965,7 @@ def test_build_database_infers_record_type_from_header(tmp_path: Path) -> None:
         build_database.STOCK_QUOTE_HEADER: "stock_quote",
         build_database.CURRENCY_QUOTE_HEADER: "currency_quote",
         build_database.CRYPTO_TRADE_HEADER: "crypto_trade",
+        build_database.INDEX_VALUE_HEADER: "index_value",
         build_database.OPTION_TRADE_HEADER: "option_trade",
         build_database.OPTION_QUOTE_HEADER: "option_quote",
     }
@@ -1448,6 +1481,46 @@ def test_build_database_file_native_uses_filename_date_for_currency_quote(
     assert len(output.read_bytes()) == module.CurrencyQuote.packed_size
 
 
+def test_build_database_file_native_writes_searchable_index_values(
+    tmp_path: Path,
+) -> None:
+    from massive_speedup import build_database
+    try:
+        module = import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
+
+    path = tmp_path / "index_value" / "2026-07-17.csv.gz"
+    path.parent.mkdir()
+    with gzip.open(path, "wt", encoding="utf-8", newline="") as handle:
+        handle.write(build_database.INDEX_VALUE_HEADER + "\n")
+        handle.write("I:AAPLCW,87.27,1784295061137000000\n")
+        handle.write("I:AAPLCW,87.26,1784320540557000000\n")
+
+    rows_written = build_database.write_database_file(
+        path,
+        tmp_path / "db",
+        "index_value",
+    )
+    records = module.IndexValueDatabase(
+        tmp_path / "db",
+        "2026-07-17",
+        "I:AAPLCW",
+    )
+
+    assert rows_written == 2
+    assert len(records) == 2
+    assert records.record_type == "index_value"
+    assert records[0].value == pytest.approx(87.27)
+    assert records[0].timestamp == 1784295061137000000
+    assert records.index_before_timestamp(1784320540556999999) == 0
+    assert records.index_after_timestamp(1784295061137000001) == 1
+    packed = records[1].pack()
+    assert len(packed) == module.IndexValue.packed_size == 16
+    assert module.IndexValue.timestamp_from_packed(packed) == 1784320540557000000
+    assert module.IndexValue.from_packed(packed, "I:AAPLCW") == records[1]
+
+
 def test_build_database_file_native_writes_crypto_trade_databases(
     tmp_path: Path,
 ) -> None:
@@ -1894,6 +1967,8 @@ def test_direct_native_module_exports_api() -> None:
     assert hasattr(module, "CurrencyQuote")
     assert hasattr(module, "CurrencyAggregate")
     assert hasattr(module, "CurrencyQuoteDatabase")
+    assert hasattr(module, "IndexValue")
+    assert hasattr(module, "IndexValueDatabase")
     assert hasattr(module, "gzip_lines")
     assert hasattr(module, "build_database_file")
 
@@ -3305,6 +3380,26 @@ def test_download_options_entitlement_preflight_uses_massive_api(
     assert captured_urls == [expected_url]
 
 
+def test_download_indices_entitlement_preflight_uses_massive_api(monkeypatch) -> None:
+    from massive_speedup import download
+
+    captured_urls: list[str] = []
+    monkeypatch.setattr(download, "_MASSIVE_API_KEY", "api-key")
+    monkeypatch.setattr(
+        download,
+        "_massive_api_allows",
+        lambda url: captured_urls.append(url) or True,
+    )
+
+    assert download._is_entitled_to_download(
+        "us_indices/values_v1/2026/07/2026-07-17.csv.gz"
+    )
+    assert captured_urls == [
+        "https://api.massive.com/v3/snapshot/indices?"
+        "ticker=I%3ASPX&order=asc&sort=ticker&limit=1&apiKey=api-key"
+    ]
+
+
 def test_download_product_selection_and_futures_jobs(tmp_path: Path) -> None:
     from massive_speedup import download
 
@@ -3391,6 +3486,25 @@ def test_download_product_selection_and_options_jobs(tmp_path: Path) -> None:
     ]
 
 
+def test_download_product_selection_and_indices_jobs(tmp_path: Path) -> None:
+    from massive_speedup import download
+
+    day = dt.date.today() - dt.timedelta(days=1)
+    stem = f"{day.year}-{day.month:02d}-{day.day:02d}.csv.gz"
+    key = f"us_indices/values_v1/{day.year}/{day.month:02d}/{stem}"
+
+    jobs = download.build_download_jobs(
+        tmp_path,
+        {key},
+        end_date=day,
+        products=("indices",),
+    )
+
+    assert jobs == [
+        (str((tmp_path / "index_value" / stem).resolve()), key),
+    ]
+
+
 def test_download_parser_accepts_crypto_product_aliases() -> None:
     from massive_speedup import download
 
@@ -3433,6 +3547,28 @@ def test_download_parser_accepts_options_product_aliases() -> None:
     )
 
     assert download._normalize_products(args.products) == ("options",)
+
+
+def test_download_parser_accepts_indices_product_aliases() -> None:
+    from massive_speedup import download
+
+    parser = download.build_parser()
+    args = parser.parse_args(
+        [
+            "--download-path",
+            "downloads",
+            "--products",
+            "index,indices",
+            "--aws-access-key-id",
+            "id",
+            "--aws-secret-access-key",
+            "secret",
+            "--massive-api-key",
+            "api-key",
+        ]
+    )
+
+    assert download._normalize_products(args.products) == ("indices",)
 
 
 def test_download_parser_accepts_iso_end_date() -> None:

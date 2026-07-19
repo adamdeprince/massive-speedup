@@ -198,6 +198,8 @@ __all__ = [
     "StockTradeCondition",
     "CryptoTrade",
     "CryptoTradeDatabase",
+    "IndexValue",
+    "IndexValueDatabase",
     "OptionTrade",
     "OptionQuote",
     "OptionTradeDatabase",

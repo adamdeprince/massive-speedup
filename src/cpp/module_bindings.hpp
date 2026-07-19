@@ -1525,6 +1525,11 @@ inline void bind_row_models(nb::module_& m, nb::module_& flatfiles) {
               &native::StockTrade::sequence_number_object)
           .def_prop_ro("sip_timestamp", &native::StockTrade::sip_timestamp_object)
           .def_prop_ro("size", &native::StockTrade::size_object)
+          .def_prop_ro("decimal_size", &native::StockTrade::decimal_size_object)
+          .def_prop_ro(
+              "size_coefficient",
+              &native::StockTrade::size_coefficient_object)
+          .def_prop_ro("size_scale", &native::StockTrade::size_scale_object)
           .def_prop_ro("tape", &native::StockTrade::tape_object)
           .def_prop_ro("trf_id", &native::StockTrade::trf_id_object)
           .def_prop_ro("trf_timestamp", &native::StockTrade::trf_timestamp_object)
@@ -1562,6 +1567,8 @@ inline void bind_row_models(nb::module_& m, nb::module_& flatfiles) {
       nb::int_(native::StockTrade::packed_sip_timestamp_offset);
   stock_trade.attr("packed_size_offset") =
       nb::int_(native::StockTrade::packed_size_offset);
+  stock_trade.attr("packed_size_scale_offset") =
+      nb::int_(native::StockTrade::packed_size_scale_offset);
   bind_participant_timestamp_ordering(stock_trade);
 
   auto crypto_trade =

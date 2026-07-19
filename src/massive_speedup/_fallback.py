@@ -149,6 +149,44 @@ def _parse_nullable_float(text: str) -> float:
     return float(text) if text else float("nan")
 
 
+def _parse_decimal_quantity(text: str) -> tuple[str, int, int]:
+    if not text:
+        return "0", 0, 0
+    if text.startswith("-"):
+        raise ValueError(f"decimal quantity must be non-negative: {text}")
+    if text.startswith("+"):
+        text = text[1:]
+    if not text or text.count(".") > 1:
+        raise ValueError(f"invalid decimal quantity: {text}")
+
+    whole, point, fractional = text.partition(".")
+    if not whole and not fractional:
+        raise ValueError(f"invalid decimal quantity: {text}")
+    if (whole and not whole.isdigit()) or (fractional and not fractional.isdigit()):
+        raise ValueError(f"invalid decimal quantity: {text}")
+
+    scale = len(fractional) if point else 0
+    coefficient = int((whole or "0") + fractional)
+    while scale and coefficient % 10 == 0:
+        coefficient //= 10
+        scale -= 1
+    if coefficient == 0:
+        scale = 0
+    if coefficient > (1 << 64) - 1:
+        raise OverflowError(f"decimal quantity coefficient out of range: {text}")
+    if scale > 255:
+        raise OverflowError(f"decimal quantity scale out of range: {text}")
+
+    digits = str(coefficient)
+    if not scale:
+        canonical = digits
+    elif len(digits) <= scale:
+        canonical = "0." + "0" * (scale - len(digits)) + digits
+    else:
+        canonical = digits[:-scale] + "." + digits[-scale:]
+    return canonical, coefficient, scale
+
+
 def _parse_bitset96(text: str) -> str:
     if not text:
         return "0" * 96
@@ -240,6 +278,9 @@ class StockTrade:
         "sequence_number",
         "sip_timestamp",
         "size",
+        "decimal_size",
+        "size_coefficient",
+        "size_scale",
         "tape",
         "trf_id",
         "trf_timestamp",
@@ -257,7 +298,12 @@ class StockTrade:
         self.price = _parse_float(fields[6])
         self.sequence_number = _parse_int(fields[7])
         self.sip_timestamp = _parse_int(fields[8])
-        self.size = _parse_float(fields[9])
+        (
+            self.decimal_size,
+            self.size_coefficient,
+            self.size_scale,
+        ) = _parse_decimal_quantity(fields[9])
+        self.size = float(self.decimal_size)
         self.tape = _parse_int(fields[10])
         self.trf_id = _parse_int(fields[11])
         self.trf_timestamp = _parse_int(fields[12])
@@ -280,7 +326,7 @@ class StockTrade:
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, StockTrade):
             return NotImplemented
-        return tuple(self) == tuple(other)
+        return tuple(self) == tuple(other) and self.decimal_size == other.decimal_size
 
     def __lt__(self, other: object) -> bool:
         if not isinstance(other, StockTrade):
@@ -303,7 +349,7 @@ class StockTrade:
         return self.participant_timestamp >= other.participant_timestamp
 
     def __hash__(self) -> int:
-        return hash(tuple(self))
+        return hash((tuple(self), self.decimal_size))
 
     def updates_high_low(self) -> bool:
         return _conditions_clear(self.conditions, _STOCK_TRADE_HIGH_LOW_EXCLUDED)
@@ -321,7 +367,7 @@ class StockTrade:
             f"correction={self.correction}, exchange={self.exchange}, id={self.id}, "
             f"participant_timestamp={self.participant_timestamp}, price={self.price}, "
             f"sequence_number={self.sequence_number}, sip_timestamp={self.sip_timestamp}, "
-            f"size={self.size}, tape={self.tape}, trf_id={self.trf_id}, "
+            f"size={self.decimal_size}, tape={self.tape}, trf_id={self.trf_id}, "
             f"trf_timestamp={self.trf_timestamp})"
         )
 

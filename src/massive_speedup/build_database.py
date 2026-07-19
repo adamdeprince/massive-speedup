@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import datetime as dt
 import gzip
 import sys
 import time
@@ -131,46 +130,6 @@ def infer_record_type(input_path: Path) -> str:
         raise ValueError(f"unsupported input header in {input_path}: {header}") from error
 
 
-def infer_record_date(input_path: Path, record_type: str) -> str | None:
-    del record_type
-    filename = input_path.name
-    try:
-        return dt.date.fromisoformat(filename[:10]).isoformat()
-    except ValueError as error:
-        raise ValueError(
-            f"database input filename must begin with YYYY-MM-DD: {input_path}"
-        ) from error
-
-
-def prepare_incomplete_marker(
-    input_path: Path,
-    database: Path,
-    record_type: str,
-    *,
-    force: bool,
-) -> tuple[Path | None, bool]:
-    record_date = infer_record_date(input_path, record_type)
-    if record_date is None:
-        return None, False
-
-    target_date_dir = database / record_type / record_date
-    marker = target_date_dir / ".incomplete"
-
-    if not target_date_dir.exists():
-        target_date_dir.mkdir(parents=True, exist_ok=True)
-        marker.touch(exist_ok=True)
-        return marker, False
-
-    if force:
-        marker.touch(exist_ok=True)
-        return marker, False
-
-    if marker.exists():
-        return marker, False
-
-    return None, True
-
-
 def write_database_file(
     input_path: Path,
     database: Path,
@@ -233,9 +192,9 @@ def _print_benchmark(
 
 
 def _process_input_file(
-    task: tuple[Path, Path, str, bool, Path | None],
+    task: tuple[Path, Path, str, bool],
 ) -> tuple[Path, str, int, float, str | None]:
-    input_file, database, record_type, force, marker = task
+    input_file, database, record_type, force = task
     start = time.perf_counter()
     try:
         lines = write_database_file(
@@ -249,9 +208,6 @@ def _process_input_file(
             seconds = time.perf_counter() - start
             return input_file, record_type, -1, seconds, str(error)
         raise
-    else:
-        if marker is not None and marker.exists():
-            marker.unlink()
     seconds = time.perf_counter() - start
     return input_file, record_type, lines, seconds, None
 
@@ -260,7 +216,7 @@ def main(argv: list[str] | None = None) -> int:
     set_process_title("massive-builddb")
     parser = build_parser()
     args = parser.parse_args(argv)
-    tasks: list[tuple[Path, Path, str, bool, Path | None]] = []
+    tasks: list[tuple[Path, Path, str, bool]] = []
     for input_file in expand_input_files(args.input_files):
         try:
             record_type = infer_record_type(input_file)
@@ -273,22 +229,7 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             raise
 
-        try:
-            marker, skip = prepare_incomplete_marker(
-                input_file,
-                args.database,
-                record_type,
-                force=args.force,
-            )
-        except Exception as error:
-            if is_malformed_gzip_error(error):
-                tqdm.write(f"Skipping malformed gzip {input_file}: {error}")
-                continue
-            raise
-
-        if skip:
-            continue
-        tasks.append((input_file, args.database, record_type, args.force, marker))
+        tasks.append((input_file, args.database, record_type, args.force))
 
     if not tasks:
         return 0

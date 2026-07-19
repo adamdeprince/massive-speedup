@@ -128,7 +128,8 @@ def test_flatfiles_stocks_parse_trades_accepts_decimal_size_field(tmp_path: Path
         )
         handle.write(
             'A,"12,37",0,4,52983526340682,1775023619906000000,113.950000,'
-            "4410,1775030437400930176,1.000000,1,201,1775030437400903786\n"
+            "4410,1775030437400930176,0.123456789012345678,1,201,"
+            "1775030437400903786\n"
         )
 
     trade = next(FlatFiles.Stock.Trade.parse(path))
@@ -136,8 +137,11 @@ def test_flatfiles_stocks_parse_trades_accepts_decimal_size_field(tmp_path: Path
     assert trade.conditions == frozenset({12, 37})
     assert trade.exchange == 4
     assert trade.price == 113.95
-    assert trade.size == 1.0
+    assert trade.size == pytest.approx(0.123456789012345678)
     assert isinstance(trade.size, float)
+    assert trade.decimal_size == "0.123456789012345678"
+    assert trade.size_coefficient == 123456789012345678
+    assert trade.size_scale == 18
     assert trade.trf_id == 201
 
 
@@ -1088,7 +1092,7 @@ def test_build_database_main_force_passes_through(
     assert calls == [(stock_path, tmp_path / "db", "stock_quote", True)]
 
 
-def test_build_database_main_skips_existing_complete_date_directory(
+def test_build_database_main_delegates_existing_date_directory_to_native_builder(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1120,7 +1124,7 @@ def test_build_database_main_skips_existing_complete_date_directory(
     result = build_database.main(["--database", str(database), str(stock_path)])
 
     assert result == 0
-    assert calls == []
+    assert calls == [(stock_path, database, "stock_quote", False)]
 
 
 def test_build_database_main_force_overrides_complete_date_directory_skip(
@@ -1165,70 +1169,7 @@ def test_build_database_main_force_overrides_complete_date_directory_skip(
     assert calls == [(stock_path, database, "stock_quote", True)]
 
 
-def test_build_database_main_creates_and_clears_incomplete_marker(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from massive_speedup import build_database
-
-    stock_path = tmp_path / "stock_quote" / "1970-01-01.csv.gz"
-    stock_path.parent.mkdir()
-    with gzip.open(stock_path, "wt", encoding="utf-8", newline="") as handle:
-        handle.write(build_database.STOCK_QUOTE_HEADER + "\n")
-        handle.write("A,8,0.0,0,8,0.0,0,1,,0,322,0,1,0\n")
-
-    database = tmp_path / "db"
-    target_dir = database / "stock_quote" / "1970-01-01"
-    marker = target_dir / ".incomplete"
-    seen = {}
-
-    def fake_write_database_file(
-        input_path: Path,
-        database: Path,
-        record_type: str,
-        *,
-        force: bool = False,
-    ) -> int:
-        seen["marker_exists_during_write"] = marker.exists()
-        return 1
-
-    monkeypatch.setattr(build_database, "write_database_file", fake_write_database_file)
-
-    result = build_database.main(["--database", str(database), str(stock_path)])
-
-    assert result == 0
-    assert target_dir.exists()
-    assert seen["marker_exists_during_write"] is True
-    assert not marker.exists()
-
-
-def test_build_database_main_keeps_incomplete_marker_on_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from massive_speedup import build_database
-
-    stock_path = tmp_path / "stock_quote" / "1970-01-01.csv.gz"
-    stock_path.parent.mkdir()
-    with gzip.open(stock_path, "wt", encoding="utf-8", newline="") as handle:
-        handle.write(build_database.STOCK_QUOTE_HEADER + "\n")
-        handle.write("A,8,0.0,0,8,0.0,0,1,,0,322,0,1,0\n")
-
-    database = tmp_path / "db"
-    marker = database / "stock_quote" / "1970-01-01" / ".incomplete"
-
-    def fake_write_database_file(*args, **kwargs):
-        raise RuntimeError("boom")
-
-    monkeypatch.setattr(build_database, "write_database_file", fake_write_database_file)
-
-    with pytest.raises(RuntimeError, match="boom"):
-        build_database.main(["--database", str(database), str(stock_path)])
-
-    assert marker.exists()
-
-
-def test_build_database_main_malformed_gzip_keeps_incomplete_marker(
+def test_build_database_main_malformed_gzip_logs_and_continues(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1242,8 +1183,6 @@ def test_build_database_main_malformed_gzip_keeps_incomplete_marker(
         handle.write("A,8,0.0,0,8,0.0,0,1,,0,322,0,1,0\n")
 
     database = tmp_path / "db"
-    marker = database / "stock_quote" / "1970-01-01" / ".incomplete"
-
     def fake_write_database_file(*args, **kwargs):
         raise gzip.BadGzipFile("corrupt stream")
 
@@ -1252,7 +1191,6 @@ def test_build_database_main_malformed_gzip_keeps_incomplete_marker(
     result = build_database.main(["--database", str(database), str(stock_path)])
 
     assert result == 0
-    assert marker.exists()
     output = capsys.readouterr().out
     assert "Skipping malformed gzip" in output
     assert "corrupt stream" in output
@@ -1297,7 +1235,7 @@ def test_build_database_main_benchmark_prints_metrics(
     assert "throughput=0.000001 Mlines/s" in stdout
 
 
-def test_build_database_main_benchmark_suppresses_skipped_files(
+def test_build_database_main_benchmark_reports_native_skip_count(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1312,11 +1250,9 @@ def test_build_database_main_benchmark_suppresses_skipped_files(
 
     database = tmp_path / "db"
     (database / "stock_quote" / "1970-01-01").mkdir(parents=True)
-    monkeypatch.setattr(
-        build_database,
-        "write_database_file",
-        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("should not be called")),
-    )
+    timer_values = iter([10.0, 12.0])
+    monkeypatch.setattr(build_database, "write_database_file", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(build_database.time, "perf_counter", lambda: next(timer_values))
 
     result = build_database.main(
         [
@@ -1329,7 +1265,7 @@ def test_build_database_main_benchmark_suppresses_skipped_files(
 
     assert result == 0
     output = capsys.readouterr().out
-    assert output == ""
+    assert "lines=0 lines" in output
 
 
 def test_build_database_file_native_groups_records_by_ticker_using_filename_date(
@@ -1404,6 +1340,71 @@ def test_build_database_file_native_skips_existing_tickers_unless_forced(
     )
     overwritten = module.StockTrade.from_packed(output.read_bytes(), "A")
     assert overwritten.price == pytest.approx(200.25)
+
+
+def test_build_database_file_native_publishes_only_completed_symbol_files(
+    tmp_path: Path,
+) -> None:
+    from massive_speedup import build_database
+    try:
+        module = import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
+
+    path = tmp_path / "stock_trade" / "1970-01-01.csv.gz"
+    path.parent.mkdir()
+    with gzip.open(path, "wt", encoding="utf-8", newline="") as handle:
+        handle.write(build_database.STOCK_TRADE_HEADER + "\n")
+        handle.write("A,12,0,8,1,1000,10.0,1,1000,1.25,1,0,0\n")
+        handle.write("B,12,0,8,2,2000,20.0,1,2000,2.5,1,0,0\n")
+        handle.write("B,12,0,8,3,3000,21.0,2,3000,invalid,1,0,0\n")
+
+    database = tmp_path / "db"
+    with pytest.raises(ValueError, match="decimal quantity"):
+        build_database.write_database_file(path, database, "stock_trade")
+
+    root = database / "stock_trade" / "1970-01-01"
+    assert module.StockTrade.from_packed((root / "A").read_bytes(), "A").decimal_size == "1.25"
+    assert not (root / "A.incomplete").exists()
+    assert not (root / "B").exists()
+    assert len((root / "B.incomplete").read_bytes()) == module.StockTrade.packed_size
+
+
+def test_build_database_file_native_force_keeps_old_file_until_replacement_completes(
+    tmp_path: Path,
+) -> None:
+    from massive_speedup import build_database
+    try:
+        module = import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
+
+    database = tmp_path / "db"
+    initial = tmp_path / "initial" / "1970-01-01.csv.gz"
+    initial.parent.mkdir()
+    with gzip.open(initial, "wt", encoding="utf-8", newline="") as handle:
+        handle.write(build_database.STOCK_TRADE_HEADER + "\n")
+        handle.write("A,12,0,8,1,1000,10.0,1,1000,1,1,0,0\n")
+    assert build_database.write_database_file(initial, database, "stock_trade") == 1
+
+    replacement = tmp_path / "replacement" / "1970-01-01.csv.gz"
+    replacement.parent.mkdir()
+    with gzip.open(replacement, "wt", encoding="utf-8", newline="") as handle:
+        handle.write(build_database.STOCK_TRADE_HEADER + "\n")
+        handle.write("A,12,0,8,1,1000,99.0,1,1000,1,1,0,0\n")
+        handle.write("A,12,0,8,2,2000,100.0,2,2000,invalid,1,0,0\n")
+
+    with pytest.raises(ValueError, match="decimal quantity"):
+        build_database.write_database_file(
+            replacement,
+            database,
+            "stock_trade",
+            force=True,
+        )
+
+    output = database / "stock_trade" / "1970-01-01" / "A"
+    assert module.StockTrade.from_packed(output.read_bytes(), "A").price == pytest.approx(10.0)
+    assert (output.parent / "A.incomplete").exists()
 
 
 def test_build_database_file_native_creates_database_root_for_empty_input(tmp_path: Path) -> None:
@@ -1968,11 +1969,12 @@ def test_native_row_models_pack_roundtrip_and_extract_timestamps_when_built() ->
     )
     assert trade.size == 16713336.0
     assert isinstance(trade.size, float)
+    assert trade.decimal_size == "16713336"
+    assert trade.size_coefficient == 16713336
+    assert trade.size_scale == 0
     size_offset = module.StockTrade.packed_size_offset
-    assert (
-        struct.unpack("<f", packed_trade[size_offset:size_offset + 4])[0]
-        == 16713336.0
-    )
+    assert struct.unpack("<Q", packed_trade[size_offset:size_offset + 8])[0] == 16713336
+    assert packed_trade[module.StockTrade.packed_size_scale_offset] == 0
     quote, packed_quote = assert_roundtrip(
         module.StockQuote,
         [

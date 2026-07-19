@@ -581,6 +581,112 @@ inline double parse_nullable_double(std::string_view text, std::string_view fiel
   return parse_double(text, field_name);
 }
 
+struct DecimalQuantity {
+  std::uint64_t coefficient = 0;
+  std::uint8_t scale = 0;
+
+  bool operator==(const DecimalQuantity&) const = default;
+};
+
+inline DecimalQuantity parse_decimal_quantity(
+    std::string_view text,
+    std::string_view field_name) {
+  if (text.empty()) {
+    return {};
+  }
+
+  std::size_t position = 0;
+  if (text.front() == '+') {
+    position = 1;
+  } else if (text.front() == '-') {
+    std::ostringstream message;
+    message << "decimal quantity must be non-negative " << field_name << ": " << text;
+    throw std::invalid_argument(message.str());
+  }
+
+  DecimalQuantity result;
+  bool saw_digit = false;
+  bool saw_decimal_point = false;
+  std::size_t scale = 0;
+  constexpr std::uint64_t maximum = std::numeric_limits<std::uint64_t>::max();
+
+  for (; position < text.size(); ++position) {
+    const char character = text[position];
+    if (character == '.') {
+      if (saw_decimal_point) {
+        std::ostringstream message;
+        message << "unable to parse decimal quantity field " << field_name
+                << ": " << text;
+        throw std::invalid_argument(message.str());
+      }
+      saw_decimal_point = true;
+      continue;
+    }
+    if (character < '0' || character > '9') {
+      std::ostringstream message;
+      message << "unable to parse decimal quantity field " << field_name
+              << ": " << text;
+      throw std::invalid_argument(message.str());
+    }
+
+    saw_digit = true;
+    const auto digit = static_cast<std::uint64_t>(character - '0');
+    if (result.coefficient > (maximum - digit) / 10U) {
+      std::ostringstream message;
+      message << "decimal quantity field out of range " << field_name << ": " << text;
+      throw std::out_of_range(message.str());
+    }
+    result.coefficient = result.coefficient * 10U + digit;
+    if (saw_decimal_point) {
+      ++scale;
+      if (scale > std::numeric_limits<std::uint8_t>::max()) {
+        std::ostringstream message;
+        message << "decimal quantity scale out of range " << field_name << ": " << text;
+        throw std::out_of_range(message.str());
+      }
+    }
+  }
+
+  if (!saw_digit) {
+    std::ostringstream message;
+    message << "unable to parse decimal quantity field " << field_name << ": " << text;
+    throw std::invalid_argument(message.str());
+  }
+
+  while (scale > 0 && result.coefficient % 10U == 0) {
+    result.coefficient /= 10U;
+    --scale;
+  }
+  if (result.coefficient == 0) {
+    scale = 0;
+  }
+  result.scale = static_cast<std::uint8_t>(scale);
+  return result;
+}
+
+inline double decimal_quantity_to_double(const DecimalQuantity& quantity) {
+  return static_cast<double>(quantity.coefficient) *
+      std::pow(10.0, -static_cast<int>(quantity.scale));
+}
+
+inline std::string decimal_quantity_string(const DecimalQuantity& quantity) {
+  std::string digits = std::to_string(quantity.coefficient);
+  if (quantity.scale == 0) {
+    return digits;
+  }
+
+  const std::size_t scale = quantity.scale;
+  if (digits.size() <= scale) {
+    std::string result = "0.";
+    result.append(scale - digits.size(), '0');
+    result += digits;
+    return result;
+  }
+
+  digits.insert(digits.size() - scale, 1, '.');
+  return digits;
+}
+
 template <std::size_t BitCount>
 std::bitset<BitCount> parse_bitset(std::string_view text, std::string_view field_name) {
   if (text.empty()) {
@@ -762,6 +868,55 @@ class BinaryRecordWriter {
  private:
   std::vector<char> buffer_;
   FILE* file_ = nullptr;
+};
+
+class AtomicBinaryRecordWriter {
+ public:
+  explicit AtomicBinaryRecordWriter(std::size_t buffer_size = 1U << 20)
+      : writer_(buffer_size) {}
+
+  AtomicBinaryRecordWriter(const AtomicBinaryRecordWriter&) = delete;
+  AtomicBinaryRecordWriter& operator=(const AtomicBinaryRecordWriter&) = delete;
+
+  void open(const std::filesystem::path& final_path) {
+    if (active_) {
+      throw std::logic_error(
+          "atomic database output must be committed before opening another file");
+    }
+    final_path_ = final_path;
+    incomplete_path_ = final_path;
+    incomplete_path_ += ".incomplete";
+    writer_.open(incomplete_path_);
+    active_ = true;
+  }
+
+  template <std::size_t PackedSize>
+  void write(const PackedBuffer<PackedSize>& data) {
+    writer_.write(data);
+  }
+
+  void commit() {
+    if (!active_) {
+      return;
+    }
+    writer_.close();
+    active_ = false;
+
+    std::error_code error;
+    std::filesystem::rename(incomplete_path_, final_path_, error);
+    if (error) {
+      std::ostringstream message;
+      message << "unable to publish database output file " << final_path_
+              << " from " << incomplete_path_ << ": " << error.message();
+      throw std::runtime_error(message.str());
+    }
+  }
+
+ private:
+  BinaryRecordWriter writer_;
+  std::filesystem::path final_path_;
+  std::filesystem::path incomplete_path_;
+  bool active_ = false;
 };
 
 class MappedFile {
@@ -2156,11 +2311,12 @@ class AggregateObjectCache {
 }  // namespace detail
 
 struct StockTrade {
-  static constexpr std::size_t packed_size = 73;
+  static constexpr std::size_t packed_size = 78;
   static constexpr std::size_t packed_participant_timestamp_offset = 25;
   static constexpr std::size_t packed_price_offset = 33;
   static constexpr std::size_t packed_sip_timestamp_offset = 49;
   static constexpr std::size_t packed_size_offset = 57;
+  static constexpr std::size_t packed_size_scale_offset = 65;
   using PackedData = detail::PackedBuffer<packed_size>;
   enum AttributeIndex : std::size_t {
     ticker_attribute,
@@ -2173,6 +2329,9 @@ struct StockTrade {
     sequence_number_attribute,
     sip_timestamp_attribute,
     size_attribute,
+    decimal_size_attribute,
+    size_coefficient_attribute,
+    size_scale_attribute,
     tape_attribute,
     trf_id_attribute,
     trf_timestamp_attribute,
@@ -2187,8 +2346,9 @@ struct StockTrade {
   std::uint64_t sequence_number = 0;
   std::uint64_t sip_timestamp = 0;
   std::uint64_t trf_timestamp = 0;
+  detail::DecimalQuantity exact_size;
   std::int32_t correction = 0;
-  float size = 0.0F;
+  double size = 0.0;
   std::uint16_t tape = 0;
   std::uint16_t trf_id = 0;
   std::uint8_t exchange = 0;
@@ -2205,6 +2365,7 @@ struct StockTrade {
         sequence_number(other.sequence_number),
         sip_timestamp(other.sip_timestamp),
         trf_timestamp(other.trf_timestamp),
+        exact_size(other.exact_size),
         correction(other.correction),
         size(other.size),
         tape(other.tape),
@@ -2224,6 +2385,7 @@ struct StockTrade {
     sequence_number = other.sequence_number;
     sip_timestamp = other.sip_timestamp;
     trf_timestamp = other.trf_timestamp;
+    exact_size = other.exact_size;
     correction = other.correction;
     size = other.size;
     tape = other.tape;
@@ -2262,7 +2424,8 @@ struct StockTrade {
         Specialization::template parse_integer<std::uint64_t>(fields[7], "sequence_number");
     result.sip_timestamp =
         Specialization::template parse_integer<std::uint64_t>(fields[8], "sip_timestamp");
-    result.size = static_cast<float>(Specialization::parse_double(fields[9], "size"));
+    result.exact_size = detail::parse_decimal_quantity(fields[9], "size");
+    result.size = detail::decimal_quantity_to_double(result.exact_size);
     result.tape = Specialization::template parse_integer<std::uint16_t>(fields[10], "tape");
     result.trf_id =
         Specialization::template parse_integer<std::uint16_t>(fields[11], "trf_id");
@@ -2285,7 +2448,11 @@ struct StockTrade {
     result.price = detail::read_double_le(packed_data, offset);
     result.sequence_number = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
     result.sip_timestamp = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
-    result.size = detail::read_float32_le(packed_data, offset);
+    result.exact_size.coefficient =
+        detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
+    result.exact_size.scale =
+        detail::read_unsigned_le<std::uint8_t>(packed_data, offset);
+    result.size = detail::decimal_quantity_to_double(result.exact_size);
     result.tape = detail::read_unsigned_le<std::uint16_t>(packed_data, offset);
     result.trf_id = detail::read_unsigned_le<std::uint16_t>(packed_data, offset);
     result.trf_timestamp = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
@@ -2316,8 +2483,20 @@ struct StockTrade {
     return detail::read_double_le_at(packed_data, packed_price_offset);
   }
 
-  static float size_at(const void* packed_data) {
-    return detail::read_float32_le_at(packed_data, packed_size_offset);
+  static std::uint64_t size_coefficient_at(const void* packed_data) {
+    return detail::read_uint64_le_at(packed_data, packed_size_offset);
+  }
+
+  static std::uint8_t size_scale_at(const void* packed_data) {
+    const auto* bytes = static_cast<const std::uint8_t*>(packed_data);
+    return bytes[packed_size_scale_offset];
+  }
+
+  static double size_at(const void* packed_data) {
+    return detail::decimal_quantity_to_double(
+        detail::DecimalQuantity{
+            size_coefficient_at(packed_data),
+            size_scale_at(packed_data)});
   }
 
   static bool condition_at(const void* packed_data, std::size_t condition_code) {
@@ -2355,7 +2534,8 @@ struct StockTrade {
     detail::write_double_le(output, offset, price);
     detail::write_unsigned_le(output, offset, sequence_number);
     detail::write_unsigned_le(output, offset, sip_timestamp);
-    detail::write_float32_le(output, offset, size);
+    detail::write_unsigned_le(output, offset, exact_size.coefficient);
+    detail::write_unsigned_le(output, offset, exact_size.scale);
     detail::write_unsigned_le(output, offset, tape);
     detail::write_unsigned_le(output, offset, trf_id);
     detail::write_unsigned_le(output, offset, trf_timestamp);
@@ -2376,7 +2556,7 @@ struct StockTrade {
            price == other.price &&
            sequence_number == other.sequence_number &&
            sip_timestamp == other.sip_timestamp &&
-           size == other.size &&
+           exact_size == other.exact_size &&
            tape == other.tape &&
            trf_id == other.trf_id &&
            trf_timestamp == other.trf_timestamp;
@@ -2469,6 +2649,30 @@ struct StockTrade {
         [&] { return detail::double_object_new_ref(size); });
   }
 
+  nanobind::object decimal_size_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        decimal_size_attribute,
+        [&] {
+          return detail::string_object_new_ref(
+              detail::decimal_quantity_string(exact_size));
+        });
+  }
+
+  nanobind::object size_coefficient_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        size_coefficient_attribute,
+        [&] { return detail::uint64_object_new_ref(exact_size.coefficient); });
+  }
+
+  nanobind::object size_scale_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        size_scale_attribute,
+        [&] { return detail::uint64_object_new_ref(exact_size.scale); });
+  }
+
   nanobind::object tape_object() const {
     return detail::cached_python_object(
         object_cache_,
@@ -2519,7 +2723,8 @@ struct StockTrade {
     detail::hash_combine(seed, price);
     detail::hash_combine(seed, sequence_number);
     detail::hash_combine(seed, sip_timestamp);
-    detail::hash_combine(seed, size);
+    detail::hash_combine(seed, exact_size.coefficient);
+    detail::hash_combine(seed, exact_size.scale);
     detail::hash_combine(seed, tape);
     detail::hash_combine(seed, trf_id);
     detail::hash_combine(seed, trf_timestamp);
@@ -2542,7 +2747,7 @@ struct StockTrade {
         << "price=" << price << ", "
         << "sequence_number=" << sequence_number << ", "
         << "sip_timestamp=" << sip_timestamp << ", "
-        << "size=" << size << ", "
+        << "size=" << detail::decimal_quantity_string(exact_size) << ", "
         << "tape=" << tape << ", "
         << "trf_id=" << trf_id << ", "
         << "trf_timestamp=" << trf_timestamp << ")";
@@ -5991,7 +6196,7 @@ struct StockTradeAggregationTraits {
       State& state,
       const void* packed_data,
       std::uint64_t timestamp) {
-    const float size = RowType::size_at(packed_data);
+    const double size = RowType::size_at(packed_data);
     state.add_values(
         RowType::price_at(packed_data),
         !RowType::updates_volume_at(packed_data) ||
@@ -10516,7 +10721,7 @@ class Implementation : public Base {
     std::filesystem::create_directories(database_path);
 
     detail::BufferedGzipLineReader reader(input_path);
-    detail::BinaryRecordWriter writer;
+    detail::AtomicBinaryRecordWriter writer;
     std::string_view line;
     const std::filesystem::path output_root =
         database_path / std::string(record_type) /
@@ -10568,16 +10773,14 @@ class Implementation : public Base {
       std::filesystem::create_directories(output_root);
 
       if (!has_current_output || row.ticker != current_ticker) {
+        writer.commit();
         current_ticker = row.ticker;
         const auto output_path = output_root / current_ticker;
         skip_current_output = !force && std::filesystem::exists(output_path);
-        if (skip_current_output) {
-          writer.close();
-          has_current_output = true;
-        } else {
+        if (!skip_current_output) {
           writer.open(output_path);
-          has_current_output = true;
         }
+        has_current_output = true;
       }
 
       if (skip_current_output) {
@@ -10588,7 +10791,7 @@ class Implementation : public Base {
       ++rows_written;
     }
 
-    writer.close();
+    writer.commit();
     return rows_written;
   }
 
@@ -10639,13 +10842,13 @@ class Implementation : public Base {
           continue;
         }
 
-        detail::BinaryRecordWriter writer;
+        detail::AtomicBinaryRecordWriter writer;
         writer.open(output_path);
         for (const RowType& row : rows) {
           writer.write(row.pack());
           ++rows_written;
         }
-        writer.close();
+        writer.commit();
       }
 
       rows_by_key.clear();
@@ -10724,9 +10927,10 @@ class Implementation : public Base {
         Specialization::template parse_integer<std::uint64_t>(
             cursor.template next_field<Specialization, true>(scratch),
             "sip_timestamp");
-    result.size = static_cast<float>(Specialization::parse_double(
+    result.exact_size = detail::parse_decimal_quantity(
         cursor.template next_field<Specialization, true>(scratch),
-        "size"));
+        "size");
+    result.size = detail::decimal_quantity_to_double(result.exact_size);
     result.tape =
         Specialization::template parse_integer<std::uint16_t>(
             cursor.template next_field<Specialization, true>(scratch),

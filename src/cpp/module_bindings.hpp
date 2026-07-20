@@ -5,6 +5,7 @@
 #include <nanobind/stl/filesystem.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/string_view.h>
 #include <nanobind/stl/unordered_map.h>
 #include <nanobind/stl/vector.h>
 
@@ -19,6 +20,7 @@
 #include <vector>
 
 #include "native.hpp"
+#include "websocket_native.hpp"
 #include "massive_speedup/parsers.hpp"
 
 namespace massive_speedup::bindings {
@@ -2597,12 +2599,62 @@ void bind_options_flatfile_asset(
 }
 
 template <typename BaseAsset, typename ImplAsset>
-void bind_websocket_asset(nb::module_& module, const char* name) {
+void bind_websocket_asset(
+    nb::module_& module,
+    const char* name,
+    native::WebSocketAsset asset) {
   nb::class_<ImplAsset, BaseAsset>(module, name)
       .def(nb::init<>())
-      .def_static("parse_message", &parse_message_static<ImplAsset>, nb::arg("payload"))
+      .def_static(
+          "parse_message",
+          [asset](nb::handle payload) {
+            return native::parse_websocket_message(payload, asset);
+          },
+          nb::arg("payload"))
+      .def_static(
+          "parse",
+          [asset](nb::handle payload) {
+            return native::parse_websocket_message(payload, asset);
+          },
+          nb::arg("payload"))
+      .def_static(
+          "summarize_message",
+          &parse_message_static<ImplAsset>,
+          nb::arg("payload"))
       .def_static("serialize", &serialize_static<ImplAsset>)
       .def_static("processor_name", &processor_name_static<ImplAsset>);
+}
+
+inline void bind_websocket_models(nb::module_& m) {
+  nb::class_<native::WebSocketEvent>(m, "WebSocketEvent")
+      .def_prop_ro("event_type", &native::WebSocketEvent::event_type_object)
+      .def(
+          "__getitem__",
+          &native::WebSocketEvent::get_item,
+          nb::arg("key"))
+      .def(
+          "get",
+          &native::WebSocketEvent::get,
+          nb::arg("key"),
+          nb::arg("default") = nb::none())
+      .def(
+          "__contains__",
+          &native::WebSocketEvent::contains,
+          nb::arg("key"))
+      .def("is_cached", &native::WebSocketEvent::is_cached, nb::arg("key"))
+      .def_prop_ro("cached_fields", &native::WebSocketEvent::cached_fields)
+      .def_prop_ro("raw_json", &native::WebSocketEvent::raw_json)
+      .def_prop_ro("message_bytes", &native::WebSocketEvent::message_bytes)
+      .def("__repr__", &native::WebSocketEvent::repr);
+
+  nb::class_<native::WebSocketMessage>(m, "WebSocketMessage")
+      .def("__len__", &native::WebSocketMessage::size)
+      .def("__getitem__", &native::WebSocketMessage::get_item)
+      .def("__iter__", &native::WebSocketMessage::iterator)
+      .def_prop_ro("events", &native::WebSocketMessage::events)
+      .def_prop_ro("raw_json", &native::WebSocketMessage::raw_json)
+      .def_prop_ro("asset_class", &native::WebSocketMessage::asset_class)
+      .def("__repr__", &native::WebSocketMessage::repr);
 }
 
 template <typename BaseAsset, typename ImplAsset>
@@ -2968,13 +3020,35 @@ void bind_native_module(nb::module_& m, const char* alias_prefix) {
       crypto_trade_api_name.c_str());
 
   auto websocket = m.def_submodule("WebSocket", "Websocket parser classes.");
-  bind_websocket_asset<WebSocketMessagesParser, Impl<WebSocketMessagesParser>>(websocket, "Messages");
-  bind_websocket_asset<WebSocketStocksParser, Impl<WebSocketStocksParser>>(websocket, "Stocks");
-  bind_websocket_asset<WebSocketOptionsParser, Impl<WebSocketOptionsParser>>(websocket, "Options");
-  bind_websocket_asset<WebSocketFuturesParser, Impl<WebSocketFuturesParser>>(websocket, "Futures");
-  bind_websocket_asset<WebSocketIndicesParser, Impl<WebSocketIndicesParser>>(websocket, "Indices");
-  bind_websocket_asset<WebSocketForexParser, Impl<WebSocketForexParser>>(websocket, "Forex");
-  bind_websocket_asset<WebSocketCryptoParser, Impl<WebSocketCryptoParser>>(websocket, "Crypto");
+  bind_websocket_models(m);
+  bind_websocket_asset<WebSocketMessagesParser, Impl<WebSocketMessagesParser>>(
+      websocket,
+      "Messages",
+      native::WebSocketAsset::Messages);
+  bind_websocket_asset<WebSocketStocksParser, Impl<WebSocketStocksParser>>(
+      websocket,
+      "Stocks",
+      native::WebSocketAsset::Stocks);
+  bind_websocket_asset<WebSocketOptionsParser, Impl<WebSocketOptionsParser>>(
+      websocket,
+      "Options",
+      native::WebSocketAsset::Options);
+  bind_websocket_asset<WebSocketFuturesParser, Impl<WebSocketFuturesParser>>(
+      websocket,
+      "Futures",
+      native::WebSocketAsset::Futures);
+  bind_websocket_asset<WebSocketIndicesParser, Impl<WebSocketIndicesParser>>(
+      websocket,
+      "Indices",
+      native::WebSocketAsset::Indices);
+  bind_websocket_asset<WebSocketForexParser, Impl<WebSocketForexParser>>(
+      websocket,
+      "Forex",
+      native::WebSocketAsset::Forex);
+  bind_websocket_asset<WebSocketCryptoParser, Impl<WebSocketCryptoParser>>(
+      websocket,
+      "Crypto",
+      native::WebSocketAsset::Crypto);
 
   bind_row_models<typename Impl<FlatFileStocksParser>::specialization_type>(m, flatfiles);
   bind_window_aggregators(m);

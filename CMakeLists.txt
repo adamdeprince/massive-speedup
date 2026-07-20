@@ -3,6 +3,9 @@ project(massive_speedup LANGUAGES CXX)
 
 include(FetchContent)
 
+# Third-party static libraries are linked into nanobind extension modules.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
 find_package(nanobind 2.12 CONFIG REQUIRED)
 find_package(ZLIB REQUIRED)
@@ -179,6 +182,7 @@ set(MASSIVE_SPEEDUP_COMMON_SOURCES
   src/cpp/parser_common.cpp
   src/cpp/flatfiles.cpp
   src/cpp/websocket.cpp
+  src/cpp/websocket_native.cpp
 )
 
 function(configure_massive_speedup_target target_name)

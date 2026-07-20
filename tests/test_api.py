@@ -449,17 +449,19 @@ def test_massive_flatfile_aggregate_apis_are_not_exposed() -> None:
 
 
 def test_websocket_messages_parse_message_is_class_based() -> None:
-    summary = WebSocket.Messages.parse_message('{"ev":"status"},{"ev":"trade"}')
-    assert summary["parser_group"] == "websocket"
-    assert summary["asset_class"] == "messages"
-    assert summary["operation"] == "parse_message"
-    assert summary["message_frames"] == 2
+    message = WebSocket.Messages.parse_message(
+        '[{"ev":"status"},{"ev":"trade"}]'
+    )
+
+    assert message.asset_class == "messages"
+    assert len(message) == 2
+    assert [event.event_type for event in message] == ["status", "trade"]
 
 
 def test_websocket_crypto_parse_message_uses_selected_processor_module() -> None:
-    summary = WebSocket.Crypto.parse_message('{"ev":"XT"}')
-    assert summary["asset_class"] == "crypto"
-    assert summary["processor"] in {
+    message = WebSocket.Crypto.parse_message('{"ev":"XT"}')
+    assert message.asset_class == "crypto"
+    assert WebSocket.Crypto.processor_name() in {
         "generic",
         "sse42",
         "avx2",
@@ -470,6 +472,66 @@ def test_websocket_crypto_parse_message_uses_selected_processor_module() -> None
         "lsx",
         "lasx",
     }
+
+
+def test_websocket_message_owns_payload_and_lazily_caches_fields() -> None:
+    payload = (
+        b'[{"ev":"T","sym":"AAPL","p":197.25,"c":[1,37],'
+        b'"details":{"source":"sip"},"nullable":null},'
+        b'{"ev":"Q","sym":"MSFT"}]'
+    )
+    message = WebSocket.Stocks.parse(payload)
+    event = message[0]
+    del payload
+
+    assert len(message) == 2
+    assert message.events[0] is event
+    assert message[-1].event_type == "Q"
+    assert event.cached_fields == ()
+    assert not event.is_cached("sym")
+
+    assert event.event_type == "T"
+    assert event.cached_fields == ("ev",)
+    assert event["p"] == pytest.approx(197.25)
+    assert event["sym"] == "AAPL"
+    assert event["sym"] is event["sym"]
+    assert event["c"] == [1, 37]
+    assert event["details"] == {"source": "sip"}
+    assert event["nullable"] is None
+    assert event["nullable"] is None
+    assert event.get("absent") is None
+    sentinel = object()
+    assert event.get("another_absent", sentinel) is sentinel
+    assert "details" in event
+    assert "not_there" not in event
+    assert event.message_bytes == message.raw_json
+    assert event.raw_json.startswith(b'{"ev":"T"')
+
+
+def test_websocket_message_accepts_one_object_and_sequence_indexing() -> None:
+    message = WebSocket.Crypto.parse_message(
+        b'{"ev":"XT","pair":"BTC-USD","i":184467440737095516150}'
+    )
+
+    assert len(message) == 1
+    assert message[0]["pair"] == "BTC-USD"
+    assert message[:] == message.events
+    assert message[0]["i"] == 184467440737095516150
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"",
+        b"42",
+        b'[{}, 3]',
+        b'[{"ev":"T"}',
+        b'{"ev":3}',
+    ],
+)
+def test_websocket_message_rejects_invalid_shapes(payload: bytes) -> None:
+    with pytest.raises((ValueError, RuntimeError)):
+        WebSocket.Messages.parse_message(payload)
 
 
 def test_gzip_lines_yields_hello_world_lines() -> None:
@@ -1923,7 +1985,7 @@ def test_direct_native_module_classes_are_callable_when_built() -> None:
         pytest.skip("massive_speedup._native is not built in this environment")
 
     path = Path(__file__).resolve().parent / "data" / "hello_world.txt.gz"
-    message_summary = module.WebSocket.Messages.parse_message(b'{"ev":"status"}')
+    message = module.WebSocket.Messages.parse_message(b'{"ev":"status"}')
 
     assert hasattr(module.FlatFiles.Stock, "parse_quotes")
     assert hasattr(module.FlatFiles.Stock, "parse_trades")
@@ -1949,7 +2011,8 @@ def test_direct_native_module_classes_are_callable_when_built() -> None:
     assert hasattr(module.FlatFiles.Options, "Quote")
     assert hasattr(module, "read_gzip_lines_bytes")
     assert list(module.read_gzip_lines_bytes(path)) == [b"Hello", b"World!"]
-    assert message_summary["asset_class"] == "messages"
+    assert message.asset_class == "messages"
+    assert message[0].event_type == "status"
 
 
 def test_native_row_models_pack_roundtrip_and_extract_timestamps_when_built() -> None:

@@ -755,7 +755,7 @@ inline void bind_simple_market(nb::module_& m) {
           },
           nb::arg("date"),
           nb::arg("symbols"),
-          nb::arg("trade_latency_ns"),
+          nb::arg("trade_latency_ns") = 150'000'000ULL,
           nb::kw_only(),
           nb::arg("database_path") = nb::none(),
           nb::arg("quotes") = false,
@@ -767,24 +767,8 @@ inline void bind_simple_market(nb::module_& m) {
           },
           nb::rv_policy::reference_internal)
       .def("__next__", &native::SimpleMarket::next)
-      .def(
-          "__getitem__",
-          [](const native::SimpleMarket& self, nb::handle key) {
-            return self.get_holding(key);
-          },
-          nb::arg("key").none())
-      .def(
-          "__contains__",
-          [](const native::SimpleMarket& self, nb::handle key) {
-            return self.contains(key);
-          },
-          nb::arg("key").none())
-      .def("__len__", &native::SimpleMarket::size)
       .def_prop_ro("broker", &native::SimpleMarket::broker)
-      .def("keys", &native::SimpleMarket::keys)
-      .def("values", &native::SimpleMarket::values)
-      .def("items", &native::SimpleMarket::items)
-      .def("as_dict", &native::SimpleMarket::as_dict);
+      .def("summary", &native::SimpleMarket::summary);
 
   nb::class_<native::FuturesMarketBroker>(m, "FuturesMarketBroker")
       .def_prop_ro("symbol", &native::FuturesMarketBroker::symbol)
@@ -835,7 +819,7 @@ inline void bind_simple_market(nb::module_& m) {
           },
           nb::arg("date"),
           nb::arg("symbols"),
-          nb::arg("trade_latency_ns"),
+          nb::arg("trade_latency_ns") = 150'000'000ULL,
           nb::kw_only(),
           nb::arg("exchange") = "",
           nb::arg("database_path") = nb::none(),
@@ -848,24 +832,8 @@ inline void bind_simple_market(nb::module_& m) {
           },
           nb::rv_policy::reference_internal)
       .def("__next__", &native::FuturesMarket::next)
-      .def(
-          "__getitem__",
-          [](const native::FuturesMarket& self, nb::handle key) {
-            return self.get_holding(key);
-          },
-          nb::arg("key").none())
-      .def(
-          "__contains__",
-          [](const native::FuturesMarket& self, nb::handle key) {
-            return self.contains(key);
-          },
-          nb::arg("key").none())
-      .def("__len__", &native::FuturesMarket::size)
       .def_prop_ro("broker", &native::FuturesMarket::broker)
-      .def("keys", &native::FuturesMarket::keys)
-      .def("values", &native::FuturesMarket::values)
-      .def("items", &native::FuturesMarket::items)
-      .def("as_dict", &native::FuturesMarket::as_dict);
+      .def("summary", &native::FuturesMarket::summary);
 
   nb::class_<native::OptionMarketBroker>(m, "OptionMarketBroker")
       .def_prop_ro("contract", &native::OptionMarketBroker::contract)
@@ -902,7 +870,7 @@ inline void bind_simple_market(nb::module_& m) {
           nb::arg("expiration"),
           nb::arg("right"),
           nb::arg("strike"),
-          nb::arg("trade_latency_ns"),
+          nb::arg("trade_latency_ns") = 150'000'000ULL,
           nb::kw_only(),
           nb::arg("database_path") = nb::none(),
           nb::arg("quotes") = false,
@@ -914,24 +882,8 @@ inline void bind_simple_market(nb::module_& m) {
           },
           nb::rv_policy::reference_internal)
       .def("__next__", &native::OptionMarket::next)
-      .def(
-          "__getitem__",
-          [](const native::OptionMarket& self, nb::handle key) {
-            return self.get_holding(key);
-          },
-          nb::arg("key").none())
-      .def(
-          "__contains__",
-          [](const native::OptionMarket& self, nb::handle key) {
-            return self.contains(key);
-          },
-          nb::arg("key").none())
-      .def("__len__", &native::OptionMarket::size)
       .def_prop_ro("broker", &native::OptionMarket::broker)
-      .def("keys", &native::OptionMarket::keys)
-      .def("values", &native::OptionMarket::values)
-      .def("items", &native::OptionMarket::items)
-      .def("as_dict", &native::OptionMarket::as_dict);
+      .def("summary", &native::OptionMarket::summary);
 }
 
 template <typename AggregatorType>

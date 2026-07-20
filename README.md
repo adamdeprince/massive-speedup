@@ -214,20 +214,22 @@ import massive_speedup
 market = massive_speedup.SimpleMarket(
     "2026-01-23",
     ["AAPL", "MSFT"],
-    1_000_000,  # simulated trade latency in nanoseconds
     quotes=True,
 )
+inventory = {"AAPL": 0, "MSFT": 0}
 
 for symbol, timestamp, trade, quote, trades, quotes, broker in market:
     if trade is not None:
         last_quote = quotes.get(symbol)
         if last_quote is not None and trade.price < last_quote.bid_price:
             broker.buy(100)
+            inventory[symbol] += 100
     else:
         print("quote update", symbol, timestamp, quote.bid_price, quote.ask_price)
 
-print(market["AAPL"])
-print(market[None])  # cash delta
+summary = market.summary()
+print(inventory)
+print(summary["cash_flow"], summary["orders"])
 ```
 
 Each iteration yields a 7-tuple:
@@ -248,15 +250,14 @@ so `quotes` contains the latest quote state for trade handling. Set
 The broker supports `buy(shares, symbol=None)` and `sell(shares, symbol=None)`.
 If `symbol` is omitted, the current event symbol is used. Fills are priced using
 the quote at `current_sip_timestamp + trade_latency_ns`; buys use the ask and
-sells use the bid. Holdings are exposed through a small dict-like interface:
-symbol keys return share positions, and `None` returns the cash delta.
+sells use the bid. The default simulated latency is 150,000,000 nanoseconds
+(150 ms).
 
-```python
-broker.sell(50, "MSFT")
-
-print("cash", market[None])
-print(dict(market.items()))
-```
+Broker calls return `None`; fill prices, fill status, and rejections are hidden
+while iteration is in progress. `market.summary()` raises until the iterator is
+exhausted, then returns the execution ledger and net cash flow. Strategy code is
+responsible for its own intended inventory rather than reading positions from
+the market simulator.
 
 `fast=False` is the default and returns fresh `trades` and `quotes` dicts for
 each event. Set `fast=True` to reuse those dict objects across iterations and

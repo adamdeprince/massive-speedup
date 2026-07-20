@@ -7426,6 +7426,68 @@ class StockTradeQuoteTimeline {
   std::optional<StockQuote> last_quote_;
 };
 
+enum class SimulatedOrderSide : std::uint8_t {
+  Buy = 0,
+  Sell = 1,
+};
+
+struct SimulatedOrder {
+  std::string instrument;
+  SimulatedOrderSide side = SimulatedOrderSide::Buy;
+  double quantity = 0.0;
+  std::uint64_t submitted_timestamp = 0;
+  std::uint64_t execution_timestamp = 0;
+  std::uint64_t quote_timestamp = 0;
+  std::optional<double> price;
+  std::string rejection_reason;
+};
+
+inline nanobind::dict make_simulation_summary(
+    const std::string& session_date,
+    std::uint64_t trade_latency_ns,
+    bool exhausted,
+    const std::vector<SimulatedOrder>& orders) {
+  if (!exhausted) {
+    throw std::logic_error(
+        "session summary is unavailable until the market iterator is exhausted");
+  }
+
+  nanobind::list order_rows;
+  std::size_t fill_count = 0;
+  double cash_flow = 0.0;
+  for (const auto& order : orders) {
+    nanobind::dict row;
+    row["instrument"] = order.instrument;
+    row["side"] = order.side == SimulatedOrderSide::Buy ? "buy" : "sell";
+    row["quantity"] = order.quantity;
+    row["submitted_timestamp"] = order.submitted_timestamp;
+    row["execution_timestamp"] = order.execution_timestamp;
+    if (order.price.has_value()) {
+      const double notional = order.quantity * *order.price;
+      ++fill_count;
+      cash_flow += order.side == SimulatedOrderSide::Buy ? -notional : notional;
+      row["status"] = "filled";
+      row["quote_timestamp"] = order.quote_timestamp;
+      row["price"] = *order.price;
+      row["notional"] = notional;
+    } else {
+      row["status"] = "rejected";
+      row["reason"] = order.rejection_reason;
+    }
+    order_rows.append(std::move(row));
+  }
+
+  nanobind::dict result;
+  result["session_date"] = session_date;
+  result["trade_latency_ns"] = trade_latency_ns;
+  result["order_count"] = orders.size();
+  result["fill_count"] = fill_count;
+  result["rejection_count"] = orders.size() - fill_count;
+  result["cash_flow"] = cash_flow;
+  result["orders"] = std::move(order_rows);
+  return result;
+}
+
 struct SimpleMarketState {
   enum class EventKind : std::uint8_t {
     Quote = 0,
@@ -7504,7 +7566,6 @@ struct SimpleMarketState {
             EventKind::Quote});
       }
 
-      holdings.emplace(symbol, 0.0);
       symbol_states.push_back(std::move(state));
     }
   }
@@ -7536,8 +7597,8 @@ struct SimpleMarketState {
   nanobind::dict last_quotes_by_symbol;
   std::vector<SymbolState> symbol_states;
   std::priority_queue<Event, std::vector<Event>, EventGreater> event_queue;
-  std::unordered_map<std::string, double> holdings;
-  double cash = 0.0;
+  std::vector<SimulatedOrder> orders;
+  bool exhausted = false;
 };
 
 class SimpleMarketBroker {
@@ -7557,19 +7618,14 @@ class SimpleMarketBroker {
   std::uint64_t sip_timestamp() const { return sip_timestamp_; }
 
   void buy(double shares, std::optional<std::string> symbol = std::nullopt) {
-    execute(shares, symbol, Side::Buy);
+    execute(shares, symbol, SimulatedOrderSide::Buy);
   }
 
   void sell(double shares, std::optional<std::string> symbol = std::nullopt) {
-    execute(shares, symbol, Side::Sell);
+    execute(shares, symbol, SimulatedOrderSide::Sell);
   }
 
  private:
-  enum class Side {
-    Buy,
-    Sell,
-  };
-
   std::size_t resolve_symbol_index(const std::optional<std::string>& symbol) const {
     if (!symbol) {
       return symbol_index_;
@@ -7585,7 +7641,10 @@ class SimpleMarketBroker {
   void execute(
       double shares,
       const std::optional<std::string>& symbol,
-      Side side) {
+      SimulatedOrderSide side) {
+    if (state_->exhausted) {
+      throw std::logic_error("orders cannot be submitted after the session ends");
+    }
     if (!std::isfinite(shares) || shares < 0.0) {
       throw std::invalid_argument("shares must be a finite non-negative number");
     }
@@ -7594,6 +7653,12 @@ class SimpleMarketBroker {
     auto& symbol_state = state_->symbol_states[target_symbol_index];
     const std::uint64_t target_timestamp =
         SimpleMarketState::add_latency(sip_timestamp_, state_->trade_latency_ns);
+    SimulatedOrder order;
+    order.instrument = symbol_state.symbol;
+    order.side = side;
+    order.quantity = shares;
+    order.submitted_timestamp = sip_timestamp_;
+    order.execution_timestamp = target_timestamp;
     const std::optional<std::int64_t> galloping =
         symbol_state.last_execution_quote_index >= 0
             ? std::optional<std::int64_t>(symbol_state.last_execution_quote_index)
@@ -7602,27 +7667,25 @@ class SimpleMarketBroker {
     const std::int64_t quote_index =
         symbol_state.quotes->index_before_timestamp(target_timestamp, galloping);
     if (quote_index < 0) {
-      throw std::out_of_range("no quote available at execution timestamp");
+      order.rejection_reason = "no_quote";
+      state_->orders.push_back(std::move(order));
+      return;
     }
     symbol_state.last_execution_quote_index = quote_index;
 
     const void* quote_data =
         symbol_state.quotes->packed_data_at(static_cast<std::size_t>(quote_index));
-    const double price = side == Side::Buy
+    const double price = side == SimulatedOrderSide::Buy
         ? StockQuote::ask_price_at(quote_data)
         : StockQuote::bid_price_at(quote_data);
     if (!std::isfinite(price) || price <= 0.0) {
-      throw std::out_of_range("execution quote has no usable price");
+      order.rejection_reason = "unusable_price";
+      state_->orders.push_back(std::move(order));
+      return;
     }
-
-    double& position = state_->holdings[symbol_state.symbol];
-    if (side == Side::Buy) {
-      position += shares;
-      state_->cash -= shares * price;
-    } else {
-      position -= shares;
-      state_->cash += shares * price;
-    }
+    order.quote_timestamp = StockQuote::sip_timestamp_at(quote_data);
+    order.price = price;
+    state_->orders.push_back(std::move(order));
   }
 
   std::shared_ptr<SimpleMarketState> state_;
@@ -7698,77 +7761,17 @@ class SimpleMarket {
           std::nullopt);
     }
 
+    state_->exhausted = true;
+    current_broker_.reset();
     throw nanobind::stop_iteration();
   }
 
-  double get_holding(nanobind::handle key) const {
-    if (key.is_none()) {
-      return state_->cash;
-    }
-    const std::string symbol = nanobind::cast<std::string>(key);
-    const auto iter = state_->holdings.find(symbol);
-    if (iter == state_->holdings.end()) {
-      throw std::out_of_range("SimpleMarket holdings key not found");
-    }
-    return iter->second;
-  }
-
-  bool contains(nanobind::handle key) const {
-    if (key.is_none()) {
-      return true;
-    }
-    if (!PyUnicode_Check(key.ptr())) {
-      return false;
-    }
-    const std::string symbol = nanobind::cast<std::string>(key);
-    return state_->holdings.find(symbol) != state_->holdings.end();
-  }
-
-  std::size_t size() const {
-    return state_->holdings.size() + 1;
-  }
-
-  nanobind::list keys() const {
-    nanobind::list result;
-    Py_INCREF(Py_None);
-    result.append(nanobind::borrow<nanobind::object>(Py_None));
-    for (const auto& symbol_state : state_->symbol_states) {
-      result.append(symbol_state.symbol_object);
-    }
-    return result;
-  }
-
-  nanobind::list values() const {
-    nanobind::list result;
-    result.append(state_->cash);
-    for (const auto& symbol_state : state_->symbol_states) {
-      const auto iter = state_->holdings.find(symbol_state.symbol);
-      result.append(iter == state_->holdings.end() ? 0.0 : iter->second);
-    }
-    return result;
-  }
-
-  nanobind::list items() const {
-    nanobind::list result;
-    result.append(nanobind::make_tuple(nanobind::none(), state_->cash));
-    for (const auto& symbol_state : state_->symbol_states) {
-      const auto iter = state_->holdings.find(symbol_state.symbol);
-      result.append(nanobind::make_tuple(
-          symbol_state.symbol_object,
-          iter == state_->holdings.end() ? 0.0 : iter->second));
-    }
-    return result;
-  }
-
-  nanobind::dict as_dict() const {
-    nanobind::dict result;
-    result[nanobind::none()] = state_->cash;
-    for (const auto& symbol_state : state_->symbol_states) {
-      const auto iter = state_->holdings.find(symbol_state.symbol);
-      result[symbol_state.symbol_object] =
-          iter == state_->holdings.end() ? 0.0 : iter->second;
-    }
-    return result;
+  nanobind::dict summary() const {
+    return make_simulation_summary(
+        state_->date,
+        state_->trade_latency_ns,
+        state_->exhausted,
+        state_->orders);
   }
 
   SimpleMarketBroker broker() const {
@@ -7950,7 +7953,6 @@ struct FuturesMarketState {
             EventKind::Quote});
       }
 
-      holdings.emplace(symbol, 0.0);
       symbol_states.push_back(std::move(state));
     }
   }
@@ -7983,8 +7985,8 @@ struct FuturesMarketState {
   nanobind::dict last_quotes_by_symbol;
   std::vector<SymbolState> symbol_states;
   std::priority_queue<Event, std::vector<Event>, EventGreater> event_queue;
-  std::unordered_map<std::string, double> holdings;
-  double cash = 0.0;
+  std::vector<SimulatedOrder> orders;
+  bool exhausted = false;
 };
 
 class FuturesMarketBroker {
@@ -8005,19 +8007,14 @@ class FuturesMarketBroker {
   std::uint64_t sip_timestamp() const { return timestamp_; }
 
   void buy(double contracts, std::optional<std::string> symbol = std::nullopt) {
-    execute(contracts, symbol, Side::Buy);
+    execute(contracts, symbol, SimulatedOrderSide::Buy);
   }
 
   void sell(double contracts, std::optional<std::string> symbol = std::nullopt) {
-    execute(contracts, symbol, Side::Sell);
+    execute(contracts, symbol, SimulatedOrderSide::Sell);
   }
 
  private:
-  enum class Side {
-    Buy,
-    Sell,
-  };
-
   std::size_t resolve_symbol_index(const std::optional<std::string>& symbol) const {
     if (!symbol) {
       return symbol_index_;
@@ -8033,7 +8030,10 @@ class FuturesMarketBroker {
   void execute(
       double contracts,
       const std::optional<std::string>& symbol,
-      Side side) {
+      SimulatedOrderSide side) {
+    if (state_->exhausted) {
+      throw std::logic_error("orders cannot be submitted after the session ends");
+    }
     if (!std::isfinite(contracts) || contracts < 0.0) {
       throw std::invalid_argument("contracts must be a finite non-negative number");
     }
@@ -8042,6 +8042,12 @@ class FuturesMarketBroker {
     auto& symbol_state = state_->symbol_states[target_symbol_index];
     const std::uint64_t target_timestamp =
         FuturesMarketState::add_latency(timestamp_, state_->trade_latency_ns);
+    SimulatedOrder order;
+    order.instrument = symbol_state.symbol;
+    order.side = side;
+    order.quantity = contracts;
+    order.submitted_timestamp = timestamp_;
+    order.execution_timestamp = target_timestamp;
     const std::optional<std::int64_t> galloping =
         symbol_state.last_execution_quote_index >= 0
             ? std::optional<std::int64_t>(symbol_state.last_execution_quote_index)
@@ -8050,27 +8056,25 @@ class FuturesMarketBroker {
     const std::int64_t quote_index =
         symbol_state.quotes->index_before_timestamp(target_timestamp, galloping);
     if (quote_index < 0) {
-      throw std::out_of_range("no futures quote available at execution timestamp");
+      order.rejection_reason = "no_quote";
+      state_->orders.push_back(std::move(order));
+      return;
     }
     symbol_state.last_execution_quote_index = quote_index;
 
     const void* quote_data =
         symbol_state.quotes->packed_data_at(static_cast<std::size_t>(quote_index));
-    const double price = side == Side::Buy
+    const double price = side == SimulatedOrderSide::Buy
         ? FuturesQuote::ask_price_at(quote_data)
         : FuturesQuote::bid_price_at(quote_data);
     if (!std::isfinite(price) || price <= 0.0) {
-      throw std::out_of_range("execution futures quote has no usable price");
+      order.rejection_reason = "unusable_price";
+      state_->orders.push_back(std::move(order));
+      return;
     }
-
-    double& position = state_->holdings[symbol_state.symbol];
-    if (side == Side::Buy) {
-      position += contracts;
-      state_->cash -= contracts * price;
-    } else {
-      position -= contracts;
-      state_->cash += contracts * price;
-    }
+    order.quote_timestamp = FuturesQuote::timestamp_at(quote_data);
+    order.price = price;
+    state_->orders.push_back(std::move(order));
   }
 
   std::shared_ptr<FuturesMarketState> state_;
@@ -8148,77 +8152,17 @@ class FuturesMarket {
           std::nullopt);
     }
 
+    state_->exhausted = true;
+    current_broker_.reset();
     throw nanobind::stop_iteration();
   }
 
-  double get_holding(nanobind::handle key) const {
-    if (key.is_none()) {
-      return state_->cash;
-    }
-    const std::string symbol = nanobind::cast<std::string>(key);
-    const auto iter = state_->holdings.find(symbol);
-    if (iter == state_->holdings.end()) {
-      throw std::out_of_range("FuturesMarket holdings key not found");
-    }
-    return iter->second;
-  }
-
-  bool contains(nanobind::handle key) const {
-    if (key.is_none()) {
-      return true;
-    }
-    if (!PyUnicode_Check(key.ptr())) {
-      return false;
-    }
-    const std::string symbol = nanobind::cast<std::string>(key);
-    return state_->holdings.find(symbol) != state_->holdings.end();
-  }
-
-  std::size_t size() const {
-    return state_->holdings.size() + 1;
-  }
-
-  nanobind::list keys() const {
-    nanobind::list result;
-    Py_INCREF(Py_None);
-    result.append(nanobind::borrow<nanobind::object>(Py_None));
-    for (const auto& symbol_state : state_->symbol_states) {
-      result.append(symbol_state.symbol_object);
-    }
-    return result;
-  }
-
-  nanobind::list values() const {
-    nanobind::list result;
-    result.append(state_->cash);
-    for (const auto& symbol_state : state_->symbol_states) {
-      const auto iter = state_->holdings.find(symbol_state.symbol);
-      result.append(iter == state_->holdings.end() ? 0.0 : iter->second);
-    }
-    return result;
-  }
-
-  nanobind::list items() const {
-    nanobind::list result;
-    result.append(nanobind::make_tuple(nanobind::none(), state_->cash));
-    for (const auto& symbol_state : state_->symbol_states) {
-      const auto iter = state_->holdings.find(symbol_state.symbol);
-      result.append(nanobind::make_tuple(
-          symbol_state.symbol_object,
-          iter == state_->holdings.end() ? 0.0 : iter->second));
-    }
-    return result;
-  }
-
-  nanobind::dict as_dict() const {
-    nanobind::dict result;
-    result[nanobind::none()] = state_->cash;
-    for (const auto& symbol_state : state_->symbol_states) {
-      const auto iter = state_->holdings.find(symbol_state.symbol);
-      result[symbol_state.symbol_object] =
-          iter == state_->holdings.end() ? 0.0 : iter->second;
-    }
-    return result;
+  nanobind::dict summary() const {
+    return make_simulation_summary(
+        state_->date,
+        state_->trade_latency_ns,
+        state_->exhausted,
+        state_->orders);
   }
 
   FuturesMarketBroker broker() const {
@@ -8401,8 +8345,8 @@ struct OptionMarketState {
   bool fast = false;
   nanobind::dict last_trades_by_contract;
   nanobind::dict last_quotes_by_contract;
-  double position = 0.0;
-  double cash = 0.0;
+  std::vector<SimulatedOrder> orders;
+  bool exhausted = false;
 };
 
 class OptionMarketBroker {
@@ -8420,26 +8364,30 @@ class OptionMarketBroker {
   std::uint64_t sip_timestamp() const { return sip_timestamp_; }
 
   void buy(double contracts) {
-    execute(contracts, Side::Buy);
+    execute(contracts, SimulatedOrderSide::Buy);
   }
 
   void sell(double contracts) {
-    execute(contracts, Side::Sell);
+    execute(contracts, SimulatedOrderSide::Sell);
   }
 
  private:
-  enum class Side {
-    Buy,
-    Sell,
-  };
-
-  void execute(double contracts, Side side) {
+  void execute(double contracts, SimulatedOrderSide side) {
+    if (state_->exhausted) {
+      throw std::logic_error("orders cannot be submitted after the session ends");
+    }
     if (!std::isfinite(contracts) || contracts < 0.0) {
       throw std::invalid_argument("contracts must be a finite non-negative number");
     }
 
     const std::uint64_t target_timestamp =
         OptionMarketState::add_latency(sip_timestamp_, state_->trade_latency_ns);
+    SimulatedOrder order;
+    order.instrument = state_->contract_key;
+    order.side = side;
+    order.quantity = contracts;
+    order.submitted_timestamp = sip_timestamp_;
+    order.execution_timestamp = target_timestamp;
     const std::optional<std::int64_t> galloping =
         state_->last_execution_quote_index >= 0
             ? std::optional<std::int64_t>(state_->last_execution_quote_index)
@@ -8448,26 +8396,25 @@ class OptionMarketBroker {
     const std::int64_t quote_index =
         state_->quotes->index_before_timestamp(target_timestamp, galloping);
     if (quote_index < 0) {
-      throw std::out_of_range("no option quote available at execution timestamp");
+      order.rejection_reason = "no_quote";
+      state_->orders.push_back(std::move(order));
+      return;
     }
     state_->last_execution_quote_index = quote_index;
 
     const void* quote_data =
         state_->quotes->packed_data_at(static_cast<std::size_t>(quote_index));
-    const double price = side == Side::Buy
+    const double price = side == SimulatedOrderSide::Buy
         ? OptionQuote::ask_price_at(quote_data)
         : OptionQuote::bid_price_at(quote_data);
     if (!std::isfinite(price) || price <= 0.0) {
-      throw std::out_of_range("execution option quote has no usable price");
+      order.rejection_reason = "unusable_price";
+      state_->orders.push_back(std::move(order));
+      return;
     }
-
-    if (side == Side::Buy) {
-      state_->position += contracts;
-      state_->cash -= contracts * price;
-    } else {
-      state_->position -= contracts;
-      state_->cash += contracts * price;
-    }
+    order.quote_timestamp = OptionQuote::sip_timestamp_at(quote_data);
+    order.price = price;
+    state_->orders.push_back(std::move(order));
   }
 
   std::shared_ptr<OptionMarketState> state_;
@@ -8535,52 +8482,17 @@ class OptionMarket {
       return make_event_tuple(timestamp, state_->last_trade, std::nullopt);
     }
 
+    state_->exhausted = true;
+    current_broker_.reset();
     throw nanobind::stop_iteration();
   }
 
-  double get_holding(nanobind::handle key) const {
-    if (key.is_none()) {
-      return state_->cash;
-    }
-    if (is_contract_key(key)) {
-      return state_->position;
-    }
-    throw std::out_of_range("OptionMarket holdings key not found");
-  }
-
-  bool contains(nanobind::handle key) const {
-    return key.is_none() || is_contract_key(key);
-  }
-
-  std::size_t size() const { return 2; }
-
-  nanobind::list keys() const {
-    nanobind::list result;
-    Py_INCREF(Py_None);
-    result.append(nanobind::borrow<nanobind::object>(Py_None));
-    result.append(state_->contract_object);
-    return result;
-  }
-
-  nanobind::list values() const {
-    nanobind::list result;
-    result.append(state_->cash);
-    result.append(state_->position);
-    return result;
-  }
-
-  nanobind::list items() const {
-    nanobind::list result;
-    result.append(nanobind::make_tuple(nanobind::none(), state_->cash));
-    result.append(nanobind::make_tuple(state_->contract_object, state_->position));
-    return result;
-  }
-
-  nanobind::dict as_dict() const {
-    nanobind::dict result;
-    result[nanobind::none()] = state_->cash;
-    result[state_->contract_object] = state_->position;
-    return result;
+  nanobind::dict summary() const {
+    return make_simulation_summary(
+        state_->date,
+        state_->trade_latency_ns,
+        state_->exhausted,
+        state_->orders);
   }
 
   OptionMarketBroker broker() const {
@@ -8591,17 +8503,6 @@ class OptionMarket {
   }
 
  private:
-  bool is_contract_key(nanobind::handle key) const {
-    if (PyUnicode_Check(key.ptr())) {
-      return nanobind::cast<std::string>(key) == state_->contract_key;
-    }
-    int equal = PyObject_RichCompareBool(key.ptr(), state_->contract_object.ptr(), Py_EQ);
-    if (equal < 0) {
-      throw nanobind::python_error();
-    }
-    return equal == 1;
-  }
-
   nanobind::tuple make_event_tuple(
       std::uint64_t timestamp_ns,
       const std::optional<OptionTrade>& trade,

@@ -2904,7 +2904,7 @@ def test_multi_day_database_uses_futures_session_date_for_evening_rows(
     assert location.record == row
 
 
-def test_simple_market_merges_symbols_and_broker_updates_holdings(tmp_path: Path) -> None:
+def test_simple_market_hides_fills_until_session_summary(tmp_path: Path) -> None:
     try:
         module = import_module("massive_speedup._native")
     except ImportError:
@@ -3010,16 +3010,18 @@ def test_simple_market_merges_symbols_and_broker_updates_holdings(tmp_path: Path
     assert second_quote is None
     assert second_trades == {"A": second_trade}
     assert second_quotes == {"A": first_quote}
-    second_broker.buy(2)
-    second_broker.sell(1, "B")
+    inventory = {"A": 0.0, "B": 0.0}
+    assert second_broker.buy(2) is None
+    inventory["A"] += 2
+    assert second_broker.sell(1, "B") is None
+    inventory["B"] -= 1
 
-    assert market["A"] == pytest.approx(2.0)
-    assert market["B"] == pytest.approx(-1.0)
-    assert market[None] == pytest.approx(-2 * 11.0 + 20.0)
-    assert "A" in market
-    assert None in market
-    assert len(market) == 3
-    assert market.as_dict()[None] == pytest.approx(-2.0)
+    assert inventory == {"A": 2.0, "B": -1.0}
+    with pytest.raises(RuntimeError, match="iterator is exhausted"):
+        market.summary()
+    with pytest.raises(TypeError):
+        market["A"]
+    assert not hasattr(market, "as_dict")
 
     remaining = list(market)
     assert [
@@ -3037,6 +3039,42 @@ def test_simple_market_merges_symbols_and_broker_updates_holdings(tmp_path: Path
         ("A", 0.0000025, None, 2500),
         ("A", 0.000003, 3000, None),
     ]
+
+    summary = market.summary()
+    assert summary == {
+        "session_date": date,
+        "trade_latency_ns": 1000,
+        "order_count": 2,
+        "fill_count": 2,
+        "rejection_count": 0,
+        "cash_flow": pytest.approx(-2.0),
+        "orders": [
+            {
+                "instrument": "A",
+                "side": "buy",
+                "quantity": 2.0,
+                "submitted_timestamp": 1000,
+                "execution_timestamp": 2000,
+                "status": "filled",
+                "quote_timestamp": 900,
+                "price": 11.0,
+                "notional": 22.0,
+            },
+            {
+                "instrument": "B",
+                "side": "sell",
+                "quantity": 1.0,
+                "submitted_timestamp": 1000,
+                "execution_timestamp": 2000,
+                "status": "filled",
+                "quote_timestamp": 2000,
+                "price": 20.0,
+                "notional": 20.0,
+            },
+        ],
+    }
+    with pytest.raises(RuntimeError, match="session ends"):
+        second_broker.buy(1)
 
 
 def test_simple_market_skips_quote_events_by_default(tmp_path: Path) -> None:
@@ -3075,6 +3113,114 @@ def test_simple_market_skips_quote_events_by_default(tmp_path: Path) -> None:
     assert event[5] == {"A": quote_row}
     with pytest.raises(StopIteration):
         next(market)
+
+
+def test_simple_market_defaults_to_150ms_execution_latency(tmp_path: Path) -> None:
+    try:
+        module = import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
+
+    database = tmp_path / "db"
+    date = "1970-01-01"
+    trade_timestamp = 1_000_000_000
+    execution_timestamp = trade_timestamp + 150_000_000
+    trade = module.StockTrade(
+        [
+            "A",
+            "",
+            "0",
+            "8",
+            "1",
+            str(trade_timestamp),
+            "10",
+            "1",
+            str(trade_timestamp),
+            "1",
+            "1",
+            "0",
+            "0",
+        ]
+    )
+
+    def quote(timestamp: int, bid: float, ask: float):
+        return module.StockQuote(
+            [
+                "A",
+                "8",
+                str(ask),
+                "1",
+                "8",
+                str(bid),
+                "1",
+                "",
+                "",
+                str(timestamp),
+                str(timestamp),
+                str(timestamp),
+                "1",
+                "0",
+            ]
+        )
+
+    quotes = [
+        quote(900_000_000, 9.0, 11.0),
+        quote(execution_timestamp, 10.0, 12.0),
+    ]
+    trade_path = database / "stock_trade" / date / "A"
+    quote_path = database / "stock_quote" / date / "A"
+    trade_path.parent.mkdir(parents=True)
+    quote_path.parent.mkdir(parents=True)
+    trade_path.write_bytes(trade.pack())
+    quote_path.write_bytes(b"".join(row.pack() for row in quotes))
+
+    market = module.SimpleMarket(date, ["A"], database_path=database)
+    event = next(market)
+    assert event[2] == trade
+    assert event[6].buy(1) is None
+    with pytest.raises(RuntimeError, match="iterator is exhausted"):
+        market.summary()
+
+    assert list(market) == []
+    summary = market.summary()
+    assert summary["trade_latency_ns"] == 150_000_000
+    assert summary["orders"][0]["execution_timestamp"] == execution_timestamp
+    assert summary["orders"][0]["quote_timestamp"] == execution_timestamp
+    assert summary["orders"][0]["price"] == 12.0
+
+
+def test_simple_market_hides_execution_rejection_until_summary(tmp_path: Path) -> None:
+    try:
+        module = import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
+
+    database = tmp_path / "db"
+    date = "1970-01-01"
+    trade = module.StockTrade(
+        ["A", "", "0", "8", "1", "1000", "10", "1", "1000", "1", "1", "0", "0"]
+    )
+    quote = module.StockQuote(
+        ["A", "8", "11", "1", "8", "9", "1", "", "", "2000", "1", "2000", "1", "0"]
+    )
+    trade_path = database / "stock_trade" / date / "A"
+    quote_path = database / "stock_quote" / date / "A"
+    trade_path.parent.mkdir(parents=True)
+    quote_path.parent.mkdir(parents=True)
+    trade_path.write_bytes(trade.pack())
+    quote_path.write_bytes(quote.pack())
+
+    market = module.SimpleMarket(date, ["A"], 0, database_path=database)
+    broker = next(market)[6]
+    assert broker.buy(1) is None
+    with pytest.raises(RuntimeError, match="iterator is exhausted"):
+        market.summary()
+
+    assert list(market) == []
+    order = market.summary()["orders"][0]
+    assert order["status"] == "rejected"
+    assert order["reason"] == "no_quote"
+    assert "price" not in order
 
 
 def test_simple_market_fast_reuses_recent_record_dicts(tmp_path: Path) -> None:
@@ -3129,7 +3275,7 @@ def test_simple_market_fast_reuses_recent_record_dicts(tmp_path: Path) -> None:
     assert fast_first[4]["A"] == trade_rows[1]
 
 
-def test_option_market_merges_contract_and_broker_updates_holdings(tmp_path: Path) -> None:
+def test_option_market_hides_fills_until_session_summary(tmp_path: Path) -> None:
     try:
         module = import_module("massive_speedup._native")
     except ImportError:
@@ -3189,14 +3335,17 @@ def test_option_market_merges_contract_and_broker_updates_holdings(tmp_path: Pat
     second = next(market)
     assert second[2] == trade_rows[0]
     assert second[3] is None
-    second[6].buy(2)
-    second[6].sell(1)
+    inventory = 0.0
+    assert second[6].buy(2) is None
+    inventory += 2
+    assert second[6].sell(1) is None
+    inventory -= 1
 
-    assert market[(root, expiration, right, strike)] == pytest.approx(1.0)
-    assert market[None] == pytest.approx(-2 * 11.0 + 10.5)
-    assert (root, expiration, right, strike) in market
-    assert None in market
-    assert len(market) == 2
+    assert inventory == 1.0
+    with pytest.raises(RuntimeError, match="iterator is exhausted"):
+        market.summary()
+    with pytest.raises(TypeError):
+        market[(root, expiration, right, strike)]
 
     remaining = list(market)
     assert [
@@ -3211,8 +3360,20 @@ def test_option_market_merges_contract_and_broker_updates_holdings(tmp_path: Pat
         (0.000003, 3000, None),
     ]
 
+    summary = market.summary()
+    assert summary["session_date"] == date
+    assert summary["trade_latency_ns"] == 0
+    assert summary["order_count"] == 2
+    assert summary["fill_count"] == 2
+    assert summary["rejection_count"] == 0
+    assert summary["cash_flow"] == pytest.approx(-11.5)
+    assert [order["price"] for order in summary["orders"]] == [11.0, 10.5]
+    assert {order["instrument"] for order in summary["orders"]} == {
+        "A/2026-06-18/C/00115000"
+    }
 
-def test_futures_market_merges_symbols_and_broker_updates_holdings(tmp_path: Path) -> None:
+
+def test_futures_market_hides_fills_until_session_summary(tmp_path: Path) -> None:
     try:
         module = import_module("massive_speedup._native")
     except ImportError:
@@ -3318,16 +3479,17 @@ def test_futures_market_merges_symbols_and_broker_updates_holdings(tmp_path: Pat
     assert second_quote is None
     assert second_trades == {"0BTZ9": second_trade}
     assert second_quotes == {"0BTZ9": first_quote}
-    second_broker.buy(2)
-    second_broker.sell(1, "1BTZ9")
+    inventory = {"0BTZ9": 0.0, "1BTZ9": 0.0}
+    assert second_broker.buy(2) is None
+    inventory["0BTZ9"] += 2
+    assert second_broker.sell(1, "1BTZ9") is None
+    inventory["1BTZ9"] -= 1
 
-    assert market["0BTZ9"] == pytest.approx(2.0)
-    assert market["1BTZ9"] == pytest.approx(-1.0)
-    assert market[None] == pytest.approx(-2 * 11.0 + 20.0)
-    assert "0BTZ9" in market
-    assert None in market
-    assert len(market) == 3
-    assert market.as_dict()[None] == pytest.approx(-2.0)
+    assert inventory == {"0BTZ9": 2.0, "1BTZ9": -1.0}
+    with pytest.raises(RuntimeError, match="iterator is exhausted"):
+        market.summary()
+    with pytest.raises(TypeError):
+        market["0BTZ9"]
 
     remaining = list(market)
     assert [
@@ -3345,6 +3507,19 @@ def test_futures_market_merges_symbols_and_broker_updates_holdings(tmp_path: Pat
         ("0BTZ9", 0.0000025, None, 2500),
         ("0BTZ9", 0.000003, 3000, None),
     ]
+
+    summary = market.summary()
+    assert summary["session_date"] == date
+    assert summary["trade_latency_ns"] == 1000
+    assert summary["order_count"] == 2
+    assert summary["fill_count"] == 2
+    assert summary["rejection_count"] == 0
+    assert summary["cash_flow"] == pytest.approx(-2.0)
+    assert [order["instrument"] for order in summary["orders"]] == [
+        "0BTZ9",
+        "1BTZ9",
+    ]
+    assert [order["price"] for order in summary["orders"]] == [11.0, 20.0]
 
 
 def test_futures_market_skips_quote_events_by_default(tmp_path: Path) -> None:

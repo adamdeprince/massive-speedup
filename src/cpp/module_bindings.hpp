@@ -309,6 +309,27 @@ std::uint64_t timestamp_argument_to_ns(
 
   nb::object date_object =
       datetime_module.attr("date").attr("fromisoformat")(database.date());
+
+  if constexpr (
+      std::is_same_v<DatabaseType, native::FuturesTradeDatabase> ||
+      std::is_same_v<DatabaseType, native::FuturesQuoteDatabase>) {
+    nb::object candidate =
+        datetime_module.attr("datetime").attr("combine")(date_object, time_object);
+    nb::module_ zoneinfo_module = nb::module_::import_("zoneinfo");
+    nb::object central = zoneinfo_module.attr("ZoneInfo")("America/Chicago");
+    nb::object central_candidate = candidate.attr("astimezone")(central);
+    const int central_hour = nb::cast<int>(central_candidate.attr("hour"));
+    if (central_hour >= 17) {
+      nb::object one_day =
+          datetime_module.attr("timedelta")(nb::arg("days") = 1);
+      PyObject* previous_date_ptr = PyNumber_Subtract(date_object.ptr(), one_day.ptr());
+      if (previous_date_ptr == nullptr) {
+        throw nb::python_error();
+      }
+      date_object = nb::steal<nb::object>(previous_date_ptr);
+    }
+  }
+
   nb::object datetime_object =
       datetime_module.attr("datetime").attr("combine")(date_object, time_object);
   nb::object epoch = datetime_module.attr("datetime")(
@@ -1895,6 +1916,9 @@ inline void bind_row_models(nb::module_& m, nb::module_& flatfiles) {
           .def_prop_ro("size", &native::FuturesTrade::size_object)
           .def_prop_ro("correction", &native::FuturesTrade::correction_object)
           .def_prop_ro("exchange", &native::FuturesTrade::exchange_object)
+          .def_prop_ro(
+              "session_end_date",
+              &native::FuturesTrade::session_end_date_object)
           .def(
               "__iter__",
               [](const native::FuturesTrade& self) {
@@ -1930,6 +1954,8 @@ inline void bind_row_models(nb::module_& m, nb::module_& flatfiles) {
       nb::int_(native::FuturesTrade::packed_timestamp_offset);
   futures_trade.attr("packed_size_offset") =
       nb::int_(native::FuturesTrade::packed_size_offset);
+  futures_trade.attr("packed_session_end_date_offset") =
+      nb::int_(native::FuturesTrade::packed_session_end_date_offset);
 
   auto futures_quote =
       nb::class_<native::FuturesQuote>(m, "FuturesQuote")
@@ -1957,6 +1983,9 @@ inline void bind_row_models(nb::module_& m, nb::module_& flatfiles) {
           .def_prop_ro("bid_price", &native::FuturesQuote::bid_price_object)
           .def_prop_ro("bid_size", &native::FuturesQuote::bid_size_object)
           .def_prop_ro("exchange", &native::FuturesQuote::exchange_object)
+          .def_prop_ro(
+              "session_end_date",
+              &native::FuturesQuote::session_end_date_object)
           .def(
               "__iter__",
               [](const native::FuturesQuote& self) {
@@ -1990,6 +2019,8 @@ inline void bind_row_models(nb::module_& m, nb::module_& flatfiles) {
   futures_quote.attr("packed_size") = nb::int_(native::FuturesQuote::packed_size);
   futures_quote.attr("packed_timestamp_offset") =
       nb::int_(native::FuturesQuote::packed_timestamp_offset);
+  futures_quote.attr("packed_session_end_date_offset") =
+      nb::int_(native::FuturesQuote::packed_session_end_date_offset);
 
   auto currency_quote =
       nb::class_<native::CurrencyQuote>(m, "CurrencyQuote")

@@ -810,6 +810,71 @@ inline std::string date_directory_name_from_filename(
   return filename.substr(0, 10);
 }
 
+inline std::uint32_t encode_iso_date(std::string_view value, std::string_view field_name) {
+  if (value.size() != 10 ||
+      !std::isdigit(static_cast<unsigned char>(value[0])) ||
+      !std::isdigit(static_cast<unsigned char>(value[1])) ||
+      !std::isdigit(static_cast<unsigned char>(value[2])) ||
+      !std::isdigit(static_cast<unsigned char>(value[3])) ||
+      value[4] != '-' ||
+      !std::isdigit(static_cast<unsigned char>(value[5])) ||
+      !std::isdigit(static_cast<unsigned char>(value[6])) ||
+      value[7] != '-' ||
+      !std::isdigit(static_cast<unsigned char>(value[8])) ||
+      !std::isdigit(static_cast<unsigned char>(value[9]))) {
+    std::ostringstream message;
+    message << field_name << " must be a date in YYYY-MM-DD format";
+    throw std::invalid_argument(message.str());
+  }
+
+  const auto digit = [value](std::size_t index) -> unsigned {
+    return static_cast<unsigned>(value[index] - '0');
+  };
+  const int year = static_cast<int>(
+      digit(0) * 1000 + digit(1) * 100 + digit(2) * 10 + digit(3));
+  const unsigned month = digit(5) * 10 + digit(6);
+  const unsigned day = digit(8) * 10 + digit(9);
+  const std::chrono::year_month_day ymd{
+      std::chrono::year{year},
+      std::chrono::month{month},
+      std::chrono::day{day}};
+  if (!ymd.ok()) {
+    std::ostringstream message;
+    message << field_name << " must be a valid date in YYYY-MM-DD format";
+    throw std::invalid_argument(message.str());
+  }
+  return static_cast<std::uint32_t>(
+      static_cast<unsigned>(year) * 10'000U + month * 100U + day);
+}
+
+inline std::string decode_iso_date(
+    std::uint32_t encoded,
+    std::string_view field_name) {
+  const unsigned year = encoded / 10'000U;
+  const unsigned month = (encoded / 100U) % 100U;
+  const unsigned day = encoded % 100U;
+  const std::chrono::year_month_day ymd{
+      std::chrono::year{static_cast<int>(year)},
+      std::chrono::month{month},
+      std::chrono::day{day}};
+  if (year > 9999U || !ymd.ok()) {
+    std::ostringstream message;
+    message << "packed " << field_name << " is not a valid YYYYMMDD date";
+    throw std::invalid_argument(message.str());
+  }
+
+  std::string output = "0000-00-00";
+  output[0] = static_cast<char>('0' + (year / 1000U) % 10U);
+  output[1] = static_cast<char>('0' + (year / 100U) % 10U);
+  output[2] = static_cast<char>('0' + (year / 10U) % 10U);
+  output[3] = static_cast<char>('0' + year % 10U);
+  output[5] = static_cast<char>('0' + month / 10U);
+  output[6] = static_cast<char>('0' + month % 10U);
+  output[8] = static_cast<char>('0' + day / 10U);
+  output[9] = static_cast<char>('0' + day % 10U);
+  return output;
+}
+
 class BinaryRecordWriter {
  public:
   explicit BinaryRecordWriter(std::size_t buffer_size = 1U << 20)
@@ -4057,10 +4122,11 @@ struct StockQuote {
 };
 
 struct FuturesTrade {
-  static constexpr std::size_t packed_size = 38;
+  static constexpr std::size_t packed_size = 42;
   static constexpr std::size_t packed_timestamp_offset = 0;
   static constexpr std::size_t packed_price_offset = 16;
   static constexpr std::size_t packed_size_offset = 28;
+  static constexpr std::size_t packed_session_end_date_offset = 38;
   using PackedData = detail::PackedBuffer<packed_size>;
   enum AttributeIndex : std::size_t {
     ticker_attribute,
@@ -4071,10 +4137,12 @@ struct FuturesTrade {
     size_attribute,
     correction_attribute,
     exchange_attribute,
+    session_end_date_attribute,
     attribute_count,
   };
 
   std::string ticker;
+  std::string session_end_date;
   double price = 0.0;
   std::uint64_t timestamp = 0;
   std::uint64_t sequence_number = 0;
@@ -4088,6 +4156,7 @@ struct FuturesTrade {
 
   FuturesTrade(const FuturesTrade& other)
       : ticker(other.ticker),
+        session_end_date(other.session_end_date),
         price(other.price),
         timestamp(other.timestamp),
         sequence_number(other.sequence_number),
@@ -4101,6 +4170,7 @@ struct FuturesTrade {
       return *this;
     }
     ticker = other.ticker;
+    session_end_date = other.session_end_date;
     price = other.price;
     timestamp = other.timestamp;
     sequence_number = other.sequence_number;
@@ -4140,6 +4210,8 @@ struct FuturesTrade {
         Specialization::template parse_integer<std::int32_t>(fields[6], "correction");
     result.exchange =
         Specialization::template parse_integer<std::uint16_t>(fields[7], "exchange");
+    detail::encode_iso_date(fields[8], "session_end_date");
+    result.session_end_date = fields[8];
     return result;
   }
 
@@ -4154,6 +4226,9 @@ struct FuturesTrade {
     result.size = detail::read_unsigned_le<std::uint32_t>(packed_data, offset);
     result.correction = detail::read_int32_le(packed_data, offset);
     result.exchange = detail::read_unsigned_le<std::uint16_t>(packed_data, offset);
+    result.session_end_date = detail::decode_iso_date(
+        detail::read_unsigned_le<std::uint32_t>(packed_data, offset),
+        "session_end_date");
     return result;
   }
 
@@ -4189,6 +4264,10 @@ struct FuturesTrade {
     detail::write_unsigned_le(output, offset, size);
     detail::write_int32_le(output, offset, correction);
     detail::write_unsigned_le(output, offset, exchange);
+    detail::write_unsigned_le(
+        output,
+        offset,
+        detail::encode_iso_date(session_end_date, "session_end_date"));
     return output;
   }
 
@@ -4252,6 +4331,13 @@ struct FuturesTrade {
         [&] { return detail::uint64_object_new_ref(exchange); });
   }
 
+  nanobind::object session_end_date_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        session_end_date_attribute,
+        [&] { return detail::string_object_new_ref(session_end_date); });
+  }
+
   nanobind::list python_fields() const {
     nanobind::list values;
     values.append(ticker_object());
@@ -4262,6 +4348,7 @@ struct FuturesTrade {
     values.append(size_object());
     values.append(correction_object());
     values.append(exchange_object());
+    values.append(session_end_date_object());
     return values;
   }
 
@@ -4273,7 +4360,8 @@ struct FuturesTrade {
            price == other.price &&
            size == other.size &&
            correction == other.correction &&
-           exchange == other.exchange;
+           exchange == other.exchange &&
+           session_end_date == other.session_end_date;
   }
 
   std::size_t hash_value() const {
@@ -4286,6 +4374,7 @@ struct FuturesTrade {
     detail::hash_combine(seed, size);
     detail::hash_combine(seed, correction);
     detail::hash_combine(seed, exchange);
+    detail::hash_combine(seed, session_end_date);
     return seed;
   }
 
@@ -4299,18 +4388,20 @@ struct FuturesTrade {
         << "price=" << price << ", "
         << "size=" << size << ", "
         << "correction=" << correction << ", "
-        << "exchange=" << exchange << ")";
+        << "exchange=" << exchange << ", "
+        << "session_end_date='" << session_end_date << "')";
     return out.str();
   }
 };
 
 struct FuturesQuote {
-  static constexpr std::size_t packed_size = 62;
+  static constexpr std::size_t packed_size = 66;
   static constexpr std::size_t packed_timestamp_offset = 0;
   static constexpr std::size_t packed_ask_price_offset = 32;
   static constexpr std::size_t packed_bid_price_offset = 40;
   static constexpr std::size_t packed_ask_size_offset = 52;
   static constexpr std::size_t packed_bid_size_offset = 56;
+  static constexpr std::size_t packed_session_end_date_offset = 62;
   using PackedData = detail::PackedBuffer<packed_size>;
   enum AttributeIndex : std::size_t {
     ticker_attribute,
@@ -4324,10 +4415,12 @@ struct FuturesQuote {
     bid_price_attribute,
     bid_size_attribute,
     exchange_attribute,
+    session_end_date_attribute,
     attribute_count,
   };
 
   std::string ticker;
+  std::string session_end_date;
   double ask_price = std::numeric_limits<double>::quiet_NaN();
   double bid_price = std::numeric_limits<double>::quiet_NaN();
   std::uint64_t timestamp = 0;
@@ -4344,6 +4437,7 @@ struct FuturesQuote {
 
   FuturesQuote(const FuturesQuote& other)
       : ticker(other.ticker),
+        session_end_date(other.session_end_date),
         ask_price(other.ask_price),
         bid_price(other.bid_price),
         timestamp(other.timestamp),
@@ -4360,6 +4454,7 @@ struct FuturesQuote {
       return *this;
     }
     ticker = other.ticker;
+    session_end_date = other.session_end_date;
     ask_price = other.ask_price;
     bid_price = other.bid_price;
     timestamp = other.timestamp;
@@ -4407,6 +4502,8 @@ struct FuturesQuote {
         Specialization::template parse_integer<std::uint32_t>(fields[9], "bid_size");
     result.exchange =
         Specialization::template parse_integer<std::uint16_t>(fields[10], "exchange");
+    detail::encode_iso_date(fields[11], "session_end_date");
+    result.session_end_date = fields[11];
     return result;
   }
 
@@ -4424,6 +4521,9 @@ struct FuturesQuote {
     result.ask_size = detail::read_unsigned_le<std::uint32_t>(packed_data, offset);
     result.bid_size = detail::read_unsigned_le<std::uint32_t>(packed_data, offset);
     result.exchange = detail::read_unsigned_le<std::uint16_t>(packed_data, offset);
+    result.session_end_date = detail::decode_iso_date(
+        detail::read_unsigned_le<std::uint32_t>(packed_data, offset),
+        "session_end_date");
     return result;
   }
 
@@ -4470,6 +4570,10 @@ struct FuturesQuote {
     detail::write_unsigned_le(output, offset, ask_size);
     detail::write_unsigned_le(output, offset, bid_size);
     detail::write_unsigned_le(output, offset, exchange);
+    detail::write_unsigned_le(
+        output,
+        offset,
+        detail::encode_iso_date(session_end_date, "session_end_date"));
     return output;
   }
 
@@ -4554,6 +4658,13 @@ struct FuturesQuote {
         [&] { return detail::uint64_object_new_ref(exchange); });
   }
 
+  nanobind::object session_end_date_object() const {
+    return detail::cached_python_object(
+        object_cache_,
+        session_end_date_attribute,
+        [&] { return detail::string_object_new_ref(session_end_date); });
+  }
+
   nanobind::list python_fields() const {
     nanobind::list values;
     values.append(ticker_object());
@@ -4567,6 +4678,7 @@ struct FuturesQuote {
     values.append(bid_price_object());
     values.append(bid_size_object());
     values.append(exchange_object());
+    values.append(session_end_date_object());
     return values;
   }
 
@@ -4585,7 +4697,8 @@ struct FuturesQuote {
            bid_timestamp == other.bid_timestamp &&
            bid_prices_equal &&
            bid_size == other.bid_size &&
-           exchange == other.exchange;
+           exchange == other.exchange &&
+           session_end_date == other.session_end_date;
   }
 
   std::size_t hash_value() const {
@@ -4601,6 +4714,7 @@ struct FuturesQuote {
     detail::hash_combine(seed, bid_price);
     detail::hash_combine(seed, bid_size);
     detail::hash_combine(seed, exchange);
+    detail::hash_combine(seed, session_end_date);
     return seed;
   }
 
@@ -4617,7 +4731,8 @@ struct FuturesQuote {
         << "bid_timestamp=" << bid_timestamp << ", "
         << "bid_price=" << bid_price << ", "
         << "bid_size=" << bid_size << ", "
-        << "exchange=" << exchange << ")";
+        << "exchange=" << exchange << ", "
+        << "session_end_date='" << session_end_date << "')";
     return out.str();
   }
 };
@@ -11984,7 +12099,10 @@ class Implementation : public Base {
         Specialization::template parse_integer<std::uint16_t>(
             cursor.template next_field<Specialization, true>(scratch),
             "exchange");
-    static_cast<void>(cursor.template next_field<Specialization, false>(scratch));
+    const std::string_view session_end_date =
+        cursor.template next_field<Specialization, false>(scratch);
+    detail::encode_iso_date(session_end_date, "session_end_date");
+    result.session_end_date.assign(session_end_date);
 
     cursor.finish();
     return result;
@@ -12034,7 +12152,10 @@ class Implementation : public Base {
         Specialization::template parse_integer<std::uint16_t>(
             cursor.template next_field<Specialization, true>(scratch),
             "exchange");
-    static_cast<void>(cursor.template next_field<Specialization, false>(scratch));
+    const std::string_view session_end_date =
+        cursor.template next_field<Specialization, false>(scratch);
+    detail::encode_iso_date(session_end_date, "session_end_date");
+    result.session_end_date.assign(session_end_date);
 
     cursor.finish();
     return result;

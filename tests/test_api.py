@@ -1610,7 +1610,9 @@ def test_build_database_file_native_writes_futures_trade_databases(
     assert len(first.read_bytes()) == module.FuturesTrade.packed_size
     assert len(second.read_bytes()) == module.FuturesTrade.packed_size
     assert module.FuturesTrade.from_packed(first.read_bytes(), "0BTZ9").price == 100.0
-    assert module.FuturesTrade.from_packed(second.read_bytes(), "1BTZ9").size == 2
+    second_row = module.FuturesTrade.from_packed(second.read_bytes(), "1BTZ9")
+    assert second_row.size == 2
+    assert second_row.session_end_date == "2026-05-21"
 
 
 def test_futures_trade_database_reads_mmap_records(tmp_path: Path) -> None:
@@ -1649,6 +1651,7 @@ def test_futures_trade_database_reads_mmap_records(tmp_path: Path) -> None:
     assert len(records) == 2
     assert records[0].ticker == "0BTZ9"
     assert records[0].timestamp == 1779368715688046681
+    assert records[0].session_end_date == "2026-05-21"
     assert records[-1].price == 101.0
     assert [row.size for row in records] == [1, 2]
     assert records.index_before_timestamp(1779368715688046682) == 0
@@ -1698,6 +1701,7 @@ def test_build_database_file_native_writes_futures_quote_databases(
     assert len(packed) == module.FuturesQuote.packed_size
     assert quote.ask_price == 100.0
     assert math.isnan(quote.bid_price)
+    assert quote.session_end_date == "2026-05-21"
 
 
 def test_futures_quote_database_reads_mmap_records(tmp_path: Path) -> None:
@@ -1740,6 +1744,7 @@ def test_futures_quote_database_reads_mmap_records(tmp_path: Path) -> None:
     assert len(records) == 2
     assert records[0].ticker == "0BTZ9"
     assert records[0].timestamp == 1779368715560670607
+    assert records[0].session_end_date == "2026-05-21"
     assert math.isnan(records[0].bid_price)
     assert records[1].bid_price == 99.0
     assert records.index_before_timestamp(1779368715560670609) == 0
@@ -1751,6 +1756,52 @@ def test_futures_quote_database_reads_mmap_records(tmp_path: Path) -> None:
             1779368715560670610,
         )
     ] == [101.0]
+
+
+def test_futures_database_time_search_maps_evening_to_prior_calendar_day(
+    tmp_path: Path,
+) -> None:
+    try:
+        module = import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
+
+    session_end_date = "2026-07-17"
+    epoch = dt.datetime(1970, 1, 1, tzinfo=dt.UTC)
+    prior_evening = dt.datetime(2026, 7, 16, 22, 30, tzinfo=dt.UTC)
+    session_day = dt.datetime(2026, 7, 17, 15, 0, tzinfo=dt.UTC)
+    prior_evening_ns = int((prior_evening - epoch).total_seconds()) * 1_000_000_000
+    session_day_ns = int((session_day - epoch).total_seconds()) * 1_000_000_000
+    rows = [
+        module.FuturesTrade(
+            [
+                "ESU6",
+                str(timestamp),
+                str(index),
+                str(index),
+                str(6000 + index),
+                "1",
+                "0",
+                "4",
+                session_end_date,
+            ]
+        )
+        for index, timestamp in enumerate((prior_evening_ns, session_day_ns), start=1)
+    ]
+    path = tmp_path / "db" / "future_cme_trade" / session_end_date / "ESU6"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"".join(row.pack() for row in rows))
+    records = module.FuturesTradeDatabase(
+        tmp_path / "db",
+        session_end_date,
+        "ESU6",
+        exchange="cme",
+    )
+
+    assert records.index_after_timestamp(dt.time(22, 30, tzinfo=dt.UTC)) == 0
+    assert records.index_before_timestamp(dt.time(22, 30, tzinfo=dt.UTC)) == 0
+    assert records.index_after_timestamp(dt.time(15, 0, tzinfo=dt.UTC)) == 1
+    assert next(records.iterate_bounded(dt.time(22, 30, tzinfo=dt.UTC))) == rows[0]
 
 
 def test_build_database_file_native_writes_option_databases(tmp_path: Path) -> None:
@@ -3657,9 +3708,10 @@ def test_futures_trade_record_packs_without_ticker() -> None:
     assert trade.size == 1
     assert trade.correction == 0
     assert trade.exchange == 4
+    assert trade.session_end_date == "2026-05-21"
 
     packed = trade.pack()
-    assert len(packed) == massive_speedup.FuturesTrade.packed_size == 38
+    assert len(packed) == massive_speedup.FuturesTrade.packed_size == 42
     assert b"0BTZ9" not in packed
 
     restored = massive_speedup.FuturesTrade.from_packed(packed, "0BTZ9")
@@ -3698,9 +3750,10 @@ def test_futures_quote_record_packs_without_ticker_and_handles_empty_price() -> 
     assert math.isnan(quote.bid_price)
     assert quote.bid_size == 0
     assert quote.exchange == 4
+    assert quote.session_end_date == "2026-05-21"
 
     packed = quote.pack()
-    assert len(packed) == massive_speedup.FuturesQuote.packed_size == 62
+    assert len(packed) == massive_speedup.FuturesQuote.packed_size == 66
     assert b"0BTZ9" not in packed
 
     restored = massive_speedup.FuturesQuote.from_packed(packed, "0BTZ9")
@@ -3740,8 +3793,10 @@ def test_flatfiles_futures_parse_trade_and_quote_rows(tmp_path: Path) -> None:
     assert isinstance(trade, massive_speedup.FuturesTrade)
     assert trade.ticker == "0BTZ9"
     assert trade.timestamp == 1779368715688046681
+    assert trade.session_end_date == "2026-05-21"
     assert isinstance(quote, massive_speedup.FuturesQuote)
     assert quote.ticker == "0BTZ9"
+    assert quote.session_end_date == "2026-05-21"
     assert math.isnan(quote.bid_price)
 
 

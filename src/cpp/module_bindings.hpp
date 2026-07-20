@@ -2642,10 +2642,289 @@ inline void bind_websocket_models(nb::module_& m) {
           &native::WebSocketEvent::contains,
           nb::arg("key"))
       .def("is_cached", &native::WebSocketEvent::is_cached, nb::arg("key"))
+      .def(
+          "is_property_cached",
+          &native::WebSocketEvent::is_property_cached,
+          nb::arg("key"))
       .def_prop_ro("cached_fields", &native::WebSocketEvent::cached_fields)
+      .def_prop_ro(
+          "cached_properties",
+          &native::WebSocketEvent::cached_properties)
       .def_prop_ro("raw_json", &native::WebSocketEvent::raw_json)
       .def_prop_ro("message_bytes", &native::WebSocketEvent::message_bytes)
       .def("__repr__", &native::WebSocketEvent::repr);
+
+#define MASSIVE_SPEEDUP_BIND_WS_PROPERTY(binding_, type_, property_) \
+  binding_.def_prop_ro(#property_, &type_::property_##_object)
+
+  auto status = nb::class_<native::WebSocketStatus, native::WebSocketEvent>(
+      m,
+      "WebSocketStatus");
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(status, native::WebSocketStatus, status);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(status, native::WebSocketStatus, message);
+
+  auto stock_trade =
+      nb::class_<native::WebSocketStockTrade, native::WebSocketEvent>(
+          m,
+          "WebSocketStockTrade");
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_trade, native::WebSocketStockTrade, ticker);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_trade, native::WebSocketStockTrade, conditions);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_trade, native::WebSocketStockTrade, correction);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_trade, native::WebSocketStockTrade, exchange);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(stock_trade, native::WebSocketStockTrade, id);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_trade, native::WebSocketStockTrade, participant_timestamp);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_trade, native::WebSocketStockTrade, price);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_trade, native::WebSocketStockTrade, sequence_number);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_trade, native::WebSocketStockTrade, sip_timestamp);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_trade, native::WebSocketStockTrade, size);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_trade, native::WebSocketStockTrade, decimal_size);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_trade, native::WebSocketStockTrade, size_coefficient);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_trade, native::WebSocketStockTrade, size_scale);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_trade, native::WebSocketStockTrade, tape);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_trade, native::WebSocketStockTrade, trf_id);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_trade, native::WebSocketStockTrade, trf_timestamp);
+  stock_trade
+      .def("updates_high_low", &native::WebSocketStockTrade::updates_high_low)
+      .def("updates_open_close", &native::WebSocketStockTrade::updates_open_close)
+      .def("updates_volume", &native::WebSocketStockTrade::updates_volume);
+
+  auto stock_quote =
+      nb::class_<native::WebSocketStockQuote, native::WebSocketEvent>(
+          m,
+          "WebSocketStockQuote");
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_quote, native::WebSocketStockQuote, ticker);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_quote, native::WebSocketStockQuote, ask_exchange);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_quote, native::WebSocketStockQuote, ask_price);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_quote, native::WebSocketStockQuote, ask_size);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_quote, native::WebSocketStockQuote, bid_exchange);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_quote, native::WebSocketStockQuote, bid_price);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_quote, native::WebSocketStockQuote, bid_size);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_quote, native::WebSocketStockQuote, conditions);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_quote, native::WebSocketStockQuote, indicators);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_quote, native::WebSocketStockQuote, participant_timestamp);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_quote, native::WebSocketStockQuote, sequence_number);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_quote, native::WebSocketStockQuote, sip_timestamp);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_quote, native::WebSocketStockQuote, tape);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_quote, native::WebSocketStockQuote, trf_timestamp);
+  stock_quote
+      .def("updates_high_low", &native::WebSocketStockQuote::updates_high_low)
+      .def("updates_open_close", &native::WebSocketStockQuote::updates_open_close)
+      .def("updates_volume", &native::WebSocketStockQuote::updates_volume);
+
+  auto option_trade =
+      nb::class_<native::WebSocketOptionTrade, native::WebSocketEvent>(
+          m,
+          "WebSocketOptionTrade");
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      option_trade, native::WebSocketOptionTrade, ticker);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      option_trade, native::WebSocketOptionTrade, root);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      option_trade, native::WebSocketOptionTrade, expiration);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      option_trade, native::WebSocketOptionTrade, right);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      option_trade, native::WebSocketOptionTrade, strike);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      option_trade, native::WebSocketOptionTrade, conditions);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      option_trade, native::WebSocketOptionTrade, correction);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      option_trade, native::WebSocketOptionTrade, exchange);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      option_trade, native::WebSocketOptionTrade, price);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      option_trade, native::WebSocketOptionTrade, sequence_number);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      option_trade, native::WebSocketOptionTrade, sip_timestamp);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      option_trade, native::WebSocketOptionTrade, size);
+
+  auto option_quote =
+      nb::class_<native::WebSocketOptionQuote, native::WebSocketEvent>(
+          m,
+          "WebSocketOptionQuote");
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      option_quote, native::WebSocketOptionQuote, ticker);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      option_quote, native::WebSocketOptionQuote, root);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      option_quote, native::WebSocketOptionQuote, expiration);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      option_quote, native::WebSocketOptionQuote, right);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      option_quote, native::WebSocketOptionQuote, strike);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      option_quote, native::WebSocketOptionQuote, ask_exchange);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      option_quote, native::WebSocketOptionQuote, ask_price);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      option_quote, native::WebSocketOptionQuote, ask_size);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      option_quote, native::WebSocketOptionQuote, bid_exchange);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      option_quote, native::WebSocketOptionQuote, bid_price);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      option_quote, native::WebSocketOptionQuote, bid_size);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      option_quote, native::WebSocketOptionQuote, sequence_number);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      option_quote, native::WebSocketOptionQuote, sip_timestamp);
+
+  auto futures_trade =
+      nb::class_<native::WebSocketFuturesTrade, native::WebSocketEvent>(
+          m,
+          "WebSocketFuturesTrade");
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      futures_trade, native::WebSocketFuturesTrade, ticker);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      futures_trade, native::WebSocketFuturesTrade, timestamp);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      futures_trade, native::WebSocketFuturesTrade, sequence_number);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      futures_trade, native::WebSocketFuturesTrade, report_sequence);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      futures_trade, native::WebSocketFuturesTrade, price);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      futures_trade, native::WebSocketFuturesTrade, size);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      futures_trade, native::WebSocketFuturesTrade, correction);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      futures_trade, native::WebSocketFuturesTrade, exchange);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      futures_trade, native::WebSocketFuturesTrade, session_end_date);
+
+  auto futures_quote =
+      nb::class_<native::WebSocketFuturesQuote, native::WebSocketEvent>(
+          m,
+          "WebSocketFuturesQuote");
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      futures_quote, native::WebSocketFuturesQuote, ticker);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      futures_quote, native::WebSocketFuturesQuote, timestamp);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      futures_quote, native::WebSocketFuturesQuote, sequence_number);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      futures_quote, native::WebSocketFuturesQuote, report_sequence);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      futures_quote, native::WebSocketFuturesQuote, ask_timestamp);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      futures_quote, native::WebSocketFuturesQuote, ask_price);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      futures_quote, native::WebSocketFuturesQuote, ask_size);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      futures_quote, native::WebSocketFuturesQuote, bid_timestamp);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      futures_quote, native::WebSocketFuturesQuote, bid_price);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      futures_quote, native::WebSocketFuturesQuote, bid_size);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      futures_quote, native::WebSocketFuturesQuote, exchange);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      futures_quote, native::WebSocketFuturesQuote, session_end_date);
+
+  auto crypto_trade =
+      nb::class_<native::WebSocketCryptoTrade, native::WebSocketEvent>(
+          m,
+          "WebSocketCryptoTrade");
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      crypto_trade, native::WebSocketCryptoTrade, ticker);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      crypto_trade, native::WebSocketCryptoTrade, conditions);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      crypto_trade, native::WebSocketCryptoTrade, exchange);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      crypto_trade, native::WebSocketCryptoTrade, id);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      crypto_trade, native::WebSocketCryptoTrade, participant_timestamp);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      crypto_trade, native::WebSocketCryptoTrade, received_timestamp);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      crypto_trade, native::WebSocketCryptoTrade, price);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      crypto_trade, native::WebSocketCryptoTrade, size);
+
+  auto crypto_quote =
+      nb::class_<native::WebSocketCryptoQuote, native::WebSocketEvent>(
+          m,
+          "WebSocketCryptoQuote");
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      crypto_quote, native::WebSocketCryptoQuote, ticker);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      crypto_quote, native::WebSocketCryptoQuote, ask_price);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      crypto_quote, native::WebSocketCryptoQuote, ask_size);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      crypto_quote, native::WebSocketCryptoQuote, bid_price);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      crypto_quote, native::WebSocketCryptoQuote, bid_size);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      crypto_quote, native::WebSocketCryptoQuote, exchange);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      crypto_quote, native::WebSocketCryptoQuote, participant_timestamp);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      crypto_quote, native::WebSocketCryptoQuote, received_timestamp);
+
+  auto currency_quote =
+      nb::class_<native::WebSocketCurrencyQuote, native::WebSocketEvent>(
+          m,
+          "WebSocketCurrencyQuote");
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      currency_quote, native::WebSocketCurrencyQuote, ticker);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      currency_quote, native::WebSocketCurrencyQuote, tickers);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      currency_quote, native::WebSocketCurrencyQuote, ask_exchange);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      currency_quote, native::WebSocketCurrencyQuote, ask_price);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      currency_quote, native::WebSocketCurrencyQuote, bid_exchange);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      currency_quote, native::WebSocketCurrencyQuote, bid_price);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      currency_quote, native::WebSocketCurrencyQuote, participant_timestamp);
+
+  auto index_value =
+      nb::class_<native::WebSocketIndexValue, native::WebSocketEvent>(
+          m,
+          "WebSocketIndexValue");
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      index_value, native::WebSocketIndexValue, ticker);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      index_value, native::WebSocketIndexValue, value);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      index_value, native::WebSocketIndexValue, timestamp);
+
+#undef MASSIVE_SPEEDUP_BIND_WS_PROPERTY
 
   nb::class_<native::WebSocketMessage>(m, "WebSocketMessage")
       .def("__len__", &native::WebSocketMessage::size)
@@ -3049,6 +3328,18 @@ void bind_native_module(nb::module_& m, const char* alias_prefix) {
       websocket,
       "Crypto",
       native::WebSocketAsset::Crypto);
+
+  websocket.attr("Status") = m.attr("WebSocketStatus");
+  websocket.attr("Stocks").attr("Trade") = m.attr("WebSocketStockTrade");
+  websocket.attr("Stocks").attr("Quote") = m.attr("WebSocketStockQuote");
+  websocket.attr("Options").attr("Trade") = m.attr("WebSocketOptionTrade");
+  websocket.attr("Options").attr("Quote") = m.attr("WebSocketOptionQuote");
+  websocket.attr("Futures").attr("Trade") = m.attr("WebSocketFuturesTrade");
+  websocket.attr("Futures").attr("Quote") = m.attr("WebSocketFuturesQuote");
+  websocket.attr("Crypto").attr("Trade") = m.attr("WebSocketCryptoTrade");
+  websocket.attr("Crypto").attr("Quote") = m.attr("WebSocketCryptoQuote");
+  websocket.attr("Forex").attr("Quote") = m.attr("WebSocketCurrencyQuote");
+  websocket.attr("Indices").attr("Value") = m.attr("WebSocketIndexValue");
 
   bind_row_models<typename Impl<FlatFileStocksParser>::specialization_type>(m, flatfiles);
   bind_window_aggregators(m);

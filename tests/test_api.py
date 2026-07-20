@@ -519,6 +519,223 @@ def test_websocket_message_accepts_one_object_and_sequence_indexing() -> None:
     assert message[0]["i"] == 184467440737095516150
 
 
+def test_websocket_stock_events_are_lazy_database_compatible_rows() -> None:
+    message = WebSocket.Stocks.parse(
+        '[{"ev":"T","sym":"MSFT","x":4,"i":"12345","z":3,'
+        '"p":114.125,"s":100,"ds":"100.250","c":[0,12],'
+        '"t":1536036818784,"pt":1536036818763,"q":3681328,'
+        '"trfi":7,"trft":1536036818700},'
+        '{"ev":"Q","sym":"MSFT","bx":4,"bp":114.125,"bs":100,'
+        '"ax":7,"ap":114.128,"as":160,"c":0,"i":[604],'
+        '"t":1536036818784,"q":50385480,"z":3}]'
+    )
+    trade, quote = message
+
+    assert isinstance(trade, WebSocket.Stocks.Trade)
+    assert trade.cached_fields == ()
+    assert trade.cached_properties == ()
+    assert trade.price == pytest.approx(114.125)
+    assert trade.price is trade.price
+    assert trade.cached_fields == ("p",)
+    assert trade.cached_properties == ("price",)
+    assert trade.ticker == "MSFT"
+    assert trade.conditions == frozenset({0, 12})
+    assert trade.correction == 0
+    assert trade.exchange == 4
+    assert trade.id == 12345
+    assert trade.participant_timestamp == 1536036818763000000
+    assert trade.sequence_number == 3681328
+    assert trade.sip_timestamp == 1536036818784000000
+    assert trade.size == pytest.approx(100.25)
+    assert trade.decimal_size == "100.25"
+    assert trade.size_coefficient == 10025
+    assert trade.size_scale == 2
+    assert trade.tape == 3
+    assert trade.trf_id == 7
+    assert trade.trf_timestamp == 1536036818700000000
+    assert not trade.updates_high_low()
+    assert not trade.updates_open_close()
+    assert trade.updates_volume()
+    with pytest.raises(AttributeError):
+        trade.price = 1.0
+
+    assert isinstance(quote, WebSocket.Stocks.Quote)
+    assert quote.ticker == "MSFT"
+    assert quote.ask_exchange == 7
+    assert quote.ask_price == pytest.approx(114.128)
+    assert quote.ask_size == 160
+    assert quote.bid_exchange == 4
+    assert quote.bid_price == pytest.approx(114.125)
+    assert quote.bid_size == 100
+    assert quote.conditions == frozenset({0})
+    assert quote.indicators == frozenset({604})
+    assert quote.participant_timestamp == 1536036818784000000
+    assert quote.sequence_number == 50385480
+    assert quote.sip_timestamp == 1536036818784000000
+    assert quote.tape == 3
+    assert quote.trf_timestamp == 0
+    assert quote.updates_high_low()
+    assert quote.updates_open_close()
+    assert quote.updates_volume()
+
+
+def test_websocket_option_events_decode_contract_keys_lazily() -> None:
+    trade, quote = WebSocket.Options.parse(
+        '[{"ev":"T","sym":"O:SPY241220P00720000","x":302,'
+        '"p":9.75,"s":2,"c":[209,227],"t":1644506128350,"q":42},'
+        '{"ev":"Q","sym":"O:SPY241220P00720000","bx":302,"ax":303,'
+        '"bp":9.71,"ap":9.81,"bs":17,"as":24,'
+        '"t":1644506128351,"q":844090872}]'
+    )
+
+    assert isinstance(trade, WebSocket.Options.Trade)
+    assert trade.ticker == "O:SPY241220P00720000"
+    assert trade.root == "SPY"
+    assert trade.expiration == "2024-12-20"
+    assert trade.right == "P"
+    assert trade.strike == pytest.approx(720.0)
+    assert trade.conditions == frozenset({209, 227})
+    assert trade.correction == 0
+    assert trade.exchange == 302
+    assert trade.price == pytest.approx(9.75)
+    assert trade.sequence_number == 42
+    assert trade.sip_timestamp == 1644506128350000000
+    assert trade.size == 2
+
+    assert isinstance(quote, WebSocket.Options.Quote)
+    assert quote.ticker == trade.ticker
+    assert (quote.root, quote.expiration, quote.right, quote.strike) == (
+        "SPY",
+        "2024-12-20",
+        "P",
+        720.0,
+    )
+    assert quote.ask_exchange == 303
+    assert quote.ask_price == pytest.approx(9.81)
+    assert quote.ask_size == 24
+    assert quote.bid_exchange == 302
+    assert quote.bid_price == pytest.approx(9.71)
+    assert quote.bid_size == 17
+    assert quote.sequence_number == 844090872
+    assert quote.sip_timestamp == 1644506128351000000
+
+
+def test_websocket_futures_events_expose_live_fields_and_explicit_defaults() -> None:
+    trade, quote = WebSocket.Futures.parse(
+        '[{"ev":"T","sym":"ESZ4","z":3,"p":6064.5,"s":100,'
+        '"t":1734103628363,"q":32599300},'
+        '{"ev":"Q","sym":"ESZ4","bp":114.125,"bs":100,'
+        '"bt":1734103628360,"ap":114.128,"as":160,'
+        '"at":1734103628350,"t":1734103628364}]'
+    )
+
+    assert isinstance(trade, WebSocket.Futures.Trade)
+    assert trade.ticker == "ESZ4"
+    assert trade.timestamp == 1734103628363000000
+    assert trade.sequence_number == 32599300
+    assert trade.report_sequence == 0
+    assert trade.price == pytest.approx(6064.5)
+    assert trade.size == 100
+    assert trade.correction == 0
+    assert trade.exchange == 0
+    assert trade.session_end_date == ""
+    assert trade["z"] == 3
+
+    assert isinstance(quote, WebSocket.Futures.Quote)
+    assert quote.ticker == "ESZ4"
+    assert quote.timestamp == 1734103628364000000
+    assert quote.sequence_number == 0
+    assert quote.report_sequence == 0
+    assert quote.ask_timestamp == 1734103628350000000
+    assert quote.ask_price == pytest.approx(114.128)
+    assert quote.ask_size == 160
+    assert quote.bid_timestamp == 1734103628360000000
+    assert quote.bid_price == pytest.approx(114.125)
+    assert quote.bid_size == 100
+    assert quote.exchange == 0
+    assert quote.session_end_date == ""
+
+
+def test_websocket_currency_crypto_and_index_events_match_database_names() -> None:
+    crypto_trade, crypto_quote = WebSocket.Crypto.parse(
+        '[{"ev":"XT","pair":"BTC-USD","p":33021.9,"t":1610462007425,'
+        '"s":0.01616617,"c":[2],"i":14272084,"x":3,"r":1610462007576},'
+        '{"ev":"XQ","pair":"BTC-USD","bp":33052.79,"bs":0.48,'
+        '"ap":33073.19,"as":0.601,"t":1610462411115,'
+        '"x":1,"r":1610462411128}]'
+    )
+    currency_quote = WebSocket.Forex.parse(
+        '{"ev":"C","p":"USD/CNH","x":"44","a":6.83366,'
+        '"b":6.83363,"t":1536036818784}'
+    )[0]
+    index_value = WebSocket.Indices.parse(
+        '{"ev":"V","val":3988.5,"T":"I:SPX","t":1678220098130}'
+    )[0]
+
+    assert isinstance(crypto_trade, WebSocket.Crypto.Trade)
+    assert crypto_trade.ticker == "X:BTC-USD"
+    assert crypto_trade.conditions == frozenset({2})
+    assert crypto_trade.exchange == 3
+    assert crypto_trade.id == 14272084
+    assert crypto_trade.participant_timestamp == 1610462007425000000
+    assert crypto_trade.received_timestamp == 1610462007576000000
+    assert crypto_trade.price == pytest.approx(33021.9)
+    assert crypto_trade.size == pytest.approx(0.01616617)
+
+    assert isinstance(crypto_quote, WebSocket.Crypto.Quote)
+    assert crypto_quote.ticker == "X:BTC-USD"
+    assert crypto_quote.ask_price == pytest.approx(33073.19)
+    assert crypto_quote.ask_size == pytest.approx(0.601)
+    assert crypto_quote.bid_price == pytest.approx(33052.79)
+    assert crypto_quote.bid_size == pytest.approx(0.48)
+    assert crypto_quote.exchange == 1
+    assert crypto_quote.participant_timestamp == 1610462411115000000
+    assert crypto_quote.received_timestamp == 1610462411128000000
+
+    assert isinstance(currency_quote, WebSocket.Forex.Quote)
+    assert currency_quote.ticker == "C:USD-CNH"
+    assert currency_quote.tickers == ("USD", "CNH")
+    assert currency_quote.ask_exchange == 44
+    assert currency_quote.ask_price == pytest.approx(6.83366)
+    assert currency_quote.bid_exchange == 44
+    assert currency_quote.bid_price == pytest.approx(6.83363)
+    assert currency_quote.participant_timestamp == 1536036818784000000
+
+    assert isinstance(index_value, WebSocket.Indices.Value)
+    assert index_value.ticker == "I:SPX"
+    assert index_value.value == pytest.approx(3988.5)
+    assert index_value.timestamp == 1678220098130000000
+
+
+def test_websocket_status_and_unsupported_events_remain_lossless() -> None:
+    package = import_module("massive_speedup")
+    status, aggregate = WebSocket.Stocks.parse(
+        '[{"ev":"status","status":"auth_success","message":"authenticated"},'
+        '{"ev":"AM","sym":"AAPL","o":195.0}]'
+    )
+
+    assert isinstance(status, WebSocket.Status)
+    assert status.status == "auth_success"
+    assert status.message == "authenticated"
+    assert type(aggregate) is package.WebSocketEvent
+    assert aggregate.event_type == "AM"
+    assert aggregate["sym"] == "AAPL"
+    assert aggregate["o"] == pytest.approx(195.0)
+
+
+def test_websocket_typed_field_validation_is_deferred_until_access() -> None:
+    trade = WebSocket.Stocks.parse(
+        '{"ev":"T","sym":"AAPL","p":"not-a-number"}'
+    )[0]
+
+    assert isinstance(trade, WebSocket.Stocks.Trade)
+    assert trade.cached_fields == ()
+    with pytest.raises(ValueError, match="field 'p'"):
+        _ = trade.price
+    assert trade.cached_fields == ("p",)
+    assert trade.cached_properties == ()
+
+
 @pytest.mark.parametrize(
     "payload",
     [

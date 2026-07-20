@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -44,17 +45,192 @@ class WebSocketEvent {
   nb::object get(std::string_view key, nb::handle default_value) const;
   bool contains(std::string_view key) const;
   bool is_cached(std::string_view key) const;
+  bool is_property_cached(std::string_view key) const;
   nb::tuple cached_fields() const;
+  nb::tuple cached_properties() const;
   nb::bytes raw_json() const;
   nb::bytes message_bytes() const;
   std::string repr() const;
 
  protected:
   const std::shared_ptr<websocket_detail::EventState>& state() const;
+  nb::object cached_property(
+      std::string_view key,
+      const std::function<nb::object()>& factory) const;
 
  private:
   std::shared_ptr<websocket_detail::EventState> state_;
 };
+
+#define MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(name) \
+  nb::object name##_object() const
+
+class WebSocketStatus final : public WebSocketEvent {
+ public:
+  using WebSocketEvent::WebSocketEvent;
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(status);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(message);
+};
+
+class WebSocketStockTrade final : public WebSocketEvent {
+ public:
+  using WebSocketEvent::WebSocketEvent;
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(ticker);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(conditions);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(correction);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(exchange);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(id);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(participant_timestamp);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(price);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(sequence_number);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(sip_timestamp);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(size);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(decimal_size);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(size_coefficient);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(size_scale);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(tape);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(trf_id);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(trf_timestamp);
+  bool updates_high_low() const;
+  bool updates_open_close() const;
+  bool updates_volume() const;
+};
+
+class WebSocketStockQuote final : public WebSocketEvent {
+ public:
+  using WebSocketEvent::WebSocketEvent;
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(ticker);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(ask_exchange);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(ask_price);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(ask_size);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(bid_exchange);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(bid_price);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(bid_size);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(conditions);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(indicators);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(participant_timestamp);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(sequence_number);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(sip_timestamp);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(tape);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(trf_timestamp);
+  bool updates_high_low() const;
+  bool updates_open_close() const;
+  bool updates_volume() const;
+};
+
+class WebSocketOptionTrade final : public WebSocketEvent {
+ public:
+  using WebSocketEvent::WebSocketEvent;
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(ticker);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(root);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(expiration);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(right);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(strike);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(conditions);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(correction);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(exchange);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(price);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(sequence_number);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(sip_timestamp);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(size);
+};
+
+class WebSocketOptionQuote final : public WebSocketEvent {
+ public:
+  using WebSocketEvent::WebSocketEvent;
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(ticker);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(root);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(expiration);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(right);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(strike);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(ask_exchange);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(ask_price);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(ask_size);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(bid_exchange);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(bid_price);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(bid_size);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(sequence_number);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(sip_timestamp);
+};
+
+class WebSocketFuturesTrade final : public WebSocketEvent {
+ public:
+  using WebSocketEvent::WebSocketEvent;
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(ticker);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(timestamp);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(sequence_number);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(report_sequence);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(price);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(size);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(correction);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(exchange);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(session_end_date);
+};
+
+class WebSocketFuturesQuote final : public WebSocketEvent {
+ public:
+  using WebSocketEvent::WebSocketEvent;
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(ticker);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(timestamp);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(sequence_number);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(report_sequence);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(ask_timestamp);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(ask_price);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(ask_size);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(bid_timestamp);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(bid_price);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(bid_size);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(exchange);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(session_end_date);
+};
+
+class WebSocketCryptoTrade final : public WebSocketEvent {
+ public:
+  using WebSocketEvent::WebSocketEvent;
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(ticker);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(conditions);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(exchange);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(id);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(participant_timestamp);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(received_timestamp);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(price);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(size);
+};
+
+class WebSocketCryptoQuote final : public WebSocketEvent {
+ public:
+  using WebSocketEvent::WebSocketEvent;
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(ticker);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(ask_price);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(ask_size);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(bid_price);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(bid_size);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(exchange);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(participant_timestamp);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(received_timestamp);
+};
+
+class WebSocketCurrencyQuote final : public WebSocketEvent {
+ public:
+  using WebSocketEvent::WebSocketEvent;
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(ticker);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(tickers);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(ask_exchange);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(ask_price);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(bid_exchange);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(bid_price);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(participant_timestamp);
+};
+
+class WebSocketIndexValue final : public WebSocketEvent {
+ public:
+  using WebSocketEvent::WebSocketEvent;
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(ticker);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(value);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(timestamp);
+};
+
+#undef MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY
 
 class WebSocketMessage {
  public:

@@ -3,11 +3,13 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/make_iterator.h>
 #include <nanobind/stl/filesystem.h>
+#include <nanobind/stl/optional.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/unordered_map.h>
 #include <nanobind/stl/vector.h>
 
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <filesystem>
 #include <limits>
@@ -22,6 +24,20 @@
 namespace massive_speedup::bindings {
 
 namespace nb = nanobind;
+
+inline std::filesystem::path configured_database_path(
+    const std::optional<std::filesystem::path>& database_path) {
+  if (database_path.has_value()) {
+    return *database_path;
+  }
+  const char* configured = std::getenv("MASSIVE_SPEEDUP_DB_PATH");
+  if (configured == nullptr || *configured == '\0') {
+    throw std::runtime_error(
+        "database_path is not configured; set MASSIVE_SPEEDUP_DB_PATH or pass "
+        "database_path=...");
+  }
+  return configured;
+}
 
 template <typename ParserType>
 std::vector<nb::bytes> read_gzip_lines_bytes(
@@ -373,14 +389,18 @@ void bind_database_record_file(
       .def(
           "__init__",
           [](DatabaseType* self,
-             const std::filesystem::path& database_path,
              nb::handle date,
-             const std::string& ticker) {
-            new (self) DatabaseType(database_path, date_argument_to_string(date), ticker);
+             const std::string& ticker,
+             const std::optional<std::filesystem::path>& database_path) {
+            new (self) DatabaseType(
+                configured_database_path(database_path),
+                date_argument_to_string(date),
+                ticker);
           },
-          nb::arg("database_path"),
           nb::arg("date"),
-          nb::arg("ticker"))
+          nb::arg("ticker"),
+          nb::kw_only(),
+          nb::arg("database_path") = nb::none())
       .def_prop_ro("ticker", &DatabaseType::ticker)
       .def_prop_ro("date", &DatabaseType::date)
       .def_prop_ro("record_type", &DatabaseType::record_type)
@@ -490,21 +510,21 @@ void bind_futures_database_record_file(
       .def(
           "__init__",
           [](DatabaseType* self,
-             const std::filesystem::path& database_path,
              nb::handle date,
              const std::string& ticker,
-             const std::string& exchange) {
+             const std::string& exchange,
+             const std::optional<std::filesystem::path>& database_path) {
             new (self) DatabaseType(
-                database_path,
+                configured_database_path(database_path),
                 date_argument_to_string(date),
                 ticker,
                 exchange);
           },
-          nb::arg("database_path"),
           nb::arg("date"),
           nb::arg("ticker"),
           nb::kw_only(),
-          nb::arg("exchange") = "")
+          nb::arg("exchange") = "",
+          nb::arg("database_path") = nb::none())
       .def_prop_ro("ticker", &DatabaseType::ticker)
       .def_prop_ro("date", &DatabaseType::date)
       .def_prop_ro("record_type", &DatabaseType::record_type)
@@ -570,26 +590,27 @@ void bind_option_database_record_file(
       .def(
           "__init__",
           [](DatabaseType* self,
-             const std::filesystem::path& database_path,
              nb::handle date,
              const std::string& root,
              const std::string& expiration,
              const std::string& right,
-             double strike) {
+             double strike,
+             const std::optional<std::filesystem::path>& database_path) {
             new (self) DatabaseType(
-                database_path,
+                configured_database_path(database_path),
                 date_argument_to_string(date),
                 root,
                 expiration,
                 right,
                 strike);
           },
-          nb::arg("database_path"),
           nb::arg("date"),
           nb::arg("root"),
           nb::arg("expiration"),
           nb::arg("right"),
-          nb::arg("strike"))
+          nb::arg("strike"),
+          nb::kw_only(),
+          nb::arg("database_path") = nb::none())
       .def_prop_ro("root", &DatabaseType::root)
       .def_prop_ro("expiration", &DatabaseType::expiration)
       .def_prop_ro("right", &DatabaseType::right)
@@ -652,17 +673,18 @@ inline void bind_stock_trade_quote_timeline(nb::module_& m) {
       .def(
           "__init__",
           [](native::StockTradeQuoteTimeline* self,
-             const std::filesystem::path& database_path,
              nb::handle date,
-             const std::string& ticker) {
+             const std::string& ticker,
+             const std::optional<std::filesystem::path>& database_path) {
             new (self) native::StockTradeQuoteTimeline(
-                database_path,
+                configured_database_path(database_path),
                 date_argument_to_string(date),
                 ticker);
           },
-          nb::arg("database_path"),
           nb::arg("date"),
-          nb::arg("ticker"))
+          nb::arg("ticker"),
+          nb::kw_only(),
+          nb::arg("database_path") = nb::none())
       .def(
           "__iter__",
           [](native::StockTradeQuoteTimeline& self)
@@ -672,17 +694,18 @@ inline void bind_stock_trade_quote_timeline(nb::module_& m) {
 
   m.def(
       "stock_trade_quote_timeline",
-      [](const std::filesystem::path& database_path,
-         nb::handle date,
-         const std::string& ticker) {
+      [](nb::handle date,
+         const std::string& ticker,
+         const std::optional<std::filesystem::path>& database_path) {
         return native::StockTradeQuoteTimeline(
-            database_path,
+            configured_database_path(database_path),
             date_argument_to_string(date),
             ticker);
       },
-      nb::arg("database_path"),
       nb::arg("date"),
-      nb::arg("ticker"));
+      nb::arg("ticker"),
+      nb::kw_only(),
+      nb::arg("database_path") = nb::none());
 }
 
 inline void bind_simple_market(nb::module_& m) {
@@ -716,25 +739,25 @@ inline void bind_simple_market(nb::module_& m) {
       .def(
           "__init__",
           [](native::SimpleMarket* self,
-             const std::filesystem::path& database_path,
              nb::handle date,
              const std::vector<std::string>& symbols,
              std::uint64_t trade_latency_ns,
+             const std::optional<std::filesystem::path>& database_path,
              bool quotes,
              bool fast) {
             new (self) native::SimpleMarket(
-                database_path,
+                configured_database_path(database_path),
                 date_argument_to_string(date),
                 symbols,
                 trade_latency_ns,
                 quotes,
                 fast);
           },
-          nb::arg("database_path"),
           nb::arg("date"),
           nb::arg("symbols"),
           nb::arg("trade_latency_ns"),
           nb::kw_only(),
+          nb::arg("database_path") = nb::none(),
           nb::arg("quotes") = false,
           nb::arg("fast") = false)
       .def(
@@ -794,15 +817,15 @@ inline void bind_simple_market(nb::module_& m) {
       .def(
           "__init__",
           [](native::FuturesMarket* self,
-             const std::filesystem::path& database_path,
              nb::handle date,
              const std::vector<std::string>& symbols,
              std::uint64_t trade_latency_ns,
              const std::string& exchange,
+             const std::optional<std::filesystem::path>& database_path,
              bool quotes,
              bool fast) {
             new (self) native::FuturesMarket(
-                database_path,
+                configured_database_path(database_path),
                 date_argument_to_string(date),
                 symbols,
                 trade_latency_ns,
@@ -810,12 +833,12 @@ inline void bind_simple_market(nb::module_& m) {
                 quotes,
                 fast);
           },
-          nb::arg("database_path"),
           nb::arg("date"),
           nb::arg("symbols"),
           nb::arg("trade_latency_ns"),
           nb::kw_only(),
           nb::arg("exchange") = "",
+          nb::arg("database_path") = nb::none(),
           nb::arg("quotes") = false,
           nb::arg("fast") = false)
       .def(
@@ -854,17 +877,17 @@ inline void bind_simple_market(nb::module_& m) {
       .def(
           "__init__",
           [](native::OptionMarket* self,
-             const std::filesystem::path& database_path,
              nb::handle date,
              const std::string& root,
              const std::string& expiration,
              const std::string& right,
              double strike,
              std::uint64_t trade_latency_ns,
+             const std::optional<std::filesystem::path>& database_path,
              bool quotes,
              bool fast) {
             new (self) native::OptionMarket(
-                database_path,
+                configured_database_path(database_path),
                 date_argument_to_string(date),
                 root,
                 expiration,
@@ -874,7 +897,6 @@ inline void bind_simple_market(nb::module_& m) {
                 quotes,
                 fast);
           },
-          nb::arg("database_path"),
           nb::arg("date"),
           nb::arg("root"),
           nb::arg("expiration"),
@@ -882,6 +904,7 @@ inline void bind_simple_market(nb::module_& m) {
           nb::arg("strike"),
           nb::arg("trade_latency_ns"),
           nb::kw_only(),
+          nb::arg("database_path") = nb::none(),
           nb::arg("quotes") = false,
           nb::arg("fast") = false)
       .def(
@@ -3096,18 +3119,19 @@ void bind_native_module(nb::module_& m, const char* alias_prefix) {
   m.def(
       "build_database_file",
       [](const std::filesystem::path& input_path,
-         const std::filesystem::path& database_path,
          const std::string& record_type,
+         const std::optional<std::filesystem::path>& database_path,
          bool force) {
         return Impl<FlatFileStocksParser>::build_database_file(
             input_path,
-            database_path,
+            configured_database_path(database_path),
             record_type,
             force);
       },
       nb::arg("input_path"),
-      nb::arg("database_path"),
       nb::arg("record_type"),
+      nb::kw_only(),
+      nb::arg("database_path") = nb::none(),
       nb::arg("force") = false,
       nb::call_guard<nb::gil_scoped_release>());
   static_cast<void>(alias_prefix);

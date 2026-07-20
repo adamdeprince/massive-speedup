@@ -932,7 +932,7 @@ def test_build_database_parser_accepts_positional_files() -> None:
     )
 
     assert args.input_files == [Path("stock_quotes.csv.gz"), Path("currency_quotes.csv.gz")]
-    assert args.database == Path("db")
+    assert args.database_path == Path("db")
     assert args.benchmark is False
     assert args.force is False
     assert not hasattr(args, "record_type")
@@ -1013,12 +1013,12 @@ def test_build_database_main_processes_mixed_positional_files(
 
     def fake_write_database_file(
         input_path: Path,
-        database: Path,
         record_type: str,
         *,
+        database_path: Path,
         force: bool = False,
     ) -> int:
-        calls.append(("write", input_path, database, record_type, force))
+        calls.append(("write", input_path, database_path, record_type, force))
         return 1
 
     monkeypatch.setattr(build_database, "set_process_title", titles.append)
@@ -1061,9 +1061,9 @@ def test_build_database_main_skips_bad_header_and_logs(
 
     def fake_write_database_file(
         input_path: Path,
-        database: Path,
         record_type: str,
         *,
+        database_path: Path,
         force: bool = False,
     ) -> int:
         calls.append((input_path, record_type))
@@ -1102,12 +1102,12 @@ def test_build_database_main_force_passes_through(
 
     def fake_write_database_file(
         input_path: Path,
-        database: Path,
         record_type: str,
         *,
+        database_path: Path,
         force: bool = False,
     ) -> int:
-        calls.append((input_path, database, record_type, force))
+        calls.append((input_path, database_path, record_type, force))
         return 1
 
     monkeypatch.setattr(build_database, "write_database_file", fake_write_database_file)
@@ -1144,12 +1144,12 @@ def test_build_database_main_delegates_existing_date_directory_to_native_builder
 
     def fake_write_database_file(
         input_path: Path,
-        database: Path,
         record_type: str,
         *,
+        database_path: Path,
         force: bool = False,
     ) -> int:
-        calls.append((input_path, database, record_type, force))
+        calls.append((input_path, database_path, record_type, force))
         return 1
 
     monkeypatch.setattr(build_database, "write_database_file", fake_write_database_file)
@@ -1179,12 +1179,12 @@ def test_build_database_main_force_overrides_complete_date_directory_skip(
 
     def fake_write_database_file(
         input_path: Path,
-        database: Path,
         record_type: str,
         *,
+        database_path: Path,
         force: bool = False,
     ) -> int:
-        calls.append((input_path, database, record_type, force))
+        calls.append((input_path, database_path, record_type, force))
         return 1
 
     monkeypatch.setattr(build_database, "write_database_file", fake_write_database_file)
@@ -1246,7 +1246,7 @@ def test_build_database_main_benchmark_prints_metrics(
     monkeypatch.setattr(
         build_database,
         "write_database_file",
-        lambda input_path, database, record_type, *, force=False: 2,
+        lambda input_path, record_type, *, database_path, force=False: 2,
     )
     monkeypatch.setattr(build_database.time, "perf_counter", lambda: next(timer_values))
 
@@ -1320,7 +1320,11 @@ def test_build_database_file_native_groups_records_by_ticker_using_filename_date
             f"B,37,0,8,52983525035850,{one_day_ns},129.80,6877,{one_day_ns},100,1,0,0\n"
         )
 
-    rows_written = build_database.write_database_file(path, tmp_path / "db", "stock_trade")
+    rows_written = build_database.write_database_file(
+        path,
+        "stock_trade",
+        database_path=tmp_path / "db",
+    )
 
     root = tmp_path / "db" / "stock_trade" / "1970-01-01"
     assert rows_written == 2
@@ -1347,7 +1351,14 @@ def test_build_database_file_native_skips_existing_tickers_unless_forced(
         handle.write(build_database.STOCK_TRADE_HEADER + "\n")
         handle.write("A,12,0,8,52983525035849,0,129.79,6876,0,100,1,0,0\n")
 
-    assert build_database.write_database_file(first_path, database, "stock_trade") == 1
+    assert (
+        build_database.write_database_file(
+            first_path,
+            "stock_trade",
+            database_path=database,
+        )
+        == 1
+    )
     output = database / "stock_trade" / "1970-01-01" / "A"
     original = module.StockTrade.from_packed(output.read_bytes(), "A")
     assert original.price == pytest.approx(129.79)
@@ -1358,15 +1369,22 @@ def test_build_database_file_native_skips_existing_tickers_unless_forced(
         handle.write(build_database.STOCK_TRADE_HEADER + "\n")
         handle.write("A,12,0,8,52983525035849,0,200.25,6876,0,100,1,0,0\n")
 
-    assert build_database.write_database_file(second_path, database, "stock_trade") == 0
+    assert (
+        build_database.write_database_file(
+            second_path,
+            "stock_trade",
+            database_path=database,
+        )
+        == 0
+    )
     skipped = module.StockTrade.from_packed(output.read_bytes(), "A")
     assert skipped.price == pytest.approx(129.79)
 
     assert (
         build_database.write_database_file(
             second_path,
-            database,
             "stock_trade",
+            database_path=database,
             force=True,
         )
         == 1
@@ -1394,7 +1412,11 @@ def test_build_database_file_native_publishes_only_completed_symbol_files(
 
     database = tmp_path / "db"
     with pytest.raises(ValueError, match="decimal quantity"):
-        build_database.write_database_file(path, database, "stock_trade")
+        build_database.write_database_file(
+            path,
+            "stock_trade",
+            database_path=database,
+        )
 
     root = database / "stock_trade" / "1970-01-01"
     assert module.StockTrade.from_packed((root / "A").read_bytes(), "A").decimal_size == "1.25"
@@ -1418,7 +1440,14 @@ def test_build_database_file_native_force_keeps_old_file_until_replacement_compl
     with gzip.open(initial, "wt", encoding="utf-8", newline="") as handle:
         handle.write(build_database.STOCK_TRADE_HEADER + "\n")
         handle.write("A,12,0,8,1,1000,10.0,1,1000,1,1,0,0\n")
-    assert build_database.write_database_file(initial, database, "stock_trade") == 1
+    assert (
+        build_database.write_database_file(
+            initial,
+            "stock_trade",
+            database_path=database,
+        )
+        == 1
+    )
 
     replacement = tmp_path / "replacement" / "1970-01-01.csv.gz"
     replacement.parent.mkdir()
@@ -1430,8 +1459,8 @@ def test_build_database_file_native_force_keeps_old_file_until_replacement_compl
     with pytest.raises(ValueError, match="decimal quantity"):
         build_database.write_database_file(
             replacement,
-            database,
             "stock_trade",
+            database_path=database,
             force=True,
         )
 
@@ -1440,7 +1469,10 @@ def test_build_database_file_native_force_keeps_old_file_until_replacement_compl
     assert (output.parent / "A.incomplete").exists()
 
 
-def test_build_database_file_native_creates_database_root_for_empty_input(tmp_path: Path) -> None:
+def test_build_database_file_native_uses_configured_database_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from massive_speedup import build_database
     try:
         import_module("massive_speedup._native")
@@ -1448,12 +1480,16 @@ def test_build_database_file_native_creates_database_root_for_empty_input(tmp_pa
         pytest.skip("massive_speedup._native is not built in this environment")
 
     database = tmp_path / "db"
+    monkeypatch.setenv("MASSIVE_SPEEDUP_DB_PATH", str(database))
     path = tmp_path / "stock_trade" / "1970-01-01.csv.gz"
     path.parent.mkdir()
     with gzip.open(path, "wt", encoding="utf-8", newline="") as handle:
         handle.write(build_database.STOCK_TRADE_HEADER + "\n")
 
-    rows_written = build_database.write_database_file(path, database, "stock_trade")
+    rows_written = build_database.write_database_file(
+        path,
+        "stock_trade",
+    )
 
     assert rows_written == 0
     assert database.is_dir()
@@ -1474,7 +1510,11 @@ def test_build_database_file_native_uses_filename_date_for_currency_quote(
         handle.write(build_database.CURRENCY_QUOTE_HEADER + "\n")
         handle.write("C:AED-AUD,48,0.412060465749694,48,0.411836123587859,0\n")
 
-    rows_written = build_database.write_database_file(path, tmp_path / "db", "currency_quote")
+    rows_written = build_database.write_database_file(
+        path,
+        "currency_quote",
+        database_path=tmp_path / "db",
+    )
 
     assert rows_written == 1
     output = tmp_path / "db" / "currency_quote" / "2026-06-17" / "C:AED-AUD"
@@ -1499,13 +1539,13 @@ def test_build_database_file_native_writes_searchable_index_values(
 
     rows_written = build_database.write_database_file(
         path,
-        tmp_path / "db",
         "index_value",
+        database_path=tmp_path / "db",
     )
     records = module.IndexValueDatabase(
-        tmp_path / "db",
         "2026-07-17",
         "I:AAPLCW",
+        database_path=tmp_path / "db",
     )
 
     assert rows_written == 2
@@ -1538,12 +1578,20 @@ def test_build_database_file_native_writes_crypto_trade_databases(
         handle.write("X:00-USD,2,1,3641496,10,0.0037,7575.0\n")
         handle.write("X:01-USD,2,1,3641497,20,0.0038,72854.49\n")
 
-    rows_written = build_database.write_database_file(path, tmp_path / "db", "crypto_trade")
+    rows_written = build_database.write_database_file(
+        path,
+        "crypto_trade",
+        database_path=tmp_path / "db",
+    )
 
     root = tmp_path / "db" / "crypto_trade" / "2026-06-17"
     first = root / "X:00-USD"
     second = root / "X:01-USD"
-    records = module.CryptoTradeDatabase(tmp_path / "db", "2026-06-17", "X:00-USD")
+    records = module.CryptoTradeDatabase(
+        "2026-06-17",
+        "X:00-USD",
+        database_path=tmp_path / "db",
+    )
 
     assert rows_written == 3
     assert len(first.read_bytes()) == module.CryptoTrade.packed_size * 2
@@ -1574,7 +1622,11 @@ def test_build_database_file_native_rejects_misordered_crypto_trade_timestamps(
         handle.write("X:00-USD,2,1,3641495,9,0.0036,30000.0\n")
 
     with pytest.raises(ValueError, match="ticker,participant_timestamp"):
-        build_database.write_database_file(path, tmp_path / "db", "crypto_trade")
+        build_database.write_database_file(
+            path,
+            "crypto_trade",
+            database_path=tmp_path / "db",
+        )
 
 
 def test_build_database_file_native_writes_futures_trade_databases(
@@ -1599,8 +1651,8 @@ def test_build_database_file_native_writes_futures_trade_databases(
 
     rows_written = build_database.write_database_file(
         path,
-        tmp_path / "db",
         build_database.infer_record_type(path),
+        database_path=tmp_path / "db",
     )
 
     assert rows_written == 2
@@ -1635,15 +1687,15 @@ def test_futures_trade_database_reads_mmap_records(tmp_path: Path) -> None:
 
     rows_written = build_database.write_database_file(
         path,
-        tmp_path / "db",
         build_database.infer_record_type(path),
+        database_path=tmp_path / "db",
     )
 
     records = module.FuturesTradeDatabase(
-        tmp_path / "db",
         dt.date(2026, 5, 21),
         "0BTZ9",
         exchange="cme",
+        database_path=tmp_path / "db",
     )
 
     assert rows_written == 2
@@ -1690,8 +1742,8 @@ def test_build_database_file_native_writes_futures_quote_databases(
 
     rows_written = build_database.write_database_file(
         path,
-        tmp_path / "db",
         build_database.infer_record_type(path),
+        database_path=tmp_path / "db",
     )
 
     assert rows_written == 1
@@ -1728,15 +1780,15 @@ def test_futures_quote_database_reads_mmap_records(tmp_path: Path) -> None:
 
     rows_written = build_database.write_database_file(
         path,
-        tmp_path / "db",
         build_database.infer_record_type(path),
+        database_path=tmp_path / "db",
     )
 
     records = module.FuturesQuoteDatabase(
-        tmp_path / "db",
         "2026-05-21",
         "0BTZ9",
         exchange="nymex",
+        database_path=tmp_path / "db",
     )
 
     assert rows_written == 2
@@ -1792,10 +1844,10 @@ def test_futures_database_time_search_maps_evening_to_prior_calendar_day(
     path.parent.mkdir(parents=True)
     path.write_bytes(b"".join(row.pack() for row in rows))
     records = module.FuturesTradeDatabase(
-        tmp_path / "db",
         session_end_date,
         "ESU6",
         exchange="cme",
+        database_path=tmp_path / "db",
     )
 
     assert records.index_after_timestamp(dt.time(22, 30, tzinfo=dt.UTC)) == 0
@@ -1838,13 +1890,13 @@ def test_build_database_file_native_writes_option_databases(tmp_path: Path) -> N
 
     trade_rows = build_database.write_database_file(
         trade_path,
-        tmp_path / "db",
         build_database.infer_record_type(trade_path),
+        database_path=tmp_path / "db",
     )
     quote_rows = build_database.write_database_file(
         quote_path,
-        tmp_path / "db",
         build_database.infer_record_type(quote_path),
+        database_path=tmp_path / "db",
     )
 
     root = tmp_path / "db" / "option_trade" / "2026-06-18"
@@ -1868,20 +1920,20 @@ def test_build_database_file_native_writes_option_databases(tmp_path: Path) -> N
     assert len(quote_file.read_bytes()) == module.OptionQuote.packed_size * 2
 
     trades = module.OptionTradeDatabase(
-        tmp_path / "db",
         "2026-06-18",
         "A",
         "2026-06-18",
         "C",
         115.0,
+        database_path=tmp_path / "db",
     )
     quotes = module.OptionQuoteDatabase(
-        tmp_path / "db",
         dt.date(2026, 6, 18),
         "A",
         "2026-06-18",
         "C",
         115.0,
+        database_path=tmp_path / "db",
     )
 
     assert trades.record_type == "option_trade"
@@ -1941,38 +1993,38 @@ def test_build_database_file_native_sorts_option_contract_rows_within_root(
 
     trade_rows_written = build_database.write_database_file(
         path,
-        tmp_path / "db",
         build_database.infer_record_type(path),
+        database_path=tmp_path / "db",
     )
     quote_rows_written = build_database.write_database_file(
         quote_path,
-        tmp_path / "db",
         build_database.infer_record_type(quote_path),
+        database_path=tmp_path / "db",
     )
 
     high_strike = module.OptionTradeDatabase(
-        tmp_path / "db",
         "2026-06-18",
         "A",
         "2026-06-18",
         "P",
         135.0,
+        database_path=tmp_path / "db",
     )
     low_strike = module.OptionTradeDatabase(
-        tmp_path / "db",
         "2026-06-18",
         "A",
         "2026-06-18",
         "P",
         80.0,
+        database_path=tmp_path / "db",
     )
     high_strike_quotes = module.OptionQuoteDatabase(
-        tmp_path / "db",
         "2026-06-18",
         "A",
         "2026-06-18",
         "P",
         135.0,
+        database_path=tmp_path / "db",
     )
 
     assert trade_rows_written == 3
@@ -2518,7 +2570,11 @@ def test_native_database_record_files_mmap_iter_index_search_and_market_calendar
     ]
     write_records("stock_trade", "A", trade_rows)
 
-    trade_records = module.StockTradeDatabase(database, date_object, "A")
+    trade_records = module.StockTradeDatabase(
+        date_object,
+        "A",
+        database_path=database,
+    )
     assert len(trade_records) == 2
     assert trade_records.ticker == "A"
     assert trade_records.date == date
@@ -2607,7 +2663,7 @@ def test_native_database_record_files_mmap_iter_index_search_and_market_calendar
         ),
     ]
     write_records("stock_quote", "A", quote_rows)
-    quote_records = module.StockQuoteDatabase(database, date, "A")
+    quote_records = module.StockQuoteDatabase(date, "A", database_path=database)
     assert quote_records[1] == quote_rows[1]
     assert quote_records.index_before_timestamp(1999) == 0
     assert quote_records.index_before_timestamp(dt.time(0, 0, 0, 2), galloping=0) == 1
@@ -2621,21 +2677,34 @@ def test_native_database_record_files_mmap_iter_index_search_and_market_calendar
     assert quote_bar.ask_volume == 0
     assert quote_bar.bid_volume == 0
 
-    timeline = list(module.StockTradeQuoteTimeline(database, date_object, "A"))
+    timeline = list(
+        module.StockTradeQuoteTimeline(
+            date_object,
+            "A",
+            database_path=database,
+        )
+    )
     assert timeline == [
         (None, quote_rows[0]),
         (trade_rows[0], quote_rows[0]),
         (None, quote_rows[1]),
         (trade_rows[1], quote_rows[1]),
     ]
-    assert list(module.stock_trade_quote_timeline(database, date, "A")) == timeline
+    assert (
+        list(module.stock_trade_quote_timeline(date, "A", database_path=database))
+        == timeline
+    )
 
     currency_rows = [
         module.CurrencyQuote(["C:AED-AUD", "48", "0.412", "48", "0.411", "1000"]),
         module.CurrencyQuote(["C:AED-AUD", "48", "0.413", "48", "0.412", "2000"]),
     ]
     write_records("currency_quote", "C:AED-AUD", currency_rows)
-    currency_records = module.CurrencyQuoteDatabase(database, date, "C:AED-AUD")
+    currency_records = module.CurrencyQuoteDatabase(
+        date,
+        "C:AED-AUD",
+        database_path=database,
+    )
     assert currency_records[0] == currency_rows[0]
     assert currency_records.index_before_timestamp(1999) == 0
     assert currency_records.index_before_timestamp(dt.time(0, 0, 0, 2), galloping=0) == 1
@@ -2678,6 +2747,161 @@ def test_native_database_record_files_mmap_iter_index_search_and_market_calendar
     assert trade_records.market_open == 123
     assert trade_records.market_close == 456
     assert quote_records.market_open == 123
+
+
+def test_multi_day_database_streams_and_searches_across_dates(tmp_path: Path) -> None:
+    import massive_speedup
+
+    try:
+        module = import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
+
+    database = tmp_path / "db"
+    epoch = dt.datetime(1970, 1, 1, tzinfo=dt.UTC)
+
+    def timestamp_ns(day: int, hour: int) -> int:
+        value = dt.datetime(2026, 7, day, hour, tzinfo=dt.UTC)
+        return int((value - epoch).total_seconds()) * 1_000_000_000
+
+    def trade(timestamp: int, identifier: int):
+        return module.StockTrade(
+            [
+                "A",
+                "",
+                "0",
+                "8",
+                str(identifier),
+                str(timestamp),
+                str(100 + identifier),
+                str(identifier),
+                str(timestamp),
+                "1",
+                "1",
+                "0",
+                "0",
+            ]
+        )
+
+    rows = [
+        trade(timestamp_ns(16, 14), 1),
+        trade(timestamp_ns(16, 15), 2),
+        trade(timestamp_ns(18, 14), 3),
+    ]
+    for date, daily_rows in (
+        ("2026-07-16", rows[:2]),
+        ("2026-07-18", rows[2:]),
+    ):
+        path = database / "stock_trade" / date / "A"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"".join(row.pack() for row in daily_rows))
+
+    other = database / "stock_trade" / "2026-07-17" / "B"
+    other.parent.mkdir(parents=True)
+    other.write_bytes(rows[0].pack())
+
+    records = massive_speedup.MultiDayDatabase(
+        "stock_trade",
+        "A",
+        database_path=database,
+        max_open_days=1,
+    )
+
+    assert records.dates == ("2026-07-16", "2026-07-18")
+    assert len(records) == 3
+    assert records[-1] == rows[2]
+    assert list(records) == rows
+    assert records.open_dates == ("2026-07-18",)
+
+    between = timestamp_ns(17, 12)
+    before = records.locate_before_timestamp(between)
+    after = records.locate_after_timestamp(between)
+    assert (before.date, before.index, before.record) == ("2026-07-16", 1, rows[1])
+    assert (after.date, after.index, after.record) == ("2026-07-18", 0, rows[2])
+    assert records.find_before_timestamp(rows[1].sip_timestamp, on=False) == rows[0]
+    assert records.find_after_timestamp(rows[1].sip_timestamp, on=False) == rows[2]
+    assert list(
+        records.iterate_bounded(rows[1].sip_timestamp, rows[2].sip_timestamp)
+    ) == rows[1:]
+
+    records.close()
+    assert records.open_dates == ()
+
+
+def test_database_loaders_use_environment_and_reject_positional_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import massive_speedup
+
+    try:
+        module = import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
+
+    database = tmp_path / "db"
+    date = "1970-01-01"
+    row = module.StockTrade(
+        [
+            "A",
+            "",
+            "0",
+            "8",
+            "1",
+            "1000",
+            "10",
+            "1",
+            "1000",
+            "1",
+            "1",
+            "0",
+            "0",
+        ]
+    )
+    path = database / "stock_trade" / date / "A"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(row.pack())
+    monkeypatch.setenv("MASSIVE_SPEEDUP_DB_PATH", str(database))
+
+    records = module.StockTradeDatabase(date, "A")
+    multi_day = massive_speedup.MultiDayDatabase("stock_trade", "A")
+
+    assert records.database_path == database
+    assert list(records) == [row]
+    assert list(multi_day) == [row]
+    with pytest.raises(TypeError):
+        module.StockTradeDatabase(database, date, "A")
+
+
+def test_multi_day_database_uses_futures_session_date_for_evening_rows(
+    tmp_path: Path,
+) -> None:
+    import massive_speedup
+
+    try:
+        module = import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
+
+    database = tmp_path / "db"
+    session_date = "2026-07-20"
+    timestamp = 1784586600000000000  # 2026-07-19 22:30:00 UTC
+    row = module.FuturesTrade(
+        ["ESU6", str(timestamp), "1", "1", "6000", "1", "0", "4", session_date]
+    )
+    path = database / "future_cme_trade" / session_date / "ESU6"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(row.pack())
+    records = massive_speedup.MultiDayDatabase(
+        "future_cme_trade",
+        "ESU6",
+        database_path=database,
+    )
+
+    location = records.locate_after_timestamp(timestamp)
+
+    assert location.date == session_date
+    assert location.record == row
 
 
 def test_simple_market_merges_symbols_and_broker_updates_holdings(tmp_path: Path) -> None:
@@ -2746,7 +2970,13 @@ def test_simple_market_merges_symbols_and_broker_updates_holdings(tmp_path: Path
         [quote("B", 1000, 19.0, 21.0), quote("B", 2000, 20.0, 22.0)],
     )
 
-    market = module.SimpleMarket(database, date, ["A", "B"], 1000, quotes=True)
+    market = module.SimpleMarket(
+        date,
+        ["A", "B"],
+        1000,
+        database_path=database,
+        quotes=True,
+    )
     (
         first_symbol,
         first_timestamp,
@@ -2830,7 +3060,12 @@ def test_simple_market_skips_quote_events_by_default(tmp_path: Path) -> None:
     trade_path.write_bytes(trade_row.pack())
     quote_path.write_bytes(quote_row.pack())
 
-    market = module.SimpleMarket(database, dt.date(1970, 1, 1), ["A"], 0)
+    market = module.SimpleMarket(
+        dt.date(1970, 1, 1),
+        ["A"],
+        0,
+        database_path=database,
+    )
     event = next(market)
     assert event[0] == "A"
     assert event[1] == pytest.approx(0.000001)
@@ -2868,13 +3103,25 @@ def test_simple_market_fast_reuses_recent_record_dicts(tmp_path: Path) -> None:
     trade_path.write_bytes(b"".join(row.pack() for row in trade_rows))
     quote_path.write_bytes(quote_row.pack())
 
-    slow_market = module.SimpleMarket(database, date, ["A"], 0, fast=False)
+    slow_market = module.SimpleMarket(
+        date,
+        ["A"],
+        0,
+        database_path=database,
+        fast=False,
+    )
     slow_first = next(slow_market)
     slow_second = next(slow_market)
     assert slow_first[4] is not slow_second[4]
     assert slow_first[5] is not slow_second[5]
 
-    fast_market = module.SimpleMarket(database, date, ["A"], 0, fast=True)
+    fast_market = module.SimpleMarket(
+        date,
+        ["A"],
+        0,
+        database_path=database,
+        fast=True,
+    )
     fast_first = next(fast_market)
     fast_second = next(fast_market)
     assert fast_first[4] is fast_second[4]
@@ -2920,13 +3167,13 @@ def test_option_market_merges_contract_and_broker_updates_holdings(tmp_path: Pat
     quote_path.write_bytes(b"".join(row.pack() for row in quote_rows))
 
     market = module.OptionMarket(
-        database,
         date,
         root,
         expiration,
         right,
         strike,
         0,
+        database_path=database,
         quotes=True,
     )
 
@@ -3030,11 +3277,11 @@ def test_futures_market_merges_symbols_and_broker_updates_holdings(tmp_path: Pat
     )
 
     market = module.FuturesMarket(
-        database,
         date,
         ["0BTZ9", "1BTZ9"],
         1000,
         exchange="cme",
+        database_path=database,
         quotes=True,
     )
     (
@@ -3134,7 +3381,13 @@ def test_futures_market_skips_quote_events_by_default(tmp_path: Path) -> None:
     trade_path.write_bytes(trade_row.pack())
     quote_path.write_bytes(quote_row.pack())
 
-    market = module.FuturesMarket(database, dt.date(2026, 5, 21), ["0BTZ9"], 0, exchange="cme")
+    market = module.FuturesMarket(
+        dt.date(2026, 5, 21),
+        ["0BTZ9"],
+        0,
+        exchange="cme",
+        database_path=database,
+    )
     event = next(market)
     assert event[0] == "0BTZ9"
     assert event[1] == pytest.approx(0.000001)
@@ -3181,13 +3434,27 @@ def test_futures_market_fast_reuses_recent_record_dicts(tmp_path: Path) -> None:
     trade_path.write_bytes(b"".join(row.pack() for row in trade_rows))
     quote_path.write_bytes(quote_row.pack())
 
-    slow_market = module.FuturesMarket(database, date, ["0BTZ9"], 0, exchange="cme", fast=False)
+    slow_market = module.FuturesMarket(
+        date,
+        ["0BTZ9"],
+        0,
+        exchange="cme",
+        database_path=database,
+        fast=False,
+    )
     slow_first = next(slow_market)
     slow_second = next(slow_market)
     assert slow_first[4] is not slow_second[4]
     assert slow_first[5] is not slow_second[5]
 
-    fast_market = module.FuturesMarket(database, date, ["0BTZ9"], 0, exchange="cme", fast=True)
+    fast_market = module.FuturesMarket(
+        date,
+        ["0BTZ9"],
+        0,
+        exchange="cme",
+        database_path=database,
+        fast=True,
+    )
     fast_first = next(fast_market)
     fast_second = next(fast_market)
     assert fast_first[4] is fast_second[4]
@@ -3464,8 +3731,8 @@ def test_download_product_selection_and_futures_jobs(tmp_path: Path) -> None:
     }
 
     jobs = download.build_download_jobs(
-        tmp_path,
         keys,
+        download_path=tmp_path,
         end_date=day,
         products=("futures",),
     )
@@ -3493,8 +3760,8 @@ def test_download_product_selection_and_crypto_jobs(tmp_path: Path) -> None:
     }
 
     jobs = download.build_download_jobs(
-        tmp_path,
         keys,
+        download_path=tmp_path,
         end_date=day,
         products=("crypto",),
     )
@@ -3519,8 +3786,8 @@ def test_download_product_selection_and_options_jobs(tmp_path: Path) -> None:
     }
 
     jobs = download.build_download_jobs(
-        tmp_path,
         keys,
+        download_path=tmp_path,
         end_date=day,
         products=("options",),
     )
@@ -3537,15 +3804,18 @@ def test_download_product_selection_and_options_jobs(tmp_path: Path) -> None:
     ]
 
 
-def test_download_product_selection_and_indices_jobs(tmp_path: Path) -> None:
+def test_download_product_selection_uses_configured_download_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from massive_speedup import download
 
     day = dt.date.today() - dt.timedelta(days=1)
     stem = f"{day.year}-{day.month:02d}-{day.day:02d}.csv.gz"
     key = f"us_indices/values_v1/{day.year}/{day.month:02d}/{stem}"
+    monkeypatch.setenv("MASSIVE_SPEEDUP_DOWNLOAD_PATH", str(tmp_path))
 
     jobs = download.build_download_jobs(
-        tmp_path,
         {key},
         end_date=day,
         products=("indices",),

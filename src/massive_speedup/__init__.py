@@ -183,6 +183,8 @@ except ImportError:
 _install_stock_api(sys.modules[__name__])
 _install_currency_api(sys.modules[__name__])
 
+from .multi_day import DatabaseLocation, MultiDayDatabase
+
 
 def read_gzip_lines(path, parallelization=0, chunk_size=1 << 20):
     yield from gzip_lines(  # type: ignore[name-defined]
@@ -200,6 +202,8 @@ __all__ = [
     "CryptoTradeDatabase",
     "IndexValue",
     "IndexValueDatabase",
+    "DatabaseLocation",
+    "MultiDayDatabase",
     "OptionTrade",
     "OptionQuote",
     "OptionTradeDatabase",

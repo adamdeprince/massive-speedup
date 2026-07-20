@@ -5,6 +5,20 @@ Native C++/nanobind readers for Polygon/Massive flat-file market data.
 See [INSTALL.md](INSTALL.md) for installation details and [DEVELOPMENT.md](DEVELOPMENT.md)
 for release and PyPI publishing notes.
 
+## Storage Configuration
+
+Configure the binary database and downloaded `.csv.gz` roots once in the
+environment:
+
+```bash
+export MASSIVE_SPEEDUP_DB_PATH="$HOME/massive-db"
+export MASSIVE_SPEEDUP_DOWNLOAD_PATH="$HOME/massive-download"
+```
+
+Database loaders and both command-line tools use these defaults. Python APIs
+accept `database_path=...` or `download_path=...` as optional keyword-only
+overrides when a different root is needed.
+
 ## CSV Gzip Files
 
 Install/build the native extension:
@@ -106,7 +120,7 @@ ask and bid prices separately and omit volume and volume-weighted averages
 because the source rows have no size field.
 
 ```python
-quotes = massive_speedup.StockQuoteDatabase("/data/massive-db", "2026-01-23", "A")
+quotes = massive_speedup.StockQuoteDatabase("2026-01-23", "A")
 
 for quote_bar in massive_speedup.StockQuoteAggregator(
     quotes,
@@ -125,7 +139,7 @@ Massive/Polygon flat-file order. `stddev` is population standard deviation.
 Build fixed-length binary database files from one or more input `.csv.gz` files:
 
 ```bash
-massive-speedup-build-database --database /data/massive-db 2026-01-23.csv.gz
+massive-speedup-build-database 2026-01-23.csv.gz
 ```
 
 The input type is inferred from the CSV header. Output layout is:
@@ -140,7 +154,7 @@ the input until the next ticker and only writes missing ticker files. Use
 record format change:
 
 ```bash
-massive-speedup-build-database --force --database /data/massive-db 2026-01-23.csv.gz
+massive-speedup-build-database --force 2026-01-23.csv.gz
 ```
 
 Date-level idempotency uses an `.incomplete` marker in
@@ -152,7 +166,7 @@ is created before processing and removed only after successful completion. Use
 Use `--benchmark` to print throughput:
 
 ```bash
-massive-speedup-build-database --benchmark --database /data/massive-db *.csv.gz
+massive-speedup-build-database --benchmark *.csv.gz
 ```
 
 ## Database Files
@@ -161,7 +175,6 @@ Open a fixed-length binary file through mmap and iterate records:
 
 ```python
 records = massive_speedup.StockTradeDatabase(
-    "/data/massive-db",
     "2026-01-23",
     "A",
 )
@@ -174,7 +187,6 @@ Merge stock trades and quotes for one date and ticker in SIP timestamp order:
 
 ```python
 for trade, quote in massive_speedup.stock_trade_quote_timeline(
-    "/data/massive-db",
     "2026-01-23",
     "A",
 ):
@@ -200,7 +212,6 @@ state without bouncing through Python for every lookup.
 import massive_speedup
 
 market = massive_speedup.SimpleMarket(
-    "/data/massive-db",
     "2026-01-23",
     ["AAPL", "MSFT"],
     1_000_000,  # simulated trade latency in nanoseconds

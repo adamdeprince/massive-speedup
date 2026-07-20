@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import os
 import sys
 import time
 import zlib
@@ -12,6 +13,7 @@ from pathlib import Path
 from tqdm import tqdm
 
 from ._process_title import set_process_title
+from ._paths import DATABASE_PATH_ENV, database_path as configured_database_path
 
 
 class HelpOnErrorArgumentParser(argparse.ArgumentParser):
@@ -75,10 +77,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Input flat-file CSV gzip path(s).",
     )
     parser.add_argument(
+        "--database-path",
         "--database",
+        dest="database_path",
         type=Path,
-        required=True,
-        help="Path to the database root directory.",
+        default=None,
+        help=(
+            "Path to the database root directory. Defaults to "
+            f"{DATABASE_PATH_ENV}."
+        ),
     )
     parser.add_argument(
         "--benchmark",
@@ -134,9 +141,9 @@ def infer_record_type(input_path: Path) -> str:
 
 def write_database_file(
     input_path: Path,
-    database: Path,
     record_type: str,
     *,
+    database_path: str | os.PathLike[str] | None = None,
     force: bool = False,
 ) -> int:
     import massive_speedup
@@ -148,7 +155,14 @@ def write_database_file(
             "massive-speedup-build-database requires the native massive_speedup extension"
         ) from error
 
-    return int(build_database_file(input_path, database, record_type, force=force))
+    return int(
+        build_database_file(
+            input_path,
+            record_type,
+            database_path=configured_database_path(database_path),
+            force=force,
+        )
+    )
 
 
 def expand_input_files(input_paths: list[Path]) -> list[Path]:
@@ -201,8 +215,8 @@ def _process_input_file(
     try:
         lines = write_database_file(
             input_file,
-            database,
             record_type,
+            database_path=database,
             force=force,
         )
     except Exception as error:
@@ -218,6 +232,10 @@ def main(argv: list[str] | None = None) -> int:
     set_process_title("massive-builddb")
     parser = build_parser()
     args = parser.parse_args(argv)
+    try:
+        database_path = configured_database_path(args.database_path)
+    except RuntimeError as error:
+        parser.error(str(error))
     tasks: list[tuple[Path, Path, str, bool]] = []
     for input_file in expand_input_files(args.input_files):
         try:
@@ -231,7 +249,7 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             raise
 
-        tasks.append((input_file, args.database, record_type, args.force))
+        tasks.append((input_file, database_path, record_type, args.force))
 
     if not tasks:
         return 0

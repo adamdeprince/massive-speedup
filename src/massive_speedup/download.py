@@ -16,6 +16,7 @@ from urllib.request import urlopen
 from tqdm import tqdm
 
 from ._process_title import set_process_title
+from ._paths import DOWNLOAD_PATH_ENV, download_path as configured_download_path
 
 BUCKET = "flatfiles"
 ENDPOINT_URL = "https://files.massive.com"
@@ -123,13 +124,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--download-path",
         "--download_path",
         dest="download_path",
-        required=True,
+        default=None,
         type=Path,
         help=(
             "Root directory for downloads. Files are placed under "
             "dataset-specific directories such as stock_trade, stock_quote, "
             "currency_quote, crypto_trade, option_trade, option_quote, "
-            "future_cme_trade, and index_value."
+            "future_cme_trade, and index_value. Defaults to "
+            f"{DOWNLOAD_PATH_ENV}."
         ),
     )
     parser.add_argument(
@@ -325,13 +327,13 @@ def _date_key_candidates(
 
 
 def build_download_jobs(
-    download_path: Path,
     keys: set[str],
     *,
+    download_path: str | os.PathLike[str] | None = None,
     end_date: dt.date,
     products: tuple[str, ...] = ALL_PRODUCTS,
 ) -> list[tuple[str, str]]:
-    download_path = download_path.expanduser().resolve()
+    download_path = configured_download_path(download_path)
     targets = {
         dataset.category: download_path / dataset.category
         for dataset in _selected_datasets(products)
@@ -593,6 +595,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    try:
+        download_path = configured_download_path(args.download_path)
+    except RuntimeError as error:
+        parser.error(str(error))
+
     if not args.aws_access_key_id or not args.aws_secret_access_key:
         parser.error(
             "missing credentials: provide --aws-access-key-id and "
@@ -620,8 +627,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(error))
     keys = scan_keys(products)
     jobs = build_download_jobs(
-        args.download_path,
         keys,
+        download_path=download_path,
         end_date=end_date,
         products=products,
     )

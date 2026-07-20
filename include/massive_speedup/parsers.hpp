@@ -43,8 +43,6 @@ class FlatFileParser : public Parser {
   std::string parser_group() const override;
 
   Summary parse_quotes(nb::handle payload) const;
-  Summary parse_minute_aggregates(nb::handle payload) const;
-  Summary parse_daily_aggregates(nb::handle payload) const;
   Summary parse_trades(nb::handle payload) const;
 };
 

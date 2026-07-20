@@ -57,16 +57,6 @@ Summary parse_quotes_static(nb::handle payload) {
 }
 
 template <typename ParserType>
-Summary parse_minute_aggregates_static(nb::handle payload) {
-  return ParserType{}.parse_minute_aggregates(payload);
-}
-
-template <typename ParserType>
-Summary parse_daily_aggregates_static(nb::handle payload) {
-  return ParserType{}.parse_daily_aggregates(payload);
-}
-
-template <typename ParserType>
 Summary parse_trades_static(nb::handle payload) {
   return ParserType{}.parse_trades(payload);
 }
@@ -111,9 +101,6 @@ template <typename ParserType>
 using FuturesQuoteRowsIterator = typename ParserType::FuturesQuoteRowsIterator;
 
 template <typename ParserType>
-using StockAggregateRowsIterator = typename ParserType::StockAggregateRowsIterator;
-
-template <typename ParserType>
 using RawStockTradeRowsIterator = typename ParserType::RawStockTradeRowsIterator;
 
 template <typename ParserType>
@@ -129,9 +116,6 @@ template <typename ParserType>
 using RawStockQuoteRowsIterator = typename ParserType::RawStockQuoteRowsIterator;
 
 template <typename ParserType>
-using RawStockAggregateRowsIterator = typename ParserType::RawStockAggregateRowsIterator;
-
-template <typename ParserType>
 using CurrencyQuoteRowsIterator = typename ParserType::CurrencyQuoteRowsIterator;
 
 template <typename ParserType>
@@ -142,12 +126,6 @@ using IndexValueRowsIterator = typename ParserType::IndexValueRowsIterator;
 
 template <typename ParserType>
 using RawIndexValueRowsIterator = typename ParserType::RawIndexValueRowsIterator;
-
-template <typename ParserType>
-using CurrencyAggregateRowsIterator = typename ParserType::CurrencyAggregateRowsIterator;
-
-template <typename ParserType>
-using RawCurrencyAggregateRowsIterator = typename ParserType::RawCurrencyAggregateRowsIterator;
 
 template <typename ParserType>
 using RawLineRowsIterator = typename ParserType::RawLineRowsIterator;
@@ -168,9 +146,6 @@ template <typename ParserType>
 struct StockQuoteApi {};
 
 template <typename ParserType>
-struct StockAggregateApi {};
-
-template <typename ParserType>
 struct FuturesTradeApi {};
 
 template <typename ParserType>
@@ -181,9 +156,6 @@ struct CurrencyQuoteApi {};
 
 template <typename ParserType>
 struct IndexValueApi {};
-
-template <typename ParserType>
-struct CurrencyAggregateApi {};
 
 template <typename IteratorType>
 void bind_iterator_type(nb::module_& m, const char* iterator_name) {
@@ -890,6 +862,8 @@ template <typename AggregatorType>
 void bind_window_aggregator(
     nb::module_& m,
     const char* name) {
+  using DatabaseType = typename AggregatorType::DatabaseType;
+
   nb::class_<AggregatorType>(m, name)
       .def(
           "__init__",
@@ -897,15 +871,28 @@ void bind_window_aggregator(
              AggregatorType* self,
              nb::handle rows,
              std::uint64_t interval_seconds,
-             std::uint64_t offset_seconds) {
+             nb::handle start_timestamp) {
+            std::uint64_t start_timestamp_ns = 0;
+            if (!start_timestamp.is_none()) {
+              DatabaseType* database = nullptr;
+              if (nb::try_cast<DatabaseType*>(rows, database, false)) {
+                start_timestamp_ns =
+                    timestamp_argument_to_ns(*database, start_timestamp);
+              } else {
+                start_timestamp_ns = nanoseconds_argument_to_uint64(
+                    start_timestamp,
+                    "start_timestamp");
+              }
+            }
             new (self) AggregatorType(
                 rows,
                 interval_seconds,
-                offset_seconds);
+                start_timestamp_ns);
           },
           nb::arg("rows"),
           nb::arg("interval_seconds"),
-          nb::arg("offset_seconds") = 0)
+          nb::kw_only(),
+          nb::arg("start_timestamp") = nb::none())
       .def(
           "__iter__",
           [](AggregatorType& self) -> AggregatorType& { return self.iter(); },
@@ -1207,6 +1194,48 @@ inline void bind_aggregation_results(nb::module_& m) {
       currency_quote_aggregation, native::CurrencyQuoteAggregation, last_timestamp);
   MASSIVE_SPEEDUP_BIND_AGG_UINT64(
       currency_quote_aggregation, native::CurrencyQuoteAggregation, duration_ns);
+
+  auto value_aggregation =
+      nb::class_<native::ValueAggregation>(m, "ValueAggregation");
+  MASSIVE_SPEEDUP_BIND_AGG_STRING(
+      value_aggregation, native::ValueAggregation, ticker);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      value_aggregation, native::ValueAggregation, open);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      value_aggregation, native::ValueAggregation, close);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      value_aggregation, native::ValueAggregation, high);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      value_aggregation, native::ValueAggregation, low);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      value_aggregation, native::ValueAggregation, avg);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      value_aggregation, native::ValueAggregation, stddev);
+  MASSIVE_SPEEDUP_BIND_AGG_UINT64(
+      value_aggregation, native::ValueAggregation, window_start);
+  MASSIVE_SPEEDUP_BIND_AGG_UINT64(
+      value_aggregation, native::ValueAggregation, transactions);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      value_aggregation, native::ValueAggregation, value_change);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      value_aggregation, native::ValueAggregation, return_bps);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      value_aggregation, native::ValueAggregation, value_range);
+  MASSIVE_SPEEDUP_BIND_AGG_DOUBLE(
+      value_aggregation, native::ValueAggregation, range_bps);
+  MASSIVE_SPEEDUP_BIND_AGG_UINT64(
+      value_aggregation, native::ValueAggregation, first_timestamp);
+  MASSIVE_SPEEDUP_BIND_AGG_UINT64(
+      value_aggregation, native::ValueAggregation, last_timestamp);
+  MASSIVE_SPEEDUP_BIND_AGG_UINT64(
+      value_aggregation, native::ValueAggregation, duration_ns);
+
+  m.attr("CryptoTradeAggregation") = m.attr("StockTradeAggregation");
+  m.attr("FuturesTradeAggregation") = m.attr("StockTradeAggregation");
+  m.attr("OptionTradeAggregation") = m.attr("StockTradeAggregation");
+  m.attr("FuturesQuoteAggregation") = m.attr("StockQuoteAggregation");
+  m.attr("OptionQuoteAggregation") = m.attr("StockQuoteAggregation");
+  m.attr("IndexValueAggregation") = m.attr("ValueAggregation");
 }
 
 #undef MASSIVE_SPEEDUP_BIND_AGG_STRING
@@ -1225,6 +1254,24 @@ inline void bind_window_aggregators(nb::module_& m) {
   bind_window_aggregator<native::CurrencyQuoteAggregator>(
       m,
       "CurrencyQuoteAggregator");
+  bind_window_aggregator<native::CryptoTradeAggregator>(
+      m,
+      "CryptoTradeAggregator");
+  bind_window_aggregator<native::IndexValueAggregator>(
+      m,
+      "IndexValueAggregator");
+  bind_window_aggregator<native::FuturesTradeAggregator>(
+      m,
+      "FuturesTradeAggregator");
+  bind_window_aggregator<native::FuturesQuoteAggregator>(
+      m,
+      "FuturesQuoteAggregator");
+  bind_window_aggregator<native::OptionTradeAggregator>(
+      m,
+      "OptionTradeAggregator");
+  bind_window_aggregator<native::OptionQuoteAggregator>(
+      m,
+      "OptionQuoteAggregator");
 }
 
 template <typename ParserType>
@@ -1281,11 +1328,6 @@ void bind_futures_quote_rows_iterator(nb::module_& m, const char* iterator_name)
 }
 
 template <typename ParserType>
-void bind_stock_aggregate_rows_iterator(nb::module_& m, const char* iterator_name) {
-  bind_iterator_type<StockAggregateRowsIterator<ParserType>>(m, iterator_name);
-}
-
-template <typename ParserType>
 void bind_raw_trade_rows_iterator(nb::module_& m, const char* iterator_name) {
   bind_iterator_type<RawStockTradeRowsIterator<ParserType>>(m, iterator_name);
 }
@@ -1311,11 +1353,6 @@ void bind_raw_quote_rows_iterator(nb::module_& m, const char* iterator_name) {
 }
 
 template <typename ParserType>
-void bind_raw_stock_aggregate_rows_iterator(nb::module_& m, const char* iterator_name) {
-  bind_iterator_type<RawStockAggregateRowsIterator<ParserType>>(m, iterator_name);
-}
-
-template <typename ParserType>
 void bind_currency_quote_rows_iterator(nb::module_& m, const char* iterator_name) {
   bind_iterator_type<CurrencyQuoteRowsIterator<ParserType>>(m, iterator_name);
 }
@@ -1333,16 +1370,6 @@ void bind_index_value_rows_iterator(nb::module_& m, const char* iterator_name) {
 template <typename ParserType>
 void bind_raw_index_value_rows_iterator(nb::module_& m, const char* iterator_name) {
   bind_iterator_type<RawIndexValueRowsIterator<ParserType>>(m, iterator_name);
-}
-
-template <typename ParserType>
-void bind_currency_aggregate_rows_iterator(nb::module_& m, const char* iterator_name) {
-  bind_iterator_type<CurrencyAggregateRowsIterator<ParserType>>(m, iterator_name);
-}
-
-template <typename ParserType>
-void bind_raw_currency_aggregate_rows_iterator(nb::module_& m, const char* iterator_name) {
-  bind_iterator_type<RawCurrencyAggregateRowsIterator<ParserType>>(m, iterator_name);
 }
 
 template <typename ParserType>
@@ -2104,106 +2131,13 @@ inline void bind_row_models(nb::module_& m, nb::module_& flatfiles) {
       nb::int_(native::IndexValue::packed_value_offset);
   bind_timestamp_ordering(index_value);
 
-  auto stock_aggregate =
-      nb::class_<native::StockAggregate>(m, "StockAggregate")
-          .def(
-              "__init__",
-              [](native::StockAggregate* self,
-                 const std::vector<std::string>& fields) {
-                new (self) native::StockAggregate(
-                    native::StockAggregate::template from_fields<Specialization>(fields));
-              },
-              nb::arg("fields"))
-          .def(
-              "__init__",
-              &construct_row_from_packed_with_ticker<native::StockAggregate>,
-              nb::arg("packed"),
-              nb::arg("ticker"))
-          .def_prop_ro("ticker", &native::StockAggregate::ticker_object)
-          .def_prop_ro("volume", &native::StockAggregate::volume_object)
-          .def_prop_ro("open", &native::StockAggregate::open_object)
-          .def_prop_ro("close", &native::StockAggregate::close_object)
-          .def_prop_ro("high", &native::StockAggregate::high_object)
-          .def_prop_ro("low", &native::StockAggregate::low_object)
-          .def_prop_ro("window_start", &native::StockAggregate::window_start_object)
-          .def_prop_ro("transactions", &native::StockAggregate::transactions_object)
-          .def(
-              "__iter__",
-              [](const native::StockAggregate& self) {
-                return native::detail::tuple_iterator(self.python_fields());
-              })
-          .def("pack", &native::StockAggregate::packed_bytes)
-          .def_static(
-              "from_packed",
-              &row_from_packed<native::StockAggregate>,
-              nb::arg("packed"),
-              nb::arg("ticker"))
-          .def("__hash__", &native::StockAggregate::hash_value)
-          .def("__str__", &native::StockAggregate::repr)
-          .def("__repr__", &native::StockAggregate::repr)
-          .def(
-              "__eq__",
-              [](const native::StockAggregate& lhs,
-                 const native::StockAggregate& rhs) { return lhs == rhs; },
-              nb::is_operator());
-  stock_aggregate.attr("packed_size") = nb::int_(native::StockAggregate::packed_size);
-  bind_window_start_ordering(stock_aggregate);
-
-  auto currency_aggregate =
-      nb::class_<native::CurrencyAggregate>(m, "CurrencyAggregate")
-          .def(
-              "__init__",
-              [](native::CurrencyAggregate* self,
-                 const std::vector<std::string>& fields) {
-                new (self) native::CurrencyAggregate(
-                    native::CurrencyAggregate::template from_fields<Specialization>(fields));
-              },
-              nb::arg("fields"))
-          .def(
-              "__init__",
-              &construct_row_from_packed_with_ticker<native::CurrencyAggregate>,
-              nb::arg("packed"),
-              nb::arg("ticker"))
-          .def_prop_ro("ticker", &native::CurrencyAggregate::ticker_object)
-          .def_prop_ro("volume", &native::CurrencyAggregate::volume_object)
-          .def_prop_ro("open", &native::CurrencyAggregate::open_object)
-          .def_prop_ro("close", &native::CurrencyAggregate::close_object)
-          .def_prop_ro("high", &native::CurrencyAggregate::high_object)
-          .def_prop_ro("low", &native::CurrencyAggregate::low_object)
-          .def_prop_ro("window_start", &native::CurrencyAggregate::window_start_object)
-          .def_prop_ro("transactions", &native::CurrencyAggregate::transactions_object)
-          .def_prop_ro("tickers", &native::CurrencyAggregate::tickers_object)
-          .def(
-              "__iter__",
-              [](const native::CurrencyAggregate& self) {
-                return native::detail::tuple_iterator(self.python_fields());
-              })
-          .def("pack", &native::CurrencyAggregate::packed_bytes)
-          .def_static(
-              "from_packed",
-              &row_from_packed<native::CurrencyAggregate>,
-              nb::arg("packed"),
-              nb::arg("ticker"))
-          .def("__hash__", &native::CurrencyAggregate::hash_value)
-          .def("__str__", &native::CurrencyAggregate::repr)
-          .def("__repr__", &native::CurrencyAggregate::repr)
-          .def(
-              "__eq__",
-              [](const native::CurrencyAggregate& lhs,
-                 const native::CurrencyAggregate& rhs) { return lhs == rhs; },
-              nb::is_operator());
-  currency_aggregate.attr("packed_size") = nb::int_(native::CurrencyAggregate::packed_size);
-  bind_window_start_ordering(currency_aggregate);
-
   flatfiles.attr("StockTrade") = m.attr("StockTrade");
   flatfiles.attr("CryptoTrade") = m.attr("CryptoTrade");
   flatfiles.attr("OptionTrade") = m.attr("OptionTrade");
   flatfiles.attr("OptionQuote") = m.attr("OptionQuote");
   flatfiles.attr("StockQuote") = m.attr("StockQuote");
-  flatfiles.attr("StockAggregate") = m.attr("StockAggregate");
   flatfiles.attr("CurrencyQuote") = m.attr("CurrencyQuote");
   flatfiles.attr("IndexValue") = m.attr("IndexValue");
-  flatfiles.attr("CurrencyAggregate") = m.attr("CurrencyAggregate");
   flatfiles.attr("StockQuotes") = m.attr("StockQuote");
   m.attr("StockQuotes") = m.attr("StockQuote");
 }
@@ -2237,14 +2171,6 @@ void bind_flatfile_asset(nb::module_& module, const char* name) {
   nb::class_<ImplAsset, BaseAsset>(module, name)
       .def(nb::init<>())
       .def_static("parse_quotes", &parse_quotes_static<ImplAsset>, nb::arg("payload"))
-      .def_static(
-          "parse_minute_aggregates",
-          &parse_minute_aggregates_static<ImplAsset>,
-          nb::arg("payload"))
-      .def_static(
-          "parse_daily_aggregates",
-          &parse_daily_aggregates_static<ImplAsset>,
-          nb::arg("payload"))
       .def_static("parse_trades", &parse_trades_static<ImplAsset>, nb::arg("payload"))
       .def_static("serialize", &serialize_static<ImplAsset>)
       .def_static("processor_name", &processor_name_static<ImplAsset>);
@@ -2256,31 +2182,23 @@ void bind_stock_flatfile_asset(
     const char* name,
     const char* trade_iterator_name,
     const char* quote_iterator_name,
-    const char* aggregate_iterator_name,
     const char* raw_trade_iterator_name,
     const char* raw_quote_iterator_name,
-    const char* raw_aggregate_iterator_name,
     const char* raw_line_iterator_name,
     const char* trade_api_name,
-    const char* quote_api_name,
-    const char* aggregate_api_name) {
+    const char* quote_api_name) {
   using TradeIterator = StockTradeRowsIterator<ImplAsset>;
   using QuoteIterator = StockQuoteRowsIterator<ImplAsset>;
-  using AggregateIterator = StockAggregateRowsIterator<ImplAsset>;
   using RawTradeIterator = RawStockTradeRowsIterator<ImplAsset>;
   using RawQuoteIterator = RawStockQuoteRowsIterator<ImplAsset>;
-  using RawAggregateIterator = RawStockAggregateRowsIterator<ImplAsset>;
   using RawLineIterator = RawLineRowsIterator<ImplAsset>;
   using TradeApi = StockTradeApi<ImplAsset>;
   using QuoteApi = StockQuoteApi<ImplAsset>;
-  using AggregateApi = StockAggregateApi<ImplAsset>;
 
   bind_trade_rows_iterator<ImplAsset>(module, trade_iterator_name);
   bind_quote_rows_iterator<ImplAsset>(module, quote_iterator_name);
-  bind_stock_aggregate_rows_iterator<ImplAsset>(module, aggregate_iterator_name);
   bind_raw_trade_rows_iterator<ImplAsset>(module, raw_trade_iterator_name);
   bind_raw_quote_rows_iterator<ImplAsset>(module, raw_quote_iterator_name);
-  bind_raw_stock_aggregate_rows_iterator<ImplAsset>(module, raw_aggregate_iterator_name);
   static_cast<void>(raw_line_iterator_name);
 
   nb::class_<ImplAsset, BaseAsset> stock_class(module, name);
@@ -2314,38 +2232,6 @@ void bind_stock_flatfile_asset(
           nb::kw_only(),
           nb::arg("sort_by_participant_timestamp") = false,
           nb::arg("sort_by_sip_timestamp") = false)
-      .def_static(
-          "parse_minute_aggregates",
-          [](const std::filesystem::path& path, bool sort_by_window_start) {
-            return AggregateIterator(path, sort_by_window_start);
-          },
-          nb::arg("path"),
-          nb::kw_only(),
-          nb::arg("sort_by_window_start") = false)
-      .def_static(
-          "parse_daily_aggregates",
-          [](const std::filesystem::path& path, bool sort_by_window_start) {
-            return AggregateIterator(path, sort_by_window_start);
-          },
-          nb::arg("path"),
-          nb::kw_only(),
-          nb::arg("sort_by_window_start") = false)
-      .def_static(
-          "parse_raw_minute_aggregates",
-          [](const std::filesystem::path& path, bool sort_by_window_start) {
-            return RawAggregateIterator(path, sort_by_window_start);
-          },
-          nb::arg("path"),
-          nb::kw_only(),
-          nb::arg("sort_by_window_start") = false)
-      .def_static(
-          "parse_raw_daily_aggregates",
-          [](const std::filesystem::path& path, bool sort_by_window_start) {
-            return RawAggregateIterator(path, sort_by_window_start);
-          },
-          nb::arg("path"),
-          nb::kw_only(),
-          nb::arg("sort_by_window_start") = false)
       .def_static(
           "parse_trades",
           [](const std::filesystem::path& path,
@@ -2455,33 +2341,8 @@ void bind_stock_flatfile_asset(
           },
           nb::arg("path"));
 
-  nb::class_<AggregateApi>(module, aggregate_api_name)
-      .def_static(
-          "parse",
-          [](const std::filesystem::path& path, bool sort_by_window_start) {
-            return AggregateIterator(path, sort_by_window_start);
-          },
-          nb::arg("path"),
-          nb::kw_only(),
-          nb::arg("sort_by_window_start") = false)
-      .def_static(
-          "parse_raw",
-          [](const std::filesystem::path& path, bool sort_by_window_start) {
-            return RawAggregateIterator(path, sort_by_window_start);
-          },
-          nb::arg("path"),
-          nb::kw_only(),
-          nb::arg("sort_by_window_start") = false)
-      .def_static(
-          "raw_lines",
-          [](const std::filesystem::path& path) {
-            return RawLineIterator(path);
-          },
-          nb::arg("path"));
-
   stock_class.attr("Trade") = module.attr(trade_api_name);
   stock_class.attr("Quote") = module.attr(quote_api_name);
-  stock_class.attr("Aggregate") = module.attr(aggregate_api_name);
 }
 
 template <typename BaseAsset, typename ImplAsset>
@@ -2820,23 +2681,15 @@ void bind_currency_flatfile_asset(
     const char* name,
     const char* quote_iterator_name,
     const char* raw_quote_iterator_name,
-    const char* aggregate_iterator_name,
-    const char* raw_aggregate_iterator_name,
     const char* raw_line_iterator_name,
-    const char* quote_api_name,
-    const char* aggregate_api_name) {
+    const char* quote_api_name) {
   using QuoteIterator = CurrencyQuoteRowsIterator<ImplAsset>;
   using RawQuoteIterator = RawCurrencyQuoteRowsIterator<ImplAsset>;
-  using AggregateIterator = CurrencyAggregateRowsIterator<ImplAsset>;
-  using RawAggregateIterator = RawCurrencyAggregateRowsIterator<ImplAsset>;
   using RawLineIterator = RawLineRowsIterator<ImplAsset>;
   using QuoteApi = CurrencyQuoteApi<ImplAsset>;
-  using AggregateApi = CurrencyAggregateApi<ImplAsset>;
 
   bind_currency_quote_rows_iterator<ImplAsset>(module, quote_iterator_name);
   bind_raw_currency_quote_rows_iterator<ImplAsset>(module, raw_quote_iterator_name);
-  bind_currency_aggregate_rows_iterator<ImplAsset>(module, aggregate_iterator_name);
-  bind_raw_currency_aggregate_rows_iterator<ImplAsset>(module, raw_aggregate_iterator_name);
   static_cast<void>(raw_line_iterator_name);
 
   nb::class_<ImplAsset, BaseAsset> currency_class(module, name);
@@ -2870,38 +2723,6 @@ void bind_currency_flatfile_asset(
           nb::kw_only(),
           nb::arg("sort_by_participant_timestamp") = false,
           nb::arg("sort_by_sip_timestamp") = false)
-      .def_static(
-          "parse_minute_aggregates",
-          [](const std::filesystem::path& path, bool sort_by_window_start) {
-            return AggregateIterator(path, sort_by_window_start);
-          },
-          nb::arg("path"),
-          nb::kw_only(),
-          nb::arg("sort_by_window_start") = false)
-      .def_static(
-          "parse_daily_aggregates",
-          [](const std::filesystem::path& path, bool sort_by_window_start) {
-            return AggregateIterator(path, sort_by_window_start);
-          },
-          nb::arg("path"),
-          nb::kw_only(),
-          nb::arg("sort_by_window_start") = false)
-      .def_static(
-          "parse_raw_minute_aggregates",
-          [](const std::filesystem::path& path, bool sort_by_window_start) {
-            return RawAggregateIterator(path, sort_by_window_start);
-          },
-          nb::arg("path"),
-          nb::kw_only(),
-          nb::arg("sort_by_window_start") = false)
-      .def_static(
-          "parse_raw_daily_aggregates",
-          [](const std::filesystem::path& path, bool sort_by_window_start) {
-            return RawAggregateIterator(path, sort_by_window_start);
-          },
-          nb::arg("path"),
-          nb::kw_only(),
-          nb::arg("sort_by_window_start") = false)
       .def_static(
           "raw_lines",
           [](const std::filesystem::path& path) {
@@ -2947,32 +2768,7 @@ void bind_currency_flatfile_asset(
           },
           nb::arg("path"));
 
-  nb::class_<AggregateApi>(module, aggregate_api_name)
-      .def_static(
-          "parse",
-          [](const std::filesystem::path& path, bool sort_by_window_start) {
-            return AggregateIterator(path, sort_by_window_start);
-          },
-          nb::arg("path"),
-          nb::kw_only(),
-          nb::arg("sort_by_window_start") = false)
-      .def_static(
-          "parse_raw",
-          [](const std::filesystem::path& path, bool sort_by_window_start) {
-            return RawAggregateIterator(path, sort_by_window_start);
-          },
-          nb::arg("path"),
-          nb::kw_only(),
-          nb::arg("sort_by_window_start") = false)
-      .def_static(
-          "raw_lines",
-          [](const std::filesystem::path& path) {
-            return RawLineIterator(path);
-          },
-          nb::arg("path"));
-
   currency_class.attr("Quote") = module.attr(quote_api_name);
-  currency_class.attr("Aggregate") = module.attr(aggregate_api_name);
 }
 
 template <template <typename> class Impl>
@@ -2989,8 +2785,6 @@ void bind_native_module(nb::module_& m, const char* alias_prefix) {
       std::string(alias_prefix) + "OptionQuoteRowsIterator";
   const std::string stock_quote_iterator_name =
       std::string(alias_prefix) + "StockQuoteRowsIterator";
-  const std::string stock_aggregate_iterator_name =
-      std::string(alias_prefix) + "StockAggregateRowsIterator";
   const std::string futures_trade_iterator_name =
       std::string(alias_prefix) + "FuturesTradeRowsIterator";
   const std::string futures_quote_iterator_name =
@@ -3005,8 +2799,6 @@ void bind_native_module(nb::module_& m, const char* alias_prefix) {
       std::string(alias_prefix) + "RawOptionQuoteRowsIterator";
   const std::string raw_stock_quote_iterator_name =
       std::string(alias_prefix) + "RawStockQuoteRowsIterator";
-  const std::string raw_stock_aggregate_iterator_name =
-      std::string(alias_prefix) + "RawStockAggregateRowsIterator";
   const std::string currency_quote_iterator_name =
       std::string(alias_prefix) + "CurrencyQuoteRowsIterator";
   const std::string raw_currency_quote_iterator_name =
@@ -3015,10 +2807,6 @@ void bind_native_module(nb::module_& m, const char* alias_prefix) {
       std::string(alias_prefix) + "IndexValueRowsIterator";
   const std::string raw_index_value_iterator_name =
       std::string(alias_prefix) + "RawIndexValueRowsIterator";
-  const std::string currency_aggregate_iterator_name =
-      std::string(alias_prefix) + "CurrencyAggregateRowsIterator";
-  const std::string raw_currency_aggregate_iterator_name =
-      std::string(alias_prefix) + "RawCurrencyAggregateRowsIterator";
   const std::string raw_line_iterator_name =
       std::string(alias_prefix) + "RawLineRowsIterator";
   const std::string stock_trade_api_name =
@@ -3031,8 +2819,6 @@ void bind_native_module(nb::module_& m, const char* alias_prefix) {
       std::string(alias_prefix) + "OptionQuoteApi";
   const std::string stock_quote_api_name =
       std::string(alias_prefix) + "StockQuoteApi";
-  const std::string stock_aggregate_api_name =
-      std::string(alias_prefix) + "StockAggregateApi";
   const std::string futures_trade_api_name =
       std::string(alias_prefix) + "FuturesTradeApi";
   const std::string futures_quote_api_name =
@@ -3041,8 +2827,6 @@ void bind_native_module(nb::module_& m, const char* alias_prefix) {
       std::string(alias_prefix) + "CurrencyQuoteApi";
   const std::string index_value_api_name =
       std::string(alias_prefix) + "IndexValueApi";
-  const std::string currency_aggregate_api_name =
-      std::string(alias_prefix) + "CurrencyAggregateApi";
   const std::string stock_trade_database_iterator_name =
       std::string(alias_prefix) + "StockTradeDatabaseIterator";
   const std::string stock_quote_database_iterator_name =
@@ -3139,14 +2923,11 @@ void bind_native_module(nb::module_& m, const char* alias_prefix) {
       "Stock",
       stock_trade_iterator_name.c_str(),
       stock_quote_iterator_name.c_str(),
-      stock_aggregate_iterator_name.c_str(),
       raw_stock_trade_iterator_name.c_str(),
       raw_stock_quote_iterator_name.c_str(),
-      raw_stock_aggregate_iterator_name.c_str(),
       raw_line_iterator_name.c_str(),
       stock_trade_api_name.c_str(),
-      stock_quote_api_name.c_str(),
-      stock_aggregate_api_name.c_str());
+      stock_quote_api_name.c_str());
   bind_options_flatfile_asset<FlatFileOptionsParser, Impl<FlatFileOptionsParser>>(
       flatfiles,
       "Options",
@@ -3176,11 +2957,8 @@ void bind_native_module(nb::module_& m, const char* alias_prefix) {
       "currency",
       currency_quote_iterator_name.c_str(),
       raw_currency_quote_iterator_name.c_str(),
-      currency_aggregate_iterator_name.c_str(),
-      raw_currency_aggregate_iterator_name.c_str(),
       raw_line_iterator_name.c_str(),
-      currency_quote_api_name.c_str(),
-      currency_aggregate_api_name.c_str());
+      currency_quote_api_name.c_str());
   bind_crypto_flatfile_asset<FlatFileCryptoParser, Impl<FlatFileCryptoParser>>(
       flatfiles,
       "Crypto",
@@ -3207,6 +2985,18 @@ void bind_native_module(nb::module_& m, const char* alias_prefix) {
       m.attr("StockQuoteAggregator");
   flatfiles.attr("currency").attr("Quote").attr("Aggregator") =
       m.attr("CurrencyQuoteAggregator");
+  flatfiles.attr("Crypto").attr("Trade").attr("Aggregator") =
+      m.attr("CryptoTradeAggregator");
+  flatfiles.attr("Indices").attr("Value").attr("Aggregator") =
+      m.attr("IndexValueAggregator");
+  flatfiles.attr("Futures").attr("Trade").attr("Aggregator") =
+      m.attr("FuturesTradeAggregator");
+  flatfiles.attr("Futures").attr("Quote").attr("Aggregator") =
+      m.attr("FuturesQuoteAggregator");
+  flatfiles.attr("Options").attr("Trade").attr("Aggregator") =
+      m.attr("OptionTradeAggregator");
+  flatfiles.attr("Options").attr("Quote").attr("Aggregator") =
+      m.attr("OptionQuoteAggregator");
 }
 
 }  // namespace massive_speedup::bindings

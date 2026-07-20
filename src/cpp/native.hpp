@@ -5116,489 +5116,6 @@ struct IndexValue {
   }
 };
 
-struct StockAggregate {
-  static constexpr std::size_t packed_size = 56;
-  using PackedData = detail::PackedBuffer<packed_size>;
-  enum AttributeIndex : std::size_t {
-    ticker_attribute,
-    volume_attribute,
-    open_attribute,
-    close_attribute,
-    high_attribute,
-    low_attribute,
-    window_start_attribute,
-    transactions_attribute,
-    attribute_count,
-  };
-
-  std::string ticker;
-  double open = 0.0;
-  double close = 0.0;
-  double high = 0.0;
-  double low = 0.0;
-  std::uint64_t volume = 0;
-  std::uint64_t window_start = 0;
-  std::uint64_t transactions = 0;
-  mutable std::unique_ptr<detail::LazyPythonObjectCache<attribute_count>> object_cache_;
-
-  StockAggregate() = default;
-
-  StockAggregate(const StockAggregate& other)
-      : ticker(other.ticker),
-        open(other.open),
-        close(other.close),
-        high(other.high),
-        low(other.low),
-        volume(other.volume),
-        window_start(other.window_start),
-        transactions(other.transactions) {}
-
-  StockAggregate& operator=(const StockAggregate& other) {
-    if (this == &other) {
-      return *this;
-    }
-
-    ticker = other.ticker;
-    open = other.open;
-    close = other.close;
-    high = other.high;
-    low = other.low;
-    volume = other.volume;
-    window_start = other.window_start;
-    transactions = other.transactions;
-    object_cache_.reset();
-    return *this;
-  }
-
-  StockAggregate(StockAggregate&&) noexcept = default;
-  StockAggregate& operator=(StockAggregate&&) noexcept = default;
-
-  StockAggregate(std::string_view packed_data, std::string_view ticker_value) {
-    *this = from_packed(packed_data, ticker_value);
-  }
-
-  StockAggregate(const char* packed_data, std::string_view ticker_value)
-      : StockAggregate(std::string_view(packed_data, packed_size), ticker_value) {}
-
-  template <typename Specialization>
-  static StockAggregate from_fields(const std::vector<std::string>& fields) {
-    StockAggregate result;
-    detail::require_field_count("StockAggregate", fields.size(), 8);
-    result.ticker = fields[0];
-    result.volume =
-        Specialization::template parse_integer<std::uint64_t>(fields[1], "volume");
-    result.open = Specialization::parse_double(fields[2], "open");
-    result.close = Specialization::parse_double(fields[3], "close");
-    result.high = Specialization::parse_double(fields[4], "high");
-    result.low = Specialization::parse_double(fields[5], "low");
-    result.window_start =
-        Specialization::template parse_integer<std::uint64_t>(fields[6], "window_start");
-    result.transactions =
-        Specialization::template parse_integer<std::uint64_t>(fields[7], "transactions");
-    return result;
-  }
-
-  static StockAggregate from_packed(std::string_view packed_data) {
-    detail::require_packed_size("StockAggregate", packed_data.size(), packed_size);
-
-    StockAggregate result;
-    std::size_t offset = 0;
-    result.volume = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
-    result.open = detail::read_double_le(packed_data, offset);
-    result.close = detail::read_double_le(packed_data, offset);
-    result.high = detail::read_double_le(packed_data, offset);
-    result.low = detail::read_double_le(packed_data, offset);
-    result.window_start = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
-    result.transactions = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
-    return result;
-  }
-
-  static StockAggregate from_packed(
-      std::string_view packed_data,
-      std::string_view ticker_value) {
-    StockAggregate result = from_packed(packed_data);
-    result.ticker.assign(ticker_value);
-    return result;
-  }
-
-  static StockAggregate from_packed_data(
-      const char* packed_data,
-      std::string_view ticker_value) {
-    return from_packed(std::string_view(packed_data, packed_size), ticker_value);
-  }
-
-  PackedData pack() const {
-    PackedData output{};
-    std::size_t offset = 0;
-    detail::write_unsigned_le(output, offset, volume);
-    detail::write_double_le(output, offset, open);
-    detail::write_double_le(output, offset, close);
-    detail::write_double_le(output, offset, high);
-    detail::write_double_le(output, offset, low);
-    detail::write_unsigned_le(output, offset, window_start);
-    detail::write_unsigned_le(output, offset, transactions);
-    return output;
-  }
-
-  nanobind::bytes packed_bytes() const {
-    return detail::packed_bytes(pack());
-  }
-
-  bool operator==(const StockAggregate& other) const {
-    return ticker == other.ticker &&
-           volume == other.volume &&
-           open == other.open &&
-           close == other.close &&
-           high == other.high &&
-           low == other.low &&
-           window_start == other.window_start &&
-           transactions == other.transactions;
-  }
-
-  nanobind::object ticker_object() const {
-    return detail::cached_python_object(
-        object_cache_,
-        ticker_attribute,
-        [&] { return detail::string_object_new_ref(ticker); });
-  }
-
-  nanobind::object volume_object() const {
-    return detail::cached_python_object(
-        object_cache_,
-        volume_attribute,
-        [&] { return detail::uint64_object_new_ref(volume); });
-  }
-
-  nanobind::object open_object() const {
-    return detail::cached_python_object(
-        object_cache_,
-        open_attribute,
-        [&] { return detail::double_object_new_ref(open); });
-  }
-
-  nanobind::object close_object() const {
-    return detail::cached_python_object(
-        object_cache_,
-        close_attribute,
-        [&] { return detail::double_object_new_ref(close); });
-  }
-
-  nanobind::object high_object() const {
-    return detail::cached_python_object(
-        object_cache_,
-        high_attribute,
-        [&] { return detail::double_object_new_ref(high); });
-  }
-
-  nanobind::object low_object() const {
-    return detail::cached_python_object(
-        object_cache_,
-        low_attribute,
-        [&] { return detail::double_object_new_ref(low); });
-  }
-
-  nanobind::object window_start_object() const {
-    return detail::cached_python_object(
-        object_cache_,
-        window_start_attribute,
-        [&] { return detail::uint64_object_new_ref(window_start); });
-  }
-
-  nanobind::object transactions_object() const {
-    return detail::cached_python_object(
-        object_cache_,
-        transactions_attribute,
-        [&] { return detail::uint64_object_new_ref(transactions); });
-  }
-
-  nanobind::list python_fields() const {
-    nanobind::list values;
-    values.append(ticker_object());
-    values.append(volume_object());
-    values.append(open_object());
-    values.append(close_object());
-    values.append(high_object());
-    values.append(low_object());
-    values.append(window_start_object());
-    values.append(transactions_object());
-    return values;
-  }
-
-  std::size_t hash_value() const {
-    std::size_t seed = 0;
-    detail::hash_combine(seed, ticker);
-    detail::hash_combine(seed, volume);
-    detail::hash_combine(seed, open);
-    detail::hash_combine(seed, close);
-    detail::hash_combine(seed, high);
-    detail::hash_combine(seed, low);
-    detail::hash_combine(seed, window_start);
-    detail::hash_combine(seed, transactions);
-    return seed;
-  }
-
-  std::string repr() const {
-    std::ostringstream out;
-    out << "StockAggregate("
-        << "ticker='" << ticker << "', "
-        << "volume=" << volume << ", "
-        << "open=" << open << ", "
-        << "close=" << close << ", "
-        << "high=" << high << ", "
-        << "low=" << low << ", "
-        << "window_start=" << window_start << ", "
-        << "transactions=" << transactions << ")";
-    return out.str();
-  }
-};
-
-struct CurrencyAggregate {
-  static constexpr std::size_t packed_size = 56;
-  using PackedData = detail::PackedBuffer<packed_size>;
-  enum AttributeIndex : std::size_t {
-    ticker_attribute,
-    volume_attribute,
-    open_attribute,
-    close_attribute,
-    high_attribute,
-    low_attribute,
-    window_start_attribute,
-    transactions_attribute,
-    tickers_attribute,
-    attribute_count,
-  };
-
-  std::string ticker;
-  double open = 0.0;
-  double close = 0.0;
-  double high = 0.0;
-  double low = 0.0;
-  std::uint64_t volume = 0;
-  std::uint64_t window_start = 0;
-  std::uint64_t transactions = 0;
-  mutable std::unique_ptr<detail::LazyPythonObjectCache<attribute_count>> object_cache_;
-
-  CurrencyAggregate() = default;
-
-  CurrencyAggregate(const CurrencyAggregate& other)
-      : ticker(other.ticker),
-        open(other.open),
-        close(other.close),
-        high(other.high),
-        low(other.low),
-        volume(other.volume),
-        window_start(other.window_start),
-        transactions(other.transactions) {}
-
-  CurrencyAggregate& operator=(const CurrencyAggregate& other) {
-    if (this == &other) {
-      return *this;
-    }
-
-    ticker = other.ticker;
-    open = other.open;
-    close = other.close;
-    high = other.high;
-    low = other.low;
-    volume = other.volume;
-    window_start = other.window_start;
-    transactions = other.transactions;
-    object_cache_.reset();
-    return *this;
-  }
-
-  CurrencyAggregate(CurrencyAggregate&&) noexcept = default;
-  CurrencyAggregate& operator=(CurrencyAggregate&&) noexcept = default;
-
-  CurrencyAggregate(std::string_view packed_data, std::string_view ticker_value) {
-    *this = from_packed(packed_data, ticker_value);
-  }
-
-  CurrencyAggregate(const char* packed_data, std::string_view ticker_value)
-      : CurrencyAggregate(std::string_view(packed_data, packed_size), ticker_value) {}
-
-  template <typename Specialization>
-  static CurrencyAggregate from_fields(const std::vector<std::string>& fields) {
-    CurrencyAggregate result;
-    detail::require_field_count("CurrencyAggregate", fields.size(), 8);
-    result.ticker = fields[0];
-    result.volume =
-        Specialization::template parse_integer<std::uint64_t>(fields[1], "volume");
-    result.open = Specialization::parse_double(fields[2], "open");
-    result.close = Specialization::parse_double(fields[3], "close");
-    result.high = Specialization::parse_double(fields[4], "high");
-    result.low = Specialization::parse_double(fields[5], "low");
-    result.window_start =
-        Specialization::template parse_integer<std::uint64_t>(fields[6], "window_start");
-    result.transactions =
-        Specialization::template parse_integer<std::uint64_t>(fields[7], "transactions");
-    return result;
-  }
-
-  static CurrencyAggregate from_packed(std::string_view packed_data) {
-    detail::require_packed_size("CurrencyAggregate", packed_data.size(), packed_size);
-
-    CurrencyAggregate result;
-    std::size_t offset = 0;
-    result.volume = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
-    result.open = detail::read_double_le(packed_data, offset);
-    result.close = detail::read_double_le(packed_data, offset);
-    result.high = detail::read_double_le(packed_data, offset);
-    result.low = detail::read_double_le(packed_data, offset);
-    result.window_start = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
-    result.transactions = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
-    return result;
-  }
-
-  static CurrencyAggregate from_packed(
-      std::string_view packed_data,
-      std::string_view ticker_value) {
-    CurrencyAggregate result = from_packed(packed_data);
-    result.ticker.assign(ticker_value);
-    return result;
-  }
-
-  static CurrencyAggregate from_packed_data(
-      const char* packed_data,
-      std::string_view ticker_value) {
-    return from_packed(std::string_view(packed_data, packed_size), ticker_value);
-  }
-
-  PackedData pack() const {
-    PackedData output{};
-    std::size_t offset = 0;
-    detail::write_unsigned_le(output, offset, volume);
-    detail::write_double_le(output, offset, open);
-    detail::write_double_le(output, offset, close);
-    detail::write_double_le(output, offset, high);
-    detail::write_double_le(output, offset, low);
-    detail::write_unsigned_le(output, offset, window_start);
-    detail::write_unsigned_le(output, offset, transactions);
-    return output;
-  }
-
-  nanobind::bytes packed_bytes() const {
-    return detail::packed_bytes(pack());
-  }
-
-  bool operator==(const CurrencyAggregate& other) const {
-    return ticker == other.ticker &&
-           volume == other.volume &&
-           open == other.open &&
-           close == other.close &&
-           high == other.high &&
-           low == other.low &&
-           window_start == other.window_start &&
-           transactions == other.transactions;
-  }
-
-  nanobind::object ticker_object() const {
-    return detail::cached_python_object(
-        object_cache_,
-        ticker_attribute,
-        [&] { return detail::string_object_new_ref(ticker); });
-  }
-
-  nanobind::object volume_object() const {
-    return detail::cached_python_object(
-        object_cache_,
-        volume_attribute,
-        [&] { return detail::uint64_object_new_ref(volume); });
-  }
-
-  nanobind::object open_object() const {
-    return detail::cached_python_object(
-        object_cache_,
-        open_attribute,
-        [&] { return detail::double_object_new_ref(open); });
-  }
-
-  nanobind::object close_object() const {
-    return detail::cached_python_object(
-        object_cache_,
-        close_attribute,
-        [&] { return detail::double_object_new_ref(close); });
-  }
-
-  nanobind::object high_object() const {
-    return detail::cached_python_object(
-        object_cache_,
-        high_attribute,
-        [&] { return detail::double_object_new_ref(high); });
-  }
-
-  nanobind::object low_object() const {
-    return detail::cached_python_object(
-        object_cache_,
-        low_attribute,
-        [&] { return detail::double_object_new_ref(low); });
-  }
-
-  nanobind::object window_start_object() const {
-    return detail::cached_python_object(
-        object_cache_,
-        window_start_attribute,
-        [&] { return detail::uint64_object_new_ref(window_start); });
-  }
-
-  nanobind::object transactions_object() const {
-    return detail::cached_python_object(
-        object_cache_,
-        transactions_attribute,
-        [&] { return detail::uint64_object_new_ref(transactions); });
-  }
-
-  nanobind::list python_fields() const {
-    nanobind::list values;
-    values.append(ticker_object());
-    values.append(volume_object());
-    values.append(open_object());
-    values.append(close_object());
-    values.append(high_object());
-    values.append(low_object());
-    values.append(window_start_object());
-    values.append(transactions_object());
-    return values;
-  }
-
-  nanobind::object tickers_object() const {
-    return detail::cached_python_object(
-        object_cache_,
-        tickers_attribute,
-        [&] {
-          return detail::object_cache_new_ref(
-              detail::currency_tickers_tuple(ticker));
-        });
-  }
-
-  std::size_t hash_value() const {
-    std::size_t seed = 0;
-    detail::hash_combine(seed, ticker);
-    detail::hash_combine(seed, volume);
-    detail::hash_combine(seed, open);
-    detail::hash_combine(seed, close);
-    detail::hash_combine(seed, high);
-    detail::hash_combine(seed, low);
-    detail::hash_combine(seed, window_start);
-    detail::hash_combine(seed, transactions);
-    return seed;
-  }
-
-  std::string repr() const {
-    std::ostringstream out;
-    out << "CurrencyAggregate("
-        << "ticker='" << ticker << "', "
-        << "volume=" << volume << ", "
-        << "open=" << open << ", "
-        << "close=" << close << ", "
-        << "high=" << high << ", "
-        << "low=" << low << ", "
-        << "window_start=" << window_start << ", "
-        << "transactions=" << transactions << ")";
-    return out.str();
-  }
-};
-
 namespace detail {
 
 inline double quiet_nan() {
@@ -5625,6 +5142,10 @@ struct PriceAggregation {
       bool update_high_low,
       bool update_open_close,
       bool update_statistics) {
+    if (!std::isfinite(value)) {
+      return;
+    }
+
     if (update_high_low) {
       if (!has_high_low) {
         has_high_low = true;
@@ -5700,6 +5221,10 @@ struct WeightedPriceAggregation {
   long double weight = 0.0;
 
   void add(double value, double value_weight) {
+    if (!std::isfinite(value) || !std::isfinite(value_weight) ||
+        value_weight <= 0.0) {
+      return;
+    }
     weighted_sum += static_cast<long double>(value) *
                     static_cast<long double>(value_weight);
     weight += value_weight;
@@ -5727,6 +5252,12 @@ struct TimeWeightedPriceAggregation {
       weighted_sum += static_cast<long double>(previous_value) *
                       static_cast<long double>(delta);
       weight_ns += delta;
+    }
+
+    if (!std::isfinite(value)) {
+      has_previous = false;
+      previous_timestamp = timestamp;
+      return;
     }
 
     has_previous = true;
@@ -5775,12 +5306,13 @@ inline std::uint64_t seconds_to_ns(
 inline std::uint64_t aggregation_window_start(
     std::uint64_t timestamp,
     std::uint64_t interval_ns,
-    std::uint64_t offset_ns) {
-  if (timestamp < offset_ns) {
+    std::uint64_t start_timestamp) {
+  if (timestamp < start_timestamp) {
     return 0;
   }
 
-  return ((timestamp - offset_ns) / interval_ns) * interval_ns + offset_ns;
+  return ((timestamp - start_timestamp) / interval_ns) * interval_ns +
+         start_timestamp;
 }
 
 }  // namespace detail
@@ -6071,6 +5603,44 @@ struct CurrencyQuoteAggregation : detail::AggregateObjectCache<52> {
   std::uint64_t duration_ns = 0;
 };
 
+struct ValueAggregation : detail::AggregateObjectCache<16> {
+  enum AttributeIndex : std::size_t {
+    ticker_attribute,
+    open_attribute,
+    close_attribute,
+    high_attribute,
+    low_attribute,
+    avg_attribute,
+    stddev_attribute,
+    window_start_attribute,
+    transactions_attribute,
+    value_change_attribute,
+    return_bps_attribute,
+    value_range_attribute,
+    range_bps_attribute,
+    first_timestamp_attribute,
+    last_timestamp_attribute,
+    duration_ns_attribute,
+  };
+
+  std::string ticker;
+  double open = 0.0;
+  double close = 0.0;
+  double high = 0.0;
+  double low = 0.0;
+  double avg = 0.0;
+  double stddev = 0.0;
+  double value_change = 0.0;
+  double return_bps = 0.0;
+  double value_range = 0.0;
+  double range_bps = 0.0;
+  std::uint64_t window_start = 0;
+  std::uint64_t transactions = 0;
+  std::uint64_t first_timestamp = 0;
+  std::uint64_t last_timestamp = 0;
+  std::uint64_t duration_ns = 0;
+};
+
 struct StockTradeAggregationState {
   std::string ticker;
   std::uint64_t window_start = 0;
@@ -6254,18 +5824,26 @@ struct StockQuoteAggregationState {
   StockQuoteAggregation to_result() const {
     StockQuoteAggregation result;
     result.ticker = ticker;
-    result.ask_open = ask_price.open;
-    result.ask_close = ask_price.close;
-    result.ask_high = ask_price.high;
-    result.ask_low = ask_price.low;
+    result.ask_open =
+        ask_price.has_open_close ? ask_price.open : detail::quiet_nan();
+    result.ask_close =
+        ask_price.has_open_close ? ask_price.close : detail::quiet_nan();
+    result.ask_high =
+        ask_price.has_high_low ? ask_price.high : detail::quiet_nan();
+    result.ask_low =
+        ask_price.has_high_low ? ask_price.low : detail::quiet_nan();
     result.ask_avg = ask_price.average();
     result.ask_volume_weighted_avg = weighted_ask_price.average();
     result.ask_volume = ask_volume;
     result.ask_stddev = ask_price.stddev();
-    result.bid_open = bid_price.open;
-    result.bid_close = bid_price.close;
-    result.bid_high = bid_price.high;
-    result.bid_low = bid_price.low;
+    result.bid_open =
+        bid_price.has_open_close ? bid_price.open : detail::quiet_nan();
+    result.bid_close =
+        bid_price.has_open_close ? bid_price.close : detail::quiet_nan();
+    result.bid_high =
+        bid_price.has_high_low ? bid_price.high : detail::quiet_nan();
+    result.bid_low =
+        bid_price.has_high_low ? bid_price.low : detail::quiet_nan();
     result.bid_avg = bid_price.average();
     result.bid_volume_weighted_avg = weighted_bid_price.average();
     result.bid_volume = bid_volume;
@@ -6280,20 +5858,24 @@ struct StockQuoteAggregationState {
     result.bid_return_bps = bid_price.return_bps();
     result.bid_range = bid_price.range();
     result.bid_range_bps = bid_price.range_bps();
-    result.spread_open = spread.open;
-    result.spread_close = spread.close;
-    result.spread_high = spread.high;
-    result.spread_low = spread.low;
+    result.spread_open =
+        spread.has_open_close ? spread.open : detail::quiet_nan();
+    result.spread_close =
+        spread.has_open_close ? spread.close : detail::quiet_nan();
+    result.spread_high =
+        spread.has_high_low ? spread.high : detail::quiet_nan();
+    result.spread_low =
+        spread.has_high_low ? spread.low : detail::quiet_nan();
     result.spread_avg = spread.average();
     result.spread_stddev = spread.stddev();
     result.spread_change = spread.change();
     result.spread_return_bps = spread.return_bps();
     result.spread_range = spread.range();
     result.spread_range_bps = spread.range_bps();
-    result.mid_open = mid.open;
-    result.mid_close = mid.close;
-    result.mid_high = mid.high;
-    result.mid_low = mid.low;
+    result.mid_open = mid.has_open_close ? mid.open : detail::quiet_nan();
+    result.mid_close = mid.has_open_close ? mid.close : detail::quiet_nan();
+    result.mid_high = mid.has_high_low ? mid.high : detail::quiet_nan();
+    result.mid_low = mid.has_high_low ? mid.low : detail::quiet_nan();
     result.mid_avg = mid.average();
     result.mid_stddev = mid.stddev();
     result.mid_change = mid.change();
@@ -6439,10 +6021,65 @@ struct CurrencyQuoteAggregationState {
   }
 };
 
+struct ValueAggregationState {
+  std::string ticker;
+  std::uint64_t window_start = 0;
+  std::uint64_t transactions = 0;
+  std::uint64_t first_timestamp = 0;
+  std::uint64_t last_timestamp = 0;
+  detail::PriceAggregation value;
+
+  ValueAggregationState() = default;
+
+  ValueAggregationState(
+      std::string ticker_value,
+      std::uint64_t window,
+      std::uint64_t = 0)
+      : ticker(std::move(ticker_value)), window_start(window) {}
+
+  void add(const IndexValue& row) {
+    add_values(row.value, row.timestamp);
+  }
+
+  void add_values(double row_value, std::uint64_t timestamp) {
+    value.add(row_value);
+    if (transactions == 0) {
+      first_timestamp = timestamp;
+    }
+    last_timestamp = timestamp;
+    ++transactions;
+  }
+
+  ValueAggregation to_result() const {
+    ValueAggregation result;
+    result.ticker = ticker;
+    result.open = value.open;
+    result.close = value.close;
+    result.high = value.high;
+    result.low = value.low;
+    result.avg = value.average();
+    result.stddev = value.stddev();
+    result.window_start = window_start;
+    result.transactions = transactions;
+    result.value_change = value.change();
+    result.return_bps = value.return_bps();
+    result.value_range = value.range();
+    result.range_bps = value.range_bps();
+    result.first_timestamp = first_timestamp;
+    result.last_timestamp = last_timestamp;
+    result.duration_ns =
+        last_timestamp >= first_timestamp ? last_timestamp - first_timestamp : 0;
+    return result;
+  }
+};
+
 class StockTradeDatabase;
 class StockQuoteDatabase;
 class CryptoTradeDatabase;
 class CurrencyQuoteDatabase;
+class IndexValueDatabase;
+class FuturesTradeDatabase;
+class FuturesQuoteDatabase;
 class OptionTradeDatabase;
 class OptionQuoteDatabase;
 
@@ -6459,6 +6096,14 @@ struct StockTradeAggregationTraits {
   static std::uint64_t packed_timestamp(const void* packed_data) {
     return RowType::sip_timestamp_at(packed_data);
   }
+
+  static std::string key(const RowType& row) { return row.ticker; }
+  template <typename Database = DatabaseType>
+  static std::string database_key(const Database& database) {
+    return database.ticker();
+  }
+
+  static void add(State& state, const RowType& row) { state.add(row); }
 
   static void add_packed(
       State& state,
@@ -6491,6 +6136,14 @@ struct StockQuoteAggregationTraits {
     return RowType::sip_timestamp_at(packed_data);
   }
 
+  static std::string key(const RowType& row) { return row.ticker; }
+  template <typename Database = DatabaseType>
+  static std::string database_key(const Database& database) {
+    return database.ticker();
+  }
+
+  static void add(State& state, const RowType& row) { state.add(row); }
+
   static void add_packed(
       State& state,
       const void* packed_data,
@@ -6518,6 +6171,14 @@ struct CurrencyQuoteAggregationTraits {
     return RowType::participant_timestamp_at(packed_data);
   }
 
+  static std::string key(const RowType& row) { return row.ticker; }
+  template <typename Database = DatabaseType>
+  static std::string database_key(const Database& database) {
+    return database.ticker();
+  }
+
+  static void add(State& state, const RowType& row) { state.add(row); }
+
   static void add_packed(
       State& state,
       const void* packed_data,
@@ -6525,6 +6186,221 @@ struct CurrencyQuoteAggregationTraits {
     state.add_values(
         RowType::ask_price_at(packed_data),
         RowType::bid_price_at(packed_data),
+        timestamp);
+  }
+};
+
+struct CryptoTradeAggregationTraits {
+  using RowType = CryptoTrade;
+  using State = StockTradeAggregationState;
+  using OutputType = StockTradeAggregation;
+  using DatabaseType = CryptoTradeDatabase;
+
+  static std::uint64_t timestamp(const RowType& row) {
+    return row.participant_timestamp;
+  }
+
+  static std::uint64_t packed_timestamp(const void* packed_data) {
+    return RowType::participant_timestamp_at(packed_data);
+  }
+
+  static std::string key(const RowType& row) { return row.ticker; }
+  template <typename Database = DatabaseType>
+  static std::string database_key(const Database& database) {
+    return database.ticker();
+  }
+
+  static void add(State& state, const RowType& row) {
+    state.add_values(
+        row.price,
+        std::isfinite(row.size) && row.size > 0.0 ? row.size : 0.0,
+        row.participant_timestamp);
+  }
+
+  static void add_packed(
+      State& state,
+      const void* packed_data,
+      std::uint64_t timestamp) {
+    const double size = RowType::size_at(packed_data);
+    state.add_values(
+        RowType::price_at(packed_data),
+        std::isfinite(size) && size > 0.0 ? size : 0.0,
+        timestamp);
+  }
+};
+
+struct IndexValueAggregationTraits {
+  using RowType = IndexValue;
+  using State = ValueAggregationState;
+  using OutputType = ValueAggregation;
+  using DatabaseType = IndexValueDatabase;
+
+  static std::uint64_t timestamp(const RowType& row) { return row.timestamp; }
+  static std::uint64_t packed_timestamp(const void* packed_data) {
+    return RowType::timestamp_at(packed_data);
+  }
+  static std::string key(const RowType& row) { return row.ticker; }
+  template <typename Database = DatabaseType>
+  static std::string database_key(const Database& database) {
+    return database.ticker();
+  }
+  static void add(State& state, const RowType& row) { state.add(row); }
+  static void add_packed(
+      State& state,
+      const void* packed_data,
+      std::uint64_t timestamp) {
+    state.add_values(RowType::value_at(packed_data), timestamp);
+  }
+};
+
+struct FuturesTradeAggregationTraits {
+  using RowType = FuturesTrade;
+  using State = StockTradeAggregationState;
+  using OutputType = StockTradeAggregation;
+  using DatabaseType = FuturesTradeDatabase;
+
+  static std::uint64_t timestamp(const RowType& row) { return row.timestamp; }
+  static std::uint64_t packed_timestamp(const void* packed_data) {
+    return RowType::timestamp_at(packed_data);
+  }
+  static std::string key(const RowType& row) { return row.ticker; }
+  template <typename Database = DatabaseType>
+  static std::string database_key(const Database& database) {
+    return database.ticker();
+  }
+  static void add(State& state, const RowType& row) {
+    state.add_values(
+        row.price,
+        static_cast<double>(row.size),
+        row.timestamp);
+  }
+  static void add_packed(
+      State& state,
+      const void* packed_data,
+      std::uint64_t timestamp) {
+    state.add_values(
+        RowType::price_at(packed_data),
+        static_cast<double>(RowType::size_at(packed_data)),
+        timestamp);
+  }
+};
+
+struct FuturesQuoteAggregationTraits {
+  using RowType = FuturesQuote;
+  using State = StockQuoteAggregationState;
+  using OutputType = StockQuoteAggregation;
+  using DatabaseType = FuturesQuoteDatabase;
+
+  static std::uint64_t timestamp(const RowType& row) { return row.timestamp; }
+  static std::uint64_t packed_timestamp(const void* packed_data) {
+    return RowType::timestamp_at(packed_data);
+  }
+  static std::string key(const RowType& row) { return row.ticker; }
+  template <typename Database = DatabaseType>
+  static std::string database_key(const Database& database) {
+    return database.ticker();
+  }
+  static void add(State& state, const RowType& row) {
+    state.add_values(
+        row.ask_price,
+        row.ask_size,
+        row.bid_price,
+        row.bid_size,
+        row.timestamp);
+  }
+  static void add_packed(
+      State& state,
+      const void* packed_data,
+      std::uint64_t timestamp) {
+    state.add_values(
+        RowType::ask_price_at(packed_data),
+        RowType::ask_size_at(packed_data),
+        RowType::bid_price_at(packed_data),
+        RowType::bid_size_at(packed_data),
+        timestamp);
+  }
+};
+
+struct OptionTradeAggregationTraits {
+  using RowType = OptionTrade;
+  using State = StockTradeAggregationState;
+  using OutputType = StockTradeAggregation;
+  using DatabaseType = OptionTradeDatabase;
+
+  static std::uint64_t timestamp(const RowType& row) {
+    return row.sip_timestamp;
+  }
+  static std::uint64_t packed_timestamp(const void* packed_data) {
+    return RowType::sip_timestamp_at(packed_data);
+  }
+  static std::string key(const RowType& row) {
+    return detail::option_contract_key(
+        row.root,
+        row.expiration,
+        std::string(1, row.right),
+        row.strike);
+  }
+  template <typename Database = DatabaseType>
+  static std::string database_key(const Database& database) {
+    return database.contract_key();
+  }
+  static void add(State& state, const RowType& row) {
+    state.add_values(
+        row.price,
+        static_cast<double>(row.size),
+        row.sip_timestamp);
+  }
+  static void add_packed(
+      State& state,
+      const void* packed_data,
+      std::uint64_t timestamp) {
+    state.add_values(
+        RowType::price_at(packed_data),
+        static_cast<double>(RowType::size_at(packed_data)),
+        timestamp);
+  }
+};
+
+struct OptionQuoteAggregationTraits {
+  using RowType = OptionQuote;
+  using State = StockQuoteAggregationState;
+  using OutputType = StockQuoteAggregation;
+  using DatabaseType = OptionQuoteDatabase;
+
+  static std::uint64_t timestamp(const RowType& row) {
+    return row.sip_timestamp;
+  }
+  static std::uint64_t packed_timestamp(const void* packed_data) {
+    return RowType::sip_timestamp_at(packed_data);
+  }
+  static std::string key(const RowType& row) {
+    return detail::option_contract_key(
+        row.root,
+        row.expiration,
+        std::string(1, row.right),
+        row.strike);
+  }
+  template <typename Database = DatabaseType>
+  static std::string database_key(const Database& database) {
+    return database.contract_key();
+  }
+  static void add(State& state, const RowType& row) {
+    state.add_values(
+        row.ask_price,
+        row.ask_size,
+        row.bid_price,
+        row.bid_size,
+        row.sip_timestamp);
+  }
+  static void add_packed(
+      State& state,
+      const void* packed_data,
+      std::uint64_t timestamp) {
+    state.add_values(
+        RowType::ask_price_at(packed_data),
+        RowType::ask_size_at(packed_data),
+        RowType::bid_price_at(packed_data),
+        RowType::bid_size_at(packed_data),
         timestamp);
   }
 };
@@ -6540,9 +6416,9 @@ class WindowAggregator {
   WindowAggregator(
       nanobind::handle rows,
       std::uint64_t interval_seconds,
-      std::uint64_t offset_seconds)
+      std::uint64_t start_timestamp)
       : interval_ns_(detail::seconds_to_ns(interval_seconds, "interval_seconds")),
-        offset_ns_(detail::seconds_to_ns(offset_seconds, "offset_seconds")) {
+        start_timestamp_(start_timestamp) {
     if (interval_seconds == 0) {
       throw std::invalid_argument("interval_seconds must be greater than zero");
     }
@@ -6551,6 +6427,11 @@ class WindowAggregator {
     if (nanobind::try_cast<DatabaseType*>(rows, database, false)) {
       database_ = database;
       database_owner_ = nanobind::borrow<nanobind::object>(rows);
+      const std::int64_t first_index =
+          database_->index_after_timestamp(start_timestamp_, std::nullopt);
+      database_index_ = first_index < 0
+          ? database_->size()
+          : static_cast<std::size_t>(first_index);
       return;
     }
 
@@ -6574,7 +6455,7 @@ class WindowAggregator {
     if (has_pending_row_) {
       row = std::move(pending_row_);
       has_pending_row_ = false;
-    } else if (!read_next_row(row)) {
+    } else if (!read_next_eligible_row(row)) {
       throw nanobind::stop_iteration();
     }
 
@@ -6582,18 +6463,19 @@ class WindowAggregator {
         detail::aggregation_window_start(
             Traits::timestamp(row),
             interval_ns_,
-            offset_ns_);
-    State state(row.ticker, row_window_start, interval_ns_);
-    state.add(row);
+            start_timestamp_);
+    State state(Traits::key(row), row_window_start, interval_ns_);
+    Traits::add(state, row);
 
-    while (read_next_row(row)) {
+    while (read_next_eligible_row(row)) {
       const std::uint64_t next_window_start =
           detail::aggregation_window_start(
               Traits::timestamp(row),
               interval_ns_,
-              offset_ns_);
-      if (row.ticker == state.ticker && next_window_start == state.window_start) {
-        state.add(row);
+              start_timestamp_);
+      if (Traits::key(row) == state.ticker &&
+          next_window_start == state.window_start) {
+        Traits::add(state, row);
         continue;
       }
 
@@ -6617,9 +6499,9 @@ class WindowAggregator {
         detail::aggregation_window_start(
             timestamp,
             interval_ns_,
-            offset_ns_);
+            start_timestamp_);
 
-    State state(database_->ticker(), row_window_start, interval_ns_);
+    State state(Traits::database_key(*database_), row_window_start, interval_ns_);
     Traits::add_packed(state, packed_data, timestamp);
 
     while (database_index_ < database_->size()) {
@@ -6629,7 +6511,7 @@ class WindowAggregator {
           detail::aggregation_window_start(
               next_timestamp,
               interval_ns_,
-              offset_ns_);
+              start_timestamp_);
       if (next_window_start != state.window_start) {
         break;
       }
@@ -6655,12 +6537,21 @@ class WindowAggregator {
     return true;
   }
 
+  bool read_next_eligible_row(RowType& row) {
+    while (read_next_row(row)) {
+      if (Traits::timestamp(row) >= start_timestamp_) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   nanobind::object iterator_;
   nanobind::object database_owner_;
   const DatabaseType* database_ = nullptr;
   std::size_t database_index_ = 0;
   std::uint64_t interval_ns_ = 0;
-  std::uint64_t offset_ns_ = 0;
+  std::uint64_t start_timestamp_ = 0;
   RowType pending_row_;
   bool has_pending_row_ = false;
 };
@@ -6668,6 +6559,12 @@ class WindowAggregator {
 using StockTradeAggregator = WindowAggregator<StockTradeAggregationTraits>;
 using StockQuoteAggregator = WindowAggregator<StockQuoteAggregationTraits>;
 using CurrencyQuoteAggregator = WindowAggregator<CurrencyQuoteAggregationTraits>;
+using CryptoTradeAggregator = WindowAggregator<CryptoTradeAggregationTraits>;
+using IndexValueAggregator = WindowAggregator<IndexValueAggregationTraits>;
+using FuturesTradeAggregator = WindowAggregator<FuturesTradeAggregationTraits>;
+using FuturesQuoteAggregator = WindowAggregator<FuturesQuoteAggregationTraits>;
+using OptionTradeAggregator = WindowAggregator<OptionTradeAggregationTraits>;
+using OptionQuoteAggregator = WindowAggregator<OptionQuoteAggregationTraits>;
 
 template <typename RowType>
 inline std::uint64_t participant_timestamp_at(const void* packed_data) {
@@ -8754,10 +8651,8 @@ class Implementation : public Base {
   using RawOptionTrade = std::array<std::string, 7>;
   using RawOptionQuote = std::array<std::string, 9>;
   using RawStockQuote = std::array<std::string, 14>;
-  using RawStockAggregate = std::array<std::string, 8>;
   using RawCurrencyQuote = std::array<std::string, 6>;
   using RawIndexValue = std::array<std::string, 3>;
-  using RawCurrencyAggregate = std::array<std::string, 8>;
   using RawLineRowsIterator = SharedRawLineRowsIterator<Specialization>;
 
   class GzipLinesIterator {
@@ -9177,66 +9072,6 @@ class Implementation : public Base {
         }
 
         row = Implementation::parse_index_value_row(line);
-        return true;
-      }
-
-      return false;
-    }
-
-   private:
-    detail::BufferedGzipLineReader reader_;
-    bool is_first_line_ = true;
-  };
-
-  class StockAggregateStreamState {
-   public:
-    explicit StockAggregateStreamState(const std::filesystem::path& path)
-        : reader_(path) {}
-
-    bool next_row(StockAggregate& row) {
-      std::string_view line;
-
-      while (reader_.template next_line<Specialization>(line)) {
-        if (is_first_line_) {
-          is_first_line_ = false;
-          continue;
-        }
-
-        if (line.empty()) {
-          continue;
-        }
-
-        row = Implementation::parse_stock_aggregate_row(line);
-        return true;
-      }
-
-      return false;
-    }
-
-   private:
-    detail::BufferedGzipLineReader reader_;
-    bool is_first_line_ = true;
-  };
-
-  class CurrencyAggregateStreamState {
-   public:
-    explicit CurrencyAggregateStreamState(const std::filesystem::path& path)
-        : reader_(path) {}
-
-    bool next_row(CurrencyAggregate& row) {
-      std::string_view line;
-
-      while (reader_.template next_line<Specialization>(line)) {
-        if (is_first_line_) {
-          is_first_line_ = false;
-          continue;
-        }
-
-        if (line.empty()) {
-          continue;
-        }
-
-        row = Implementation::parse_currency_aggregate_row(line);
         return true;
       }
 
@@ -9726,146 +9561,6 @@ class Implementation : public Base {
     detail::RawBytesInternCache intern_cache_;
   };
 
-  class RawStockAggregateStreamState {
-   public:
-    explicit RawStockAggregateStreamState(const std::filesystem::path& path)
-        : reader_(path) {}
-
-    RawStockAggregateStreamState(const RawStockAggregateStreamState&) = delete;
-    RawStockAggregateStreamState& operator=(const RawStockAggregateStreamState&) = delete;
-
-    RawStockAggregateStreamState(RawStockAggregateStreamState&& other) noexcept
-        : reader_(std::move(other.reader_)),
-          is_first_line_(other.is_first_line_),
-          intern_cache_(std::move(other.intern_cache_)) {}
-
-    RawStockAggregateStreamState& operator=(RawStockAggregateStreamState&& other) noexcept {
-      if (this == &other) {
-        return *this;
-      }
-
-      reader_ = std::move(other.reader_);
-      is_first_line_ = other.is_first_line_;
-      intern_cache_ = std::move(other.intern_cache_);
-      return *this;
-    }
-
-    bool next_row(RawStockAggregate& row) {
-      std::string_view line;
-
-      while (reader_.template next_line<Specialization>(line)) {
-        if (is_first_line_) {
-          is_first_line_ = false;
-          continue;
-        }
-
-        if (line.empty()) {
-          continue;
-        }
-
-        row = Implementation::parse_raw_stock_aggregate_row(line);
-        return true;
-      }
-
-      return false;
-    }
-
-    bool next_tuple(nanobind::tuple& row) {
-      std::string_view line;
-
-      while (reader_.template next_line<Specialization>(line)) {
-        if (is_first_line_) {
-          is_first_line_ = false;
-          continue;
-        }
-
-        if (line.empty()) {
-          continue;
-        }
-
-        row = Implementation::parse_raw_stock_aggregate_tuple(line, intern_cache_);
-        return true;
-      }
-
-      return false;
-    }
-
-   private:
-    detail::BufferedGzipLineReader reader_;
-    bool is_first_line_ = true;
-    detail::RawBytesInternCache intern_cache_;
-  };
-
-  class RawCurrencyAggregateStreamState {
-   public:
-    explicit RawCurrencyAggregateStreamState(const std::filesystem::path& path)
-        : reader_(path) {}
-
-    RawCurrencyAggregateStreamState(const RawCurrencyAggregateStreamState&) = delete;
-    RawCurrencyAggregateStreamState& operator=(const RawCurrencyAggregateStreamState&) = delete;
-
-    RawCurrencyAggregateStreamState(RawCurrencyAggregateStreamState&& other) noexcept
-        : reader_(std::move(other.reader_)),
-          is_first_line_(other.is_first_line_),
-          intern_cache_(std::move(other.intern_cache_)) {}
-
-    RawCurrencyAggregateStreamState& operator=(RawCurrencyAggregateStreamState&& other) noexcept {
-      if (this == &other) {
-        return *this;
-      }
-
-      reader_ = std::move(other.reader_);
-      is_first_line_ = other.is_first_line_;
-      intern_cache_ = std::move(other.intern_cache_);
-      return *this;
-    }
-
-    bool next_row(RawCurrencyAggregate& row) {
-      std::string_view line;
-
-      while (reader_.template next_line<Specialization>(line)) {
-        if (is_first_line_) {
-          is_first_line_ = false;
-          continue;
-        }
-
-        if (line.empty()) {
-          continue;
-        }
-
-        row = Implementation::parse_raw_currency_aggregate_row(line);
-        return true;
-      }
-
-      return false;
-    }
-
-    bool next_tuple(nanobind::tuple& row) {
-      std::string_view line;
-
-      while (reader_.template next_line<Specialization>(line)) {
-        if (is_first_line_) {
-          is_first_line_ = false;
-          continue;
-        }
-
-        if (line.empty()) {
-          continue;
-        }
-
-        row = Implementation::parse_raw_currency_aggregate_tuple(line, intern_cache_);
-        return true;
-      }
-
-      return false;
-    }
-
-   private:
-    detail::BufferedGzipLineReader reader_;
-    bool is_first_line_ = true;
-    detail::RawBytesInternCache intern_cache_;
-  };
-
   class StockTradeRowsIterator {
    public:
     explicit StockTradeRowsIterator(
@@ -10141,78 +9836,6 @@ class Implementation : public Base {
    private:
     std::optional<IndexValueStreamState> stream_state_;
     std::vector<IndexValue> rows_;
-    std::size_t row_index_ = 0;
-  };
-
-  class StockAggregateRowsIterator {
-   public:
-    explicit StockAggregateRowsIterator(
-        const std::filesystem::path& path,
-        bool sort_by_window_start = false) {
-      if (sort_by_window_start) {
-        rows_ = load_rows<StockAggregate>(path, &Implementation::parse_stock_aggregate_row);
-        std::stable_sort(
-            rows_.begin(),
-            rows_.end(),
-            [](const StockAggregate& lhs, const StockAggregate& rhs) {
-              if (lhs.window_start != rhs.window_start) {
-                return lhs.window_start < rhs.window_start;
-              }
-              return lhs.ticker < rhs.ticker;
-            });
-      } else {
-        stream_state_.emplace(path);
-      }
-    }
-
-    StockAggregateRowsIterator& iter() { return *this; }
-
-    StockAggregate next() {
-      return Implementation::template next_parsed_row<StockAggregate, StockAggregateStreamState>(
-          stream_state_,
-          rows_,
-          row_index_);
-    }
-
-   private:
-    std::optional<StockAggregateStreamState> stream_state_;
-    std::vector<StockAggregate> rows_;
-    std::size_t row_index_ = 0;
-  };
-
-  class CurrencyAggregateRowsIterator {
-   public:
-    explicit CurrencyAggregateRowsIterator(
-        const std::filesystem::path& path,
-        bool sort_by_window_start = false) {
-      if (sort_by_window_start) {
-        rows_ = load_rows<CurrencyAggregate>(path, &Implementation::parse_currency_aggregate_row);
-        std::stable_sort(
-            rows_.begin(),
-            rows_.end(),
-            [](const CurrencyAggregate& lhs, const CurrencyAggregate& rhs) {
-              if (lhs.window_start != rhs.window_start) {
-                return lhs.window_start < rhs.window_start;
-              }
-              return lhs.ticker < rhs.ticker;
-            });
-      } else {
-        stream_state_.emplace(path);
-      }
-    }
-
-    CurrencyAggregateRowsIterator& iter() { return *this; }
-
-    CurrencyAggregate next() {
-      return Implementation::template next_parsed_row<CurrencyAggregate, CurrencyAggregateStreamState>(
-          stream_state_,
-          rows_,
-          row_index_);
-    }
-
-   private:
-    std::optional<CurrencyAggregateStreamState> stream_state_;
-    std::vector<CurrencyAggregate> rows_;
     std::size_t row_index_ = 0;
   };
 
@@ -10695,162 +10318,6 @@ class Implementation : public Base {
     detail::RawBytesInternCache intern_cache_;
   };
 
-  class RawStockAggregateRowsIterator {
-   public:
-    explicit RawStockAggregateRowsIterator(
-        const std::filesystem::path& path,
-        bool sort_by_window_start = false) {
-      if (sort_by_window_start) {
-        rows_ = load_rows<RawStockAggregate>(
-            path,
-            &Implementation::parse_raw_stock_aggregate_row);
-        std::stable_sort(
-            rows_.begin(),
-            rows_.end(),
-            [](const RawStockAggregate& lhs, const RawStockAggregate& rhs) {
-              const auto lhs_window_start =
-                  Specialization::template parse_integer<std::uint64_t>(lhs[6], "window_start");
-              const auto rhs_window_start =
-                  Specialization::template parse_integer<std::uint64_t>(rhs[6], "window_start");
-              if (lhs_window_start != rhs_window_start) {
-                return lhs_window_start < rhs_window_start;
-              }
-              return lhs[0] < rhs[0];
-            });
-      } else {
-        stream_state_.emplace(path);
-      }
-    }
-
-    RawStockAggregateRowsIterator(const RawStockAggregateRowsIterator&) = delete;
-    RawStockAggregateRowsIterator& operator=(const RawStockAggregateRowsIterator&) = delete;
-
-    RawStockAggregateRowsIterator(RawStockAggregateRowsIterator&& other) noexcept
-        : stream_state_(std::move(other.stream_state_)),
-          rows_(std::move(other.rows_)),
-          row_index_(other.row_index_),
-          intern_cache_(std::move(other.intern_cache_)) {}
-
-    RawStockAggregateRowsIterator& operator=(RawStockAggregateRowsIterator&& other) noexcept {
-      if (this == &other) {
-        return *this;
-      }
-
-      stream_state_ = std::move(other.stream_state_);
-      rows_ = std::move(other.rows_);
-      row_index_ = other.row_index_;
-      intern_cache_ = std::move(other.intern_cache_);
-      return *this;
-    }
-
-    RawStockAggregateRowsIterator& iter() { return *this; }
-
-    nanobind::tuple next() {
-      if (stream_state_) {
-        nanobind::tuple row;
-        if (stream_state_->next_tuple(row)) {
-          return row;
-        }
-
-        stream_state_.reset();
-        throw nanobind::stop_iteration();
-      }
-
-      return Implementation::raw_stock_aggregate_array_to_tuple(rows_next(), intern_cache_);
-    }
-
-   private:
-    RawStockAggregate rows_next() {
-      if (row_index_ >= rows_.size()) {
-        throw nanobind::stop_iteration();
-      }
-      return std::move(rows_[row_index_++]);
-    }
-
-    std::optional<RawStockAggregateStreamState> stream_state_;
-    std::vector<RawStockAggregate> rows_;
-    std::size_t row_index_ = 0;
-    detail::RawBytesInternCache intern_cache_;
-  };
-
-  class RawCurrencyAggregateRowsIterator {
-   public:
-    explicit RawCurrencyAggregateRowsIterator(
-        const std::filesystem::path& path,
-        bool sort_by_window_start = false) {
-      if (sort_by_window_start) {
-        rows_ = load_rows<RawCurrencyAggregate>(
-            path,
-            &Implementation::parse_raw_currency_aggregate_row);
-        std::stable_sort(
-            rows_.begin(),
-            rows_.end(),
-            [](const RawCurrencyAggregate& lhs, const RawCurrencyAggregate& rhs) {
-              const auto lhs_window_start =
-                  Specialization::template parse_integer<std::uint64_t>(lhs[6], "window_start");
-              const auto rhs_window_start =
-                  Specialization::template parse_integer<std::uint64_t>(rhs[6], "window_start");
-              if (lhs_window_start != rhs_window_start) {
-                return lhs_window_start < rhs_window_start;
-              }
-              return lhs[0] < rhs[0];
-            });
-      } else {
-        stream_state_.emplace(path);
-      }
-    }
-
-    RawCurrencyAggregateRowsIterator(const RawCurrencyAggregateRowsIterator&) = delete;
-    RawCurrencyAggregateRowsIterator& operator=(const RawCurrencyAggregateRowsIterator&) = delete;
-
-    RawCurrencyAggregateRowsIterator(RawCurrencyAggregateRowsIterator&& other) noexcept
-        : stream_state_(std::move(other.stream_state_)),
-          rows_(std::move(other.rows_)),
-          row_index_(other.row_index_),
-          intern_cache_(std::move(other.intern_cache_)) {}
-
-    RawCurrencyAggregateRowsIterator& operator=(RawCurrencyAggregateRowsIterator&& other) noexcept {
-      if (this == &other) {
-        return *this;
-      }
-
-      stream_state_ = std::move(other.stream_state_);
-      rows_ = std::move(other.rows_);
-      row_index_ = other.row_index_;
-      intern_cache_ = std::move(other.intern_cache_);
-      return *this;
-    }
-
-    RawCurrencyAggregateRowsIterator& iter() { return *this; }
-
-    nanobind::tuple next() {
-      if (stream_state_) {
-        nanobind::tuple row;
-        if (stream_state_->next_tuple(row)) {
-          return row;
-        }
-
-        stream_state_.reset();
-        throw nanobind::stop_iteration();
-      }
-
-      return Implementation::raw_currency_aggregate_array_to_tuple(rows_next(), intern_cache_);
-    }
-
-   private:
-    RawCurrencyAggregate rows_next() {
-      if (row_index_ >= rows_.size()) {
-        throw nanobind::stop_iteration();
-      }
-      return std::move(rows_[row_index_++]);
-    }
-
-    std::optional<RawCurrencyAggregateStreamState> stream_state_;
-    std::vector<RawCurrencyAggregate> rows_;
-    std::size_t row_index_ = 0;
-    detail::RawBytesInternCache intern_cache_;
-  };
-
   static GzipLineGenerator read_gzip_lines(
       std::filesystem::path path,
       std::size_t parallelization = 0,
@@ -10901,36 +10368,6 @@ class Implementation : public Base {
         sort_by_participant_timestamp,
         false,
         &Implementation::parse_currency_quote_row);
-  }
-
-  std::vector<StockAggregate> parse_stock_aggregate_rows(
-      const std::filesystem::path& path,
-      bool sort_by_window_start = false) const {
-    auto rows = load_rows<StockAggregate>(path, &Implementation::parse_stock_aggregate_row);
-    if (sort_by_window_start) {
-      std::stable_sort(rows.begin(), rows.end(), [](const StockAggregate& lhs, const StockAggregate& rhs) {
-        if (lhs.window_start != rhs.window_start) {
-          return lhs.window_start < rhs.window_start;
-        }
-        return lhs.ticker < rhs.ticker;
-      });
-    }
-    return rows;
-  }
-
-  std::vector<CurrencyAggregate> parse_currency_aggregate_rows(
-      const std::filesystem::path& path,
-      bool sort_by_window_start = false) const {
-    auto rows = load_rows<CurrencyAggregate>(path, &Implementation::parse_currency_aggregate_row);
-    if (sort_by_window_start) {
-      std::stable_sort(rows.begin(), rows.end(), [](const CurrencyAggregate& lhs, const CurrencyAggregate& rhs) {
-        if (lhs.window_start != rhs.window_start) {
-          return lhs.window_start < rhs.window_start;
-        }
-        return lhs.ticker < rhs.ticker;
-      });
-    }
-    return rows;
   }
 
   static std::uint64_t build_database_file(
@@ -12062,82 +11499,8 @@ class Implementation : public Base {
     return result;
   }
 
-  static StockAggregate parse_stock_aggregate_row(std::string_view line) {
-    detail::CsvLineCursor cursor(line);
-    std::string scratch;
-    StockAggregate result;
-
-    result.ticker.assign(cursor.template next_field<Specialization, true>(scratch));
-    result.volume =
-        Specialization::template parse_integer<std::uint64_t>(
-            cursor.template next_field<Specialization, true>(scratch),
-            "volume");
-    result.open = Specialization::parse_double(
-        cursor.template next_field<Specialization, true>(scratch),
-        "open");
-    result.close = Specialization::parse_double(
-        cursor.template next_field<Specialization, true>(scratch),
-        "close");
-    result.high = Specialization::parse_double(
-        cursor.template next_field<Specialization, true>(scratch),
-        "high");
-    result.low = Specialization::parse_double(
-        cursor.template next_field<Specialization, true>(scratch),
-        "low");
-    result.window_start =
-        Specialization::template parse_integer<std::uint64_t>(
-            cursor.template next_field<Specialization, true>(scratch),
-            "window_start");
-    result.transactions =
-        Specialization::template parse_integer<std::uint64_t>(
-            cursor.template next_field<Specialization, false>(scratch),
-            "transactions");
-
-    cursor.finish();
-    return result;
-  }
-
-  static CurrencyAggregate parse_currency_aggregate_row(std::string_view line) {
-    detail::CsvLineCursor cursor(line);
-    std::string scratch;
-    CurrencyAggregate result;
-
-    result.ticker.assign(cursor.template next_field<Specialization, true>(scratch));
-    result.volume =
-        Specialization::template parse_integer<std::uint64_t>(
-            cursor.template next_field<Specialization, true>(scratch),
-            "volume");
-    result.open = Specialization::parse_double(
-        cursor.template next_field<Specialization, true>(scratch),
-        "open");
-    result.close = Specialization::parse_double(
-        cursor.template next_field<Specialization, true>(scratch),
-        "close");
-    result.high = Specialization::parse_double(
-        cursor.template next_field<Specialization, true>(scratch),
-        "high");
-    result.low = Specialization::parse_double(
-        cursor.template next_field<Specialization, true>(scratch),
-        "low");
-    result.window_start =
-        Specialization::template parse_integer<std::uint64_t>(
-            cursor.template next_field<Specialization, true>(scratch),
-            "window_start");
-    result.transactions =
-        Specialization::template parse_integer<std::uint64_t>(
-            cursor.template next_field<Specialization, false>(scratch),
-            "transactions");
-
-    cursor.finish();
-    return result;
-  }
-
   static RawCurrencyQuote parse_raw_currency_quote_row(std::string_view line) {
     return parse_raw_row<6>(line);
-  }
-
-  static RawStockAggregate parse_raw_stock_aggregate_row(std::string_view line) {
-    return parse_raw_row<8>(line);
   }
 
   static nanobind::tuple parse_raw_currency_quote_tuple(
@@ -12165,84 +11528,6 @@ class Implementation : public Base {
     set_raw_bytes_field(result, 5, next_raw_unquoted_field<false>(line, cursor));
 
     finish_raw_row(line, cursor);
-    return result;
-  }
-
-  static RawCurrencyAggregate parse_raw_currency_aggregate_row(std::string_view line) {
-    return parse_raw_row<8>(line);
-  }
-
-  static nanobind::tuple parse_raw_currency_aggregate_tuple(
-      std::string_view line,
-      detail::RawBytesInternCache& intern_cache) {
-    std::size_t cursor = 0;
-    nanobind::tuple result = make_raw_tuple<8>();
-
-    set_raw_ticker_field(
-        result,
-        next_raw_unquoted_field<true>(line, cursor),
-        intern_cache);
-    set_raw_bytes_field(result, 1, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 2, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 3, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 4, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 5, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 6, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 7, next_raw_unquoted_field<false>(line, cursor));
-
-    finish_raw_row(line, cursor);
-    return result;
-  }
-
-  static nanobind::tuple parse_raw_stock_aggregate_tuple(
-      std::string_view line,
-      detail::RawBytesInternCache& intern_cache) {
-    std::size_t cursor = 0;
-    nanobind::tuple result = make_raw_tuple<8>();
-
-    set_raw_ticker_field(
-        result,
-        next_raw_unquoted_field<true>(line, cursor),
-        intern_cache);
-    set_raw_bytes_field(result, 1, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 2, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 3, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 4, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 5, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 6, next_raw_unquoted_field<true>(line, cursor));
-    set_raw_bytes_field(result, 7, next_raw_unquoted_field<false>(line, cursor));
-
-    finish_raw_row(line, cursor);
-    return result;
-  }
-
-  static nanobind::tuple raw_currency_aggregate_array_to_tuple(
-      const RawCurrencyAggregate& fields,
-      detail::RawBytesInternCache& intern_cache) {
-    nanobind::tuple result = make_raw_tuple<8>();
-    set_raw_ticker_field(result, fields[0], intern_cache);
-    set_raw_bytes_field(result, 1, fields[1]);
-    set_raw_bytes_field(result, 2, fields[2]);
-    set_raw_bytes_field(result, 3, fields[3]);
-    set_raw_bytes_field(result, 4, fields[4]);
-    set_raw_bytes_field(result, 5, fields[5]);
-    set_raw_bytes_field(result, 6, fields[6]);
-    set_raw_bytes_field(result, 7, fields[7]);
-    return result;
-  }
-
-  static nanobind::tuple raw_stock_aggregate_array_to_tuple(
-      const RawStockAggregate& fields,
-      detail::RawBytesInternCache& intern_cache) {
-    nanobind::tuple result = make_raw_tuple<8>();
-    set_raw_ticker_field(result, fields[0], intern_cache);
-    set_raw_bytes_field(result, 1, fields[1]);
-    set_raw_bytes_field(result, 2, fields[2]);
-    set_raw_bytes_field(result, 3, fields[3]);
-    set_raw_bytes_field(result, 4, fields[4]);
-    set_raw_bytes_field(result, 5, fields[5]);
-    set_raw_bytes_field(result, 6, fields[6]);
-    set_raw_bytes_field(result, 7, fields[7]);
     return result;
   }
 

@@ -11,18 +11,6 @@ Summary FlatFileParser::parse_quotes(nb::handle payload) const {
   throw std::runtime_error("flatfile quote parsing must be implemented by a concrete parser");
 }
 
-Summary FlatFileParser::parse_minute_aggregates(nb::handle payload) const {
-  static_cast<void>(payload);
-  throw std::runtime_error(
-      "flatfile minute aggregate parsing must be implemented by a concrete parser");
-}
-
-Summary FlatFileParser::parse_daily_aggregates(nb::handle payload) const {
-  static_cast<void>(payload);
-  throw std::runtime_error(
-      "flatfile daily aggregate parsing must be implemented by a concrete parser");
-}
-
 Summary FlatFileParser::parse_trades(nb::handle payload) const {
   static_cast<void>(payload);
   throw std::runtime_error("flatfile trade parsing must be implemented by a concrete parser");

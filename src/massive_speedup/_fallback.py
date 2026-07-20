@@ -785,79 +785,6 @@ class StockQuote:
 StockQuotes = StockQuote
 
 
-class StockAggregate:
-    __slots__ = (
-        "ticker",
-        "volume",
-        "open",
-        "close",
-        "high",
-        "low",
-        "window_start",
-        "transactions",
-    )
-
-    def __init__(self, fields: list[str]) -> None:
-        if len(fields) != 8:
-            raise ValueError(f"StockAggregate expected 8 fields, received {len(fields)}")
-        self.ticker = fields[0]
-        self.volume = _parse_int(fields[1])
-        self.open = _parse_float(fields[2])
-        self.close = _parse_float(fields[3])
-        self.high = _parse_float(fields[4])
-        self.low = _parse_float(fields[5])
-        self.window_start = _parse_int(fields[6])
-        self.transactions = _parse_int(fields[7])
-
-    def __iter__(self) -> Iterator[object]:
-        yield self.ticker
-        yield self.volume
-        yield self.open
-        yield self.close
-        yield self.high
-        yield self.low
-        yield self.window_start
-        yield self.transactions
-
-    def __eq__(self, other: object) -> bool:
-        if not isinstance(other, StockAggregate):
-            return NotImplemented
-        return tuple(self) == tuple(other)
-
-    def __lt__(self, other: object) -> bool:
-        if not isinstance(other, StockAggregate):
-            return NotImplemented
-        return self.window_start < other.window_start
-
-    def __le__(self, other: object) -> bool:
-        if not isinstance(other, StockAggregate):
-            return NotImplemented
-        return self.window_start <= other.window_start
-
-    def __gt__(self, other: object) -> bool:
-        if not isinstance(other, StockAggregate):
-            return NotImplemented
-        return self.window_start > other.window_start
-
-    def __ge__(self, other: object) -> bool:
-        if not isinstance(other, StockAggregate):
-            return NotImplemented
-        return self.window_start >= other.window_start
-
-    def __hash__(self) -> int:
-        return hash(tuple(self))
-
-    def __repr__(self) -> str:
-        return (
-            "StockAggregate("
-            f"ticker={self.ticker!r}, volume={self.volume}, open={self.open}, "
-            f"close={self.close}, high={self.high}, low={self.low}, "
-            f"window_start={self.window_start}, transactions={self.transactions})"
-        )
-
-    __str__ = __repr__
-
-
 class CurrencyQuote:
     __slots__ = (
         "ticker",
@@ -981,83 +908,6 @@ class IndexValue:
     __str__ = __repr__
 
 
-class CurrencyAggregate:
-    __slots__ = (
-        "ticker",
-        "volume",
-        "open",
-        "close",
-        "high",
-        "low",
-        "window_start",
-        "transactions",
-    )
-
-    def __init__(self, fields: list[str]) -> None:
-        if len(fields) != 8:
-            raise ValueError(f"CurrencyAggregate expected 8 fields, received {len(fields)}")
-        self.ticker = fields[0]
-        self.volume = _parse_int(fields[1])
-        self.open = _parse_float(fields[2])
-        self.close = _parse_float(fields[3])
-        self.high = _parse_float(fields[4])
-        self.low = _parse_float(fields[5])
-        self.window_start = _parse_int(fields[6])
-        self.transactions = _parse_int(fields[7])
-
-    def __iter__(self) -> Iterator[object]:
-        yield self.ticker
-        yield self.volume
-        yield self.open
-        yield self.close
-        yield self.high
-        yield self.low
-        yield self.window_start
-        yield self.transactions
-
-    @property
-    def tickers(self) -> tuple[str, str]:
-        return _intern_tickers(self.ticker)
-
-    def __eq__(self, other: object) -> bool:
-        if not isinstance(other, CurrencyAggregate):
-            return NotImplemented
-        return tuple(self) == tuple(other)
-
-    def __lt__(self, other: object) -> bool:
-        if not isinstance(other, CurrencyAggregate):
-            return NotImplemented
-        return self.window_start < other.window_start
-
-    def __le__(self, other: object) -> bool:
-        if not isinstance(other, CurrencyAggregate):
-            return NotImplemented
-        return self.window_start <= other.window_start
-
-    def __gt__(self, other: object) -> bool:
-        if not isinstance(other, CurrencyAggregate):
-            return NotImplemented
-        return self.window_start > other.window_start
-
-    def __ge__(self, other: object) -> bool:
-        if not isinstance(other, CurrencyAggregate):
-            return NotImplemented
-        return self.window_start >= other.window_start
-
-    def __hash__(self) -> int:
-        return hash(tuple(self))
-
-    def __repr__(self) -> str:
-        return (
-            "CurrencyAggregate("
-            f"ticker={self.ticker!r}, volume={self.volume}, open={self.open}, "
-            f"close={self.close}, high={self.high}, low={self.low}, "
-            f"window_start={self.window_start}, transactions={self.transactions})"
-        )
-
-    __str__ = __repr__
-
-
 class Parser:
     parser_group_name = ""
     asset_class_name = ""
@@ -1099,18 +949,6 @@ class FlatFileParser(Parser):
     @classmethod
     def parse_quotes(cls, payload: bytes | str) -> dict[str, object]:
         raise NotImplementedError("flatfile quote parsing must be implemented by a concrete parser")
-
-    @classmethod
-    def parse_minute_aggregates(cls, payload: bytes | str) -> dict[str, object]:
-        raise NotImplementedError(
-            "flatfile minute aggregate parsing must be implemented by a concrete parser"
-        )
-
-    @classmethod
-    def parse_daily_aggregates(cls, payload: bytes | str) -> dict[str, object]:
-        raise NotImplementedError(
-            "flatfile daily aggregate parsing must be implemented by a concrete parser"
-        )
 
     @classmethod
     def parse_trades(cls, payload: bytes | str) -> dict[str, object]:
@@ -1211,41 +1049,6 @@ class FlatFileStocksParser(FlatFileParser):
             rows.sort(key=lambda row: (row.sip_timestamp, row.ticker, row.participant_timestamp))
             yield from rows
 
-    @staticmethod
-    def _iter_aggregate_rows(
-        payload: str | Path,
-        row_type,
-        *,
-        sort_by_window_start: bool = False,
-    ):
-        with gzip.open(payload, "rt", encoding="utf-8", newline="") as handle:
-            reader = csv.reader(handle)
-            next(reader, None)
-            rows = [row_type(fields) for fields in reader if any(fields)]
-
-        if sort_by_window_start:
-            rows.sort(key=lambda row: (row.window_start, row.ticker))
-
-        yield from rows
-
-    @staticmethod
-    def _iter_raw_aggregate_rows(
-        payload: str | Path,
-        *,
-        window_start_index: int,
-        sort_by_window_start: bool = False,
-    ) -> Iterator[tuple[bytes, ...]]:
-        with gzip.open(payload, "rt", encoding="utf-8", newline="") as handle:
-            reader = csv.reader(handle)
-            next(reader, None)
-            rows = [tuple(fields) for fields in reader if any(fields)]
-
-        if sort_by_window_start:
-            rows.sort(key=lambda row: (_parse_int(row[window_start_index]), row[0]))
-
-        for row in rows:
-            yield tuple(field.encode("utf-8") for field in row)
-
     @classmethod
     def parse_quotes(
         cls,
@@ -1275,56 +1078,6 @@ class FlatFileStocksParser(FlatFileParser):
             sip_timestamp_index=11,
             sort_by_participant_timestamp=sort_by_participant_timestamp,
             sort_by_sip_timestamp=sort_by_sip_timestamp,
-        )
-
-    @classmethod
-    def parse_minute_aggregates(
-        cls,
-        payload: str | Path,
-        *,
-        sort_by_window_start: bool = False,
-    ) -> Iterator[StockAggregate]:
-        yield from cls._iter_aggregate_rows(
-            payload,
-            StockAggregate,
-            sort_by_window_start=sort_by_window_start,
-        )
-
-    @classmethod
-    def parse_daily_aggregates(
-        cls,
-        payload: str | Path,
-        *,
-        sort_by_window_start: bool = False,
-    ) -> Iterator[StockAggregate]:
-        yield from cls.parse_minute_aggregates(
-            payload,
-            sort_by_window_start=sort_by_window_start,
-        )
-
-    @classmethod
-    def parse_raw_minute_aggregates(
-        cls,
-        payload: str | Path,
-        *,
-        sort_by_window_start: bool = False,
-    ) -> Iterator[tuple[bytes, ...]]:
-        yield from cls._iter_raw_aggregate_rows(
-            payload,
-            window_start_index=6,
-            sort_by_window_start=sort_by_window_start,
-        )
-
-    @classmethod
-    def parse_raw_daily_aggregates(
-        cls,
-        payload: str | Path,
-        *,
-        sort_by_window_start: bool = False,
-    ) -> Iterator[tuple[bytes, ...]]:
-        yield from cls.parse_raw_minute_aggregates(
-            payload,
-            sort_by_window_start=sort_by_window_start,
         )
 
     @classmethod
@@ -1634,56 +1387,6 @@ class FlatFileCurrenciesParser(FlatFileParser):
         )
 
     @classmethod
-    def parse_minute_aggregates(
-        cls,
-        payload: str | Path,
-        *,
-        sort_by_window_start: bool = False,
-    ) -> Iterator[CurrencyAggregate]:
-        yield from cls._iter_rows(
-            payload,
-            CurrencyAggregate,
-            sort_by_window_start=sort_by_window_start,
-        )
-
-    @classmethod
-    def parse_daily_aggregates(
-        cls,
-        payload: str | Path,
-        *,
-        sort_by_window_start: bool = False,
-    ) -> Iterator[CurrencyAggregate]:
-        yield from cls.parse_minute_aggregates(
-            payload,
-            sort_by_window_start=sort_by_window_start,
-        )
-
-    @classmethod
-    def parse_raw_minute_aggregates(
-        cls,
-        payload: str | Path,
-        *,
-        sort_by_window_start: bool = False,
-    ) -> Iterator[tuple[bytes, ...]]:
-        yield from cls._iter_raw_rows(
-            payload,
-            window_start_index=6,
-            sort_by_window_start=sort_by_window_start,
-        )
-
-    @classmethod
-    def parse_raw_daily_aggregates(
-        cls,
-        payload: str | Path,
-        *,
-        sort_by_window_start: bool = False,
-    ) -> Iterator[tuple[bytes, ...]]:
-        yield from cls.parse_raw_minute_aggregates(
-            payload,
-            sort_by_window_start=sort_by_window_start,
-        )
-
-    @classmethod
     def raw_lines(cls, payload: str | Path) -> Iterator[bytes]:
         with gzip.open(payload, "rb") as handle:
             next(handle, None)
@@ -1794,10 +1497,8 @@ FlatFiles.CryptoTrade = CryptoTrade
 FlatFiles.OptionTrade = OptionTrade
 FlatFiles.OptionQuote = OptionQuote
 FlatFiles.StockQuote = StockQuote
-FlatFiles.StockAggregate = StockAggregate
 FlatFiles.StockQuotes = StockQuote
 FlatFiles.CurrencyQuote = CurrencyQuote
-FlatFiles.CurrencyAggregate = CurrencyAggregate
 FlatFiles.IndexValue = IndexValue
 
 class StockTradeAggregation:
@@ -1810,6 +1511,18 @@ class StockQuoteAggregation:
 
 class CurrencyQuoteAggregation:
     __slots__ = ()
+
+
+class ValueAggregation:
+    __slots__ = ()
+
+
+CryptoTradeAggregation = StockTradeAggregation
+FuturesTradeAggregation = StockTradeAggregation
+OptionTradeAggregation = StockTradeAggregation
+FuturesQuoteAggregation = StockQuoteAggregation
+OptionQuoteAggregation = StockQuoteAggregation
+IndexValueAggregation = ValueAggregation
 
 
 class _NativeOnlyAggregator:
@@ -1828,6 +1541,30 @@ class StockQuoteAggregator(_NativeOnlyAggregator):
 class CurrencyQuoteAggregator(_NativeOnlyAggregator):
     pass
 
+
+class CryptoTradeAggregator(_NativeOnlyAggregator):
+    pass
+
+
+class IndexValueAggregator(_NativeOnlyAggregator):
+    pass
+
+
+class FuturesTradeAggregator(_NativeOnlyAggregator):
+    pass
+
+
+class FuturesQuoteAggregator(_NativeOnlyAggregator):
+    pass
+
+
+class OptionTradeAggregator(_NativeOnlyAggregator):
+    pass
+
+
+class OptionQuoteAggregator(_NativeOnlyAggregator):
+    pass
+
 FlatFiles.Stock.Trade = SimpleNamespace(
     parse=FlatFileStocksParser.parse_trades,
     parse_raw=FlatFileStocksParser.parse_raw_trades,
@@ -1840,47 +1577,52 @@ FlatFiles.Stock.Quote = SimpleNamespace(
     raw_lines=FlatFileStocksParser.raw_lines,
     Aggregator=StockQuoteAggregator,
 )
-FlatFiles.Stock.Aggregate = SimpleNamespace(
-    parse=FlatFileStocksParser.parse_minute_aggregates,
-    parse_raw=FlatFileStocksParser.parse_raw_minute_aggregates,
-    raw_lines=FlatFileStocksParser.raw_lines,
-)
-
 FlatFiles.currency.Quote = SimpleNamespace(
     parse=FlatFileCurrenciesParser.parse_quotes,
     parse_raw=FlatFileCurrenciesParser.parse_raw_quotes,
     raw_lines=FlatFileCurrenciesParser.raw_lines,
     Aggregator=CurrencyQuoteAggregator,
 )
-FlatFiles.currency.Aggregate = SimpleNamespace(
-    parse=FlatFileCurrenciesParser.parse_minute_aggregates,
-    parse_raw=FlatFileCurrenciesParser.parse_raw_minute_aggregates,
-    raw_lines=FlatFileCurrenciesParser.raw_lines,
-)
-
 FlatFiles.Crypto.Trade = SimpleNamespace(
     parse=FlatFileCryptoParser.parse_trades,
     parse_raw=FlatFileCryptoParser.parse_raw_trades,
     raw_lines=FlatFileCryptoParser.raw_lines,
+    Aggregator=CryptoTradeAggregator,
 )
 
 FlatFiles.Options.Trade = SimpleNamespace(
     parse=FlatFileOptionsParser.parse_trades,
     parse_raw=FlatFileOptionsParser.parse_raw_trades,
     raw_lines=FlatFileOptionsParser.raw_lines,
+    Aggregator=OptionTradeAggregator,
 )
 
 FlatFiles.Options.Quote = SimpleNamespace(
     parse=FlatFileOptionsParser.parse_quotes,
     parse_raw=FlatFileOptionsParser.parse_raw_quotes,
     raw_lines=FlatFileOptionsParser.raw_lines,
+    Aggregator=OptionQuoteAggregator,
 )
 
 FlatFiles.Indices.Value = SimpleNamespace(
     parse=FlatFileIndicesParser.parse_values,
     parse_raw=FlatFileIndicesParser.parse_raw_values,
     raw_lines=FlatFileIndicesParser.raw_lines,
+    Aggregator=IndexValueAggregator,
 )
+
+FlatFiles.Futures.Trade = SimpleNamespace(Aggregator=FuturesTradeAggregator)
+FlatFiles.Futures.Quote = SimpleNamespace(Aggregator=FuturesQuoteAggregator)
+
+
+class FuturesTrade:
+    def __init__(self, *args, **kwargs):
+        raise RuntimeError("FuturesTrade requires the native massive_speedup extension")
+
+
+class FuturesQuote:
+    def __init__(self, *args, **kwargs):
+        raise RuntimeError("FuturesQuote requires the native massive_speedup extension")
 
 
 def build_database_file(*args, **kwargs):

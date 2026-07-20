@@ -77,11 +77,11 @@ trade2 = massive_speedup.StockTrade.from_packed(packed, trade.ticker)
 
 ## Window Aggregation
 
-The native aggregators consume iterables of parsed records and yield C++ result
-objects exposed through nanobind. Result attributes are read-only and lazily
-converted to Python objects on first access. The aggregation interval and offset
-are expressed in seconds; the returned `window_start` is still nanoseconds since
-epoch.
+The native aggregators consume records in timestamp order and yield one result at
+a time. Result attributes are read-only and lazily converted to Python objects.
+`interval_seconds` selects any positive whole-second interval. The optional
+`start_timestamp` both excludes earlier rows and anchors the window boundaries;
+`window_start` is always nanoseconds since the epoch.
 
 ```python
 import massive_speedup
@@ -111,7 +111,13 @@ Available aggregators:
 
 - `massive_speedup.StockTradeAggregator` / `FlatFiles.Stock.Trade.Aggregator`
 - `massive_speedup.StockQuoteAggregator` / `FlatFiles.Stock.Quote.Aggregator`
+- `massive_speedup.CryptoTradeAggregator` / `FlatFiles.Crypto.Trade.Aggregator`
 - `massive_speedup.CurrencyQuoteAggregator` / `FlatFiles.currency.Quote.Aggregator`
+- `massive_speedup.IndexValueAggregator` / `FlatFiles.Indices.Value.Aggregator`
+- `massive_speedup.FuturesTradeAggregator` / `FlatFiles.Futures.Trade.Aggregator`
+- `massive_speedup.FuturesQuoteAggregator` / `FlatFiles.Futures.Quote.Aggregator`
+- `massive_speedup.OptionTradeAggregator` / `FlatFiles.Options.Trade.Aggregator`
+- `massive_speedup.OptionQuoteAggregator` / `FlatFiles.Options.Quote.Aggregator`
 
 Stock trades aggregate `price` and use `size` for `volume` and
 `volume_weighted_avg`. Stock quotes aggregate ask and bid prices separately and
@@ -120,19 +126,31 @@ ask and bid prices separately and omit volume and volume-weighted averages
 because the source rows have no size field.
 
 ```python
+import datetime
+import massive_speedup
+
 quotes = massive_speedup.StockQuoteDatabase("2026-01-23", "A")
 
 for quote_bar in massive_speedup.StockQuoteAggregator(
     quotes,
     interval_seconds=1,
-    offset_seconds=0,
+    start_timestamp=datetime.time(9, 30),
 ):
     print(quote_bar.ask_open, quote_bar.ask_close, quote_bar.bid_avg)
 ```
 
+For a native daily database, `start_timestamp` may be a `datetime.time`; the
+database date supplies the date component. It may also be an absolute numeric
+nanosecond timestamp. Iterable inputs without a database date require the
+absolute numeric form. Futures time-of-day starts use the prior evening when the
+time falls in the evening portion of the session.
+
 Aggregators stream consecutive `(ticker, window_start)` groups. Use input ordered
 by ticker and timestamp, such as the native database iterators or default
 Massive/Polygon flat-file order. `stddev` is population standard deviation.
+Massive-provided minute and daily aggregate flatfiles are intentionally not
+parsed; bars are computed locally from the same row-at-a-time data used in live
+strategy execution.
 
 ## Build Database Files
 
@@ -157,11 +175,10 @@ record format change:
 massive-speedup-build-database --force 2026-01-23.csv.gz
 ```
 
-Date-level idempotency uses an `.incomplete` marker in
-`{database}/{type}/{YYYY-MM-DD}`. If the date directory exists without
-`.incomplete`, the input file is skipped. If the directory is new, `.incomplete`
-is created before processing and removed only after successful completion. Use
-`--force` to process a date even when `.incomplete` is absent.
+Each ticker is written to `{ticker}.incomplete` and atomically renamed to
+`{ticker}` only after the complete file has been flushed and closed. A failed
+build therefore cannot publish a partial database file; rerunning the builder
+can safely replace the leftover incomplete file.
 
 Use `--benchmark` to print throughput:
 
@@ -182,6 +199,34 @@ records = massive_speedup.StockTradeDatabase(
 for trade in records:
     print(trade.sip_timestamp, trade.price)
 ```
+
+Use `MultiDayDatabase` when a strategy should see date-partitioned files as one
+row sequence. It discovers available days, opens daily mmap files on demand,
+and keeps only the most recently used `max_open_days` files open:
+
+```python
+import datetime
+import massive_speedup
+
+with massive_speedup.MultiDayDatabase(
+    "stock_trade",
+    "AAPL",
+    start_date="2026-01-20",
+    end_date="2026-01-23",
+    max_open_days=2,
+) as trades:
+    for trade in trades:
+        consume(trade)
+
+    next_trade = trades.find_after_timestamp(
+        datetime.datetime(2026, 1, 22, 15, 0, tzinfo=datetime.UTC)
+    )
+```
+
+The same wrapper supports stock, crypto, currency, index, futures, and option
+record databases. `locate_before_timestamp` and `locate_after_timestamp` also
+return the daily database date and local row index for reusable galloping-search
+hints.
 
 Merge stock trades and quotes for one date and ticker in SIP timestamp order:
 

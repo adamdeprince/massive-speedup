@@ -9,7 +9,7 @@ def _install_stock_api(module: ModuleType) -> None:
         return
 
     stock = module.FlatFiles.Stock
-    if hasattr(stock, "Trade") and hasattr(stock, "Quote") and hasattr(stock, "Aggregate"):
+    if hasattr(stock, "Trade") and hasattr(stock, "Quote"):
         module._massive_speedup_stock_api_installed = True
         return
 
@@ -79,28 +79,8 @@ def _install_stock_api(module: ModuleType) -> None:
         def raw_lines(cls, path):
             return stock.raw_lines(path)
 
-    class Aggregate:
-        @classmethod
-        def parse(cls, path, *, sort_by_window_start: bool = False):
-            return stock.parse_minute_aggregates(
-                path,
-                sort_by_window_start=sort_by_window_start,
-            )
-
-        @classmethod
-        def parse_raw(cls, path, *, sort_by_window_start: bool = False):
-            return stock.parse_raw_minute_aggregates(
-                path,
-                sort_by_window_start=sort_by_window_start,
-            )
-
-        @classmethod
-        def raw_lines(cls, path):
-            return stock.raw_lines(path)
-
     stock.Trade = Trade
     stock.Quote = Quote
-    stock.Aggregate = Aggregate
     module._massive_speedup_stock_api_installed = True
 
 
@@ -149,28 +129,6 @@ def _install_currency_api(module: ModuleType) -> None:
 
         currency.Quote = Quote
 
-    if not hasattr(currency, "Aggregate"):
-        class Aggregate:
-            @classmethod
-            def parse(cls, path, *, sort_by_window_start: bool = False):
-                return currency.parse_minute_aggregates(
-                    path,
-                    sort_by_window_start=sort_by_window_start,
-                )
-
-            @classmethod
-            def parse_raw(cls, path, *, sort_by_window_start: bool = False):
-                return currency.parse_raw_minute_aggregates(
-                    path,
-                    sort_by_window_start=sort_by_window_start,
-                )
-
-            @classmethod
-            def raw_lines(cls, path):
-                return currency.raw_lines(path)
-
-        currency.Aggregate = Aggregate
-
     module._massive_speedup_currency_api_installed = True
 
 
@@ -199,8 +157,12 @@ __all__ = [
     "StockTrade",
     "StockTradeCondition",
     "CryptoTrade",
+    "CryptoTradeAggregation",
+    "CryptoTradeAggregator",
     "CryptoTradeDatabase",
     "IndexValue",
+    "IndexValueAggregation",
+    "IndexValueAggregator",
     "IndexValueDatabase",
     "DatabaseLocation",
     "MultiDayDatabase",
@@ -210,15 +172,22 @@ __all__ = [
     "OptionQuoteDatabase",
     "OptionMarket",
     "OptionMarketBroker",
+    "OptionTradeAggregation",
+    "OptionTradeAggregator",
+    "OptionQuoteAggregation",
+    "OptionQuoteAggregator",
     "StockQuote",
     "StockQuoteCondition",
-    "StockAggregate",
     "FuturesTrade",
     "FuturesQuote",
     "FuturesTradeDatabase",
     "FuturesQuoteDatabase",
     "FuturesMarket",
     "FuturesMarketBroker",
+    "FuturesTradeAggregation",
+    "FuturesTradeAggregator",
+    "FuturesQuoteAggregation",
+    "FuturesQuoteAggregator",
     "StockTradeAggregation",
     "StockQuoteAggregation",
     "StockTradeAggregator",
@@ -230,10 +199,10 @@ __all__ = [
     "SimpleMarketBroker",
     "StockQuotes",
     "CurrencyQuote",
-    "CurrencyAggregate",
     "CurrencyQuoteAggregation",
     "CurrencyQuoteAggregator",
     "CurrencyQuoteDatabase",
+    "ValueAggregation",
     "WebSocket",
     "gzip_lines",
     "read_gzip_lines",

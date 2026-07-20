@@ -246,6 +246,85 @@ Quote rows yield `(None, current_quote)`. Trade rows yield
 appeared. When a trade and quote have the same SIP timestamp, the quote is
 yielded first.
 
+## Real-Time WebSocket Messages
+
+The native WebSocket parser consumes one Massive message frame as `str` or
+`bytes`. A frame may contain one JSON object or an array of objects:
+
+```python
+message = massive_speedup.WebSocket.Stocks.parse(frame)
+
+for event in message:
+    if isinstance(event, massive_speedup.WebSocket.Stocks.Trade):
+        print(event.ticker, event.sip_timestamp, event.price, event.size)
+    elif isinstance(event, massive_speedup.WebSocket.Stocks.Quote):
+        print(event.ticker, event.bid_price, event.ask_price)
+```
+
+`WebSocketMessage` owns one padded input buffer shared by every event in the
+frame. The event type is classified up front; other fields are extracted with
+simdjson only when their read-only property or mapping key is first requested,
+then cached. `cached_fields`, `cached_properties`, `is_cached(name)`, and
+`is_property_cached(name)` make that behavior observable. Raw protocol fields
+remain available through `event["field"]`, `event.get(...)`, and
+`event.raw_json`.
+
+Typed events use the same property names and nanosecond timestamp units as the
+database rows:
+
+- `WebSocket.Stocks.Trade` and `.Quote`
+- `WebSocket.Options.Trade` and `.Quote`
+- `WebSocket.Futures.Trade` and `.Quote`
+- `WebSocket.Crypto.Trade` and `.Quote`
+- `WebSocket.Forex.Quote`
+- `WebSocket.Indices.Value`
+- `WebSocket.Stocks.LimitUpLimitDown` and `.NetOrderImbalance`
+- `WebSocket.{Stocks,Options,Crypto,Forex}.FairMarketValue`
+- `WebSocket.Status`
+
+Other control messages and Massive-provided aggregate events remain lossless
+generic `WebSocketEvent` objects. Vendor aggregates are intentionally not
+exposed as typed rows; use the database row aggregators for custom window sizes
+and anchors. Massive's FMV and LULD documentation contains timestamp-unit
+contradictions between its field descriptions and examples, so those typed
+events accept either millisecond or nanosecond epoch values and expose
+normalized nanoseconds.
+
+No network client is included yet. A synchronous iterable of frames can be
+adapted to the same row-at-a-time 7-tuple used by the database markets:
+
+```python
+class LiveExecution:
+    def buy(self, quantity, symbol=None):
+        send_order("buy", quantity, symbol)
+
+    def sell(self, quantity, symbol=None):
+        send_order("sell", quantity, symbol)
+
+
+execution = LiveExecution()
+market = massive_speedup.WebSocket.Stocks.market(
+    websocket_frames,
+    execution,
+    quotes=True,
+)
+
+for symbol, timestamp, trade, quote, trades, quotes, broker in market:
+    if trade is not None and should_buy(trade, quotes.get(symbol)):
+        broker.buy(100, symbol)
+```
+
+The seventh value is the exact object supplied as `broker`; construction only
+checks that its `buy` and `sell` attributes are callable. The library does not
+invoke it, infer fills, track inventory, or expose a session summary. Quote
+events always update the latest-quote dictionary and are emitted only with
+`quotes=True`. As with database markets, `fast=True` reuses the two state dicts.
+Option keys are `(root, expiration, right, strike)` tuples. Index values occupy
+the data/trade slot, while Forex events occupy the quote slot and therefore
+require `quotes=True` to be emitted. Status, FMV, LULD, imbalance, control, and
+aggregate events have no database-market tuple slot and are skipped by
+`market(...)`; they remain available when iterating parsed messages directly.
+
 ## Simple Market Simulation
 
 `SimpleMarket` opens stock trade and quote database files for a date and a

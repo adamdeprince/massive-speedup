@@ -27,6 +27,7 @@ namespace websocket_detail {
 
 class MessageState;
 class EventState;
+class MarketState;
 
 }  // namespace websocket_detail
 
@@ -50,6 +51,8 @@ class WebSocketEvent {
   nb::tuple cached_properties() const;
   nb::bytes raw_json() const;
   nb::bytes message_bytes() const;
+  std::string asset_class() const;
+  WebSocketAsset asset() const noexcept;
   std::string repr() const;
 
  protected:
@@ -70,6 +73,41 @@ class WebSocketStatus final : public WebSocketEvent {
   using WebSocketEvent::WebSocketEvent;
   MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(status);
   MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(message);
+};
+
+class WebSocketFairMarketValue final : public WebSocketEvent {
+ public:
+  using WebSocketEvent::WebSocketEvent;
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(ticker);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(value);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(fair_market_value);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(timestamp);
+};
+
+class WebSocketStockLimitUpLimitDown final : public WebSocketEvent {
+ public:
+  using WebSocketEvent::WebSocketEvent;
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(ticker);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(high_price);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(low_price);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(indicators);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(tape);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(timestamp);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(sequence_number);
+};
+
+class WebSocketStockImbalance final : public WebSocketEvent {
+ public:
+  using WebSocketEvent::WebSocketEvent;
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(ticker);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(timestamp);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(auction_time);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(auction_type);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(sequence_number);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(exchange);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(imbalance_quantity);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(paired_quantity);
+  MASSIVE_SPEEDUP_DECLARE_WS_PROPERTY(book_clearing_price);
 };
 
 class WebSocketStockTrade final : public WebSocketEvent {
@@ -249,11 +287,37 @@ class WebSocketMessage {
   nb::tuple events() const;
   nb::bytes raw_json() const;
   std::string asset_class() const;
+  WebSocketAsset asset() const noexcept;
   std::string repr() const;
 
  private:
   std::shared_ptr<websocket_detail::MessageState> state_;
   nb::tuple events_;
+};
+
+class WebSocketMarket {
+ public:
+  WebSocketMarket(
+      nb::handle messages,
+      nb::handle broker,
+      WebSocketAsset asset,
+      bool quotes,
+      bool fast);
+  WebSocketMarket(const WebSocketMarket& other);
+  WebSocketMarket(WebSocketMarket&& other) noexcept;
+  WebSocketMarket& operator=(const WebSocketMarket& other);
+  WebSocketMarket& operator=(WebSocketMarket&& other) noexcept;
+  ~WebSocketMarket();
+
+  WebSocketMarket& iter();
+  nb::tuple next();
+  nb::object broker() const;
+  bool quotes() const noexcept;
+  bool fast() const noexcept;
+  std::string asset_class() const;
+
+ private:
+  std::shared_ptr<websocket_detail::MarketState> state_;
 };
 
 WebSocketMessage parse_websocket_message(

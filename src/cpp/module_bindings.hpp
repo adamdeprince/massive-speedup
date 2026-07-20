@@ -2621,6 +2621,24 @@ void bind_websocket_asset(
           "summarize_message",
           &parse_message_static<ImplAsset>,
           nb::arg("payload"))
+      .def_static(
+          "market",
+          [asset](nb::handle messages,
+                  nb::handle broker,
+                  bool quotes,
+                  bool fast) {
+            return native::WebSocketMarket(
+                messages,
+                broker,
+                asset,
+                quotes,
+                fast);
+          },
+          nb::arg("messages"),
+          nb::arg("broker"),
+          nb::kw_only(),
+          nb::arg("quotes") = false,
+          nb::arg("fast") = false)
       .def_static("serialize", &serialize_static<ImplAsset>)
       .def_static("processor_name", &processor_name_static<ImplAsset>);
 }
@@ -2652,6 +2670,7 @@ inline void bind_websocket_models(nb::module_& m) {
           &native::WebSocketEvent::cached_properties)
       .def_prop_ro("raw_json", &native::WebSocketEvent::raw_json)
       .def_prop_ro("message_bytes", &native::WebSocketEvent::message_bytes)
+      .def_prop_ro("asset_class", &native::WebSocketEvent::asset_class)
       .def("__repr__", &native::WebSocketEvent::repr);
 
 #define MASSIVE_SPEEDUP_BIND_WS_PROPERTY(binding_, type_, property_) \
@@ -2662,6 +2681,64 @@ inline void bind_websocket_models(nb::module_& m) {
       "WebSocketStatus");
   MASSIVE_SPEEDUP_BIND_WS_PROPERTY(status, native::WebSocketStatus, status);
   MASSIVE_SPEEDUP_BIND_WS_PROPERTY(status, native::WebSocketStatus, message);
+
+  auto fair_market_value =
+      nb::class_<native::WebSocketFairMarketValue, native::WebSocketEvent>(
+          m,
+          "WebSocketFairMarketValue");
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      fair_market_value, native::WebSocketFairMarketValue, ticker);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      fair_market_value, native::WebSocketFairMarketValue, value);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      fair_market_value,
+      native::WebSocketFairMarketValue,
+      fair_market_value);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      fair_market_value, native::WebSocketFairMarketValue, timestamp);
+
+  auto stock_luld = nb::class_<
+      native::WebSocketStockLimitUpLimitDown,
+      native::WebSocketEvent>(m, "WebSocketStockLimitUpLimitDown");
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_luld, native::WebSocketStockLimitUpLimitDown, ticker);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_luld, native::WebSocketStockLimitUpLimitDown, high_price);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_luld, native::WebSocketStockLimitUpLimitDown, low_price);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_luld, native::WebSocketStockLimitUpLimitDown, indicators);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_luld, native::WebSocketStockLimitUpLimitDown, tape);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_luld, native::WebSocketStockLimitUpLimitDown, timestamp);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_luld, native::WebSocketStockLimitUpLimitDown, sequence_number);
+
+  auto stock_imbalance =
+      nb::class_<native::WebSocketStockImbalance, native::WebSocketEvent>(
+          m,
+          "WebSocketStockImbalance");
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_imbalance, native::WebSocketStockImbalance, ticker);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_imbalance, native::WebSocketStockImbalance, timestamp);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_imbalance, native::WebSocketStockImbalance, auction_time);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_imbalance, native::WebSocketStockImbalance, auction_type);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_imbalance, native::WebSocketStockImbalance, sequence_number);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_imbalance, native::WebSocketStockImbalance, exchange);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_imbalance, native::WebSocketStockImbalance, imbalance_quantity);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_imbalance, native::WebSocketStockImbalance, paired_quantity);
+  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
+      stock_imbalance,
+      native::WebSocketStockImbalance,
+      book_clearing_price);
 
   auto stock_trade =
       nb::class_<native::WebSocketStockTrade, native::WebSocketEvent>(
@@ -2934,6 +3011,19 @@ inline void bind_websocket_models(nb::module_& m) {
       .def_prop_ro("raw_json", &native::WebSocketMessage::raw_json)
       .def_prop_ro("asset_class", &native::WebSocketMessage::asset_class)
       .def("__repr__", &native::WebSocketMessage::repr);
+
+  nb::class_<native::WebSocketMarket>(m, "WebSocketMarket")
+      .def(
+          "__iter__",
+          [](native::WebSocketMarket& self) -> native::WebSocketMarket& {
+            return self.iter();
+          },
+          nb::rv_policy::reference_internal)
+      .def("__next__", &native::WebSocketMarket::next)
+      .def_prop_ro("broker", &native::WebSocketMarket::broker)
+      .def_prop_ro("quotes", &native::WebSocketMarket::quotes)
+      .def_prop_ro("fast", &native::WebSocketMarket::fast)
+      .def_prop_ro("asset_class", &native::WebSocketMarket::asset_class);
 }
 
 template <typename BaseAsset, typename ImplAsset>
@@ -3330,15 +3420,32 @@ void bind_native_module(nb::module_& m, const char* alias_prefix) {
       native::WebSocketAsset::Crypto);
 
   websocket.attr("Status") = m.attr("WebSocketStatus");
+  websocket.attr("Market") = m.attr("WebSocketMarket");
+  websocket.attr("Stocks").attr("FairMarketValue") =
+      m.attr("WebSocketFairMarketValue");
+  websocket.attr("Stocks").attr("LimitUpLimitDown") =
+      m.attr("WebSocketStockLimitUpLimitDown");
+  websocket.attr("Stocks").attr("LULD") =
+      m.attr("WebSocketStockLimitUpLimitDown");
+  websocket.attr("Stocks").attr("NetOrderImbalance") =
+      m.attr("WebSocketStockImbalance");
+  websocket.attr("Stocks").attr("Imbalance") =
+      m.attr("WebSocketStockImbalance");
   websocket.attr("Stocks").attr("Trade") = m.attr("WebSocketStockTrade");
   websocket.attr("Stocks").attr("Quote") = m.attr("WebSocketStockQuote");
   websocket.attr("Options").attr("Trade") = m.attr("WebSocketOptionTrade");
   websocket.attr("Options").attr("Quote") = m.attr("WebSocketOptionQuote");
+  websocket.attr("Options").attr("FairMarketValue") =
+      m.attr("WebSocketFairMarketValue");
   websocket.attr("Futures").attr("Trade") = m.attr("WebSocketFuturesTrade");
   websocket.attr("Futures").attr("Quote") = m.attr("WebSocketFuturesQuote");
   websocket.attr("Crypto").attr("Trade") = m.attr("WebSocketCryptoTrade");
   websocket.attr("Crypto").attr("Quote") = m.attr("WebSocketCryptoQuote");
+  websocket.attr("Crypto").attr("FairMarketValue") =
+      m.attr("WebSocketFairMarketValue");
   websocket.attr("Forex").attr("Quote") = m.attr("WebSocketCurrencyQuote");
+  websocket.attr("Forex").attr("FairMarketValue") =
+      m.attr("WebSocketFairMarketValue");
   websocket.attr("Indices").attr("Value") = m.attr("WebSocketIndexValue");
 
   bind_row_models<typename Impl<FlatFileStocksParser>::specialization_type>(m, flatfiles);

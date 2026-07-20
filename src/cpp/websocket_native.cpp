@@ -114,6 +114,8 @@ class EventState {
 
   std::string_view message_view() const noexcept { return message_->bytes(); }
 
+  WebSocketAsset asset() const noexcept { return message_->asset(); }
+
   nb::object required_field(std::string_view key) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     auto value = field_locked(key);
@@ -530,6 +532,14 @@ nb::bytes WebSocketEvent::message_bytes() const {
   return nb::bytes(raw.data(), raw.size());
 }
 
+std::string WebSocketEvent::asset_class() const {
+  return websocket_asset_name(state_->asset());
+}
+
+WebSocketAsset WebSocketEvent::asset() const noexcept {
+  return state_->asset();
+}
+
 std::string WebSocketEvent::repr() const {
   std::ostringstream output;
   output << "WebSocketEvent(ev='" << state_->event_type() << "')";
@@ -650,6 +660,18 @@ nb::object wire_timestamp_object(
   return nb::int_(milliseconds_to_nanoseconds(
       python_unsigned(event.get_item(key), key),
       key));
+}
+
+nb::object mixed_wire_timestamp_object(
+    const WebSocketEvent& event,
+    std::string_view key) {
+  const std::uint64_t raw = python_unsigned(event.get_item(key), key);
+  constexpr std::uint64_t first_plausible_nanosecond_epoch =
+      1'000'000'000'000'000ULL;
+  if (raw < first_plausible_nanosecond_epoch) {
+    return nb::int_(milliseconds_to_nanoseconds(raw, key));
+  }
+  return nb::int_(raw);
 }
 
 nb::object optional_timestamp_object(
@@ -979,6 +1001,71 @@ nb::object WebSocketStatus::message_object() const {
     return value.is_none() ? nb::object(nb::str("")) : value;
   });
 }
+
+nb::object WebSocketFairMarketValue::ticker_object() const {
+  return cached_property("ticker", [this] {
+    std::string ticker = python_string(get_item("sym"), "sym");
+    if (asset() == WebSocketAsset::Forex && ticker.starts_with("C:") &&
+        ticker.find('-', 2) == std::string::npos && ticker.size() == 8) {
+      ticker.insert(5, 1, '-');
+    }
+    return nb::object(nb::str(ticker.data(), ticker.size()));
+  });
+}
+
+MASSIVE_SPEEDUP_WS_DOUBLE(WebSocketFairMarketValue, value, "fmv")
+MASSIVE_SPEEDUP_WS_DOUBLE(
+    WebSocketFairMarketValue,
+    fair_market_value,
+    "fmv")
+
+nb::object WebSocketFairMarketValue::timestamp_object() const {
+  return cached_property("timestamp", [this] {
+    return mixed_wire_timestamp_object(*this, "t");
+  });
+}
+
+MASSIVE_SPEEDUP_WS_DIRECT(WebSocketStockLimitUpLimitDown, ticker, "T")
+MASSIVE_SPEEDUP_WS_DOUBLE(WebSocketStockLimitUpLimitDown, high_price, "h")
+MASSIVE_SPEEDUP_WS_DOUBLE(WebSocketStockLimitUpLimitDown, low_price, "l")
+
+nb::object WebSocketStockLimitUpLimitDown::indicators_object() const {
+  return cached_property("indicators", [this] {
+    return frozenset_object(get("i", nb::none()));
+  });
+}
+
+MASSIVE_SPEEDUP_WS_UINT(WebSocketStockLimitUpLimitDown, tape, "z")
+
+nb::object WebSocketStockLimitUpLimitDown::timestamp_object() const {
+  return cached_property("timestamp", [this] {
+    return mixed_wire_timestamp_object(*this, "t");
+  });
+}
+
+MASSIVE_SPEEDUP_WS_UINT(
+    WebSocketStockLimitUpLimitDown,
+    sequence_number,
+    "q")
+
+MASSIVE_SPEEDUP_WS_DIRECT(WebSocketStockImbalance, ticker, "T")
+
+nb::object WebSocketStockImbalance::timestamp_object() const {
+  return cached_property("timestamp", [this] {
+    return mixed_wire_timestamp_object(*this, "t");
+  });
+}
+
+MASSIVE_SPEEDUP_WS_UINT(WebSocketStockImbalance, auction_time, "at")
+MASSIVE_SPEEDUP_WS_DIRECT(WebSocketStockImbalance, auction_type, "a")
+MASSIVE_SPEEDUP_WS_UINT(WebSocketStockImbalance, sequence_number, "i")
+MASSIVE_SPEEDUP_WS_UINT(WebSocketStockImbalance, exchange, "x")
+MASSIVE_SPEEDUP_WS_UINT(WebSocketStockImbalance, imbalance_quantity, "o")
+MASSIVE_SPEEDUP_WS_UINT(WebSocketStockImbalance, paired_quantity, "p")
+MASSIVE_SPEEDUP_WS_DOUBLE(
+    WebSocketStockImbalance,
+    book_clearing_price,
+    "b")
 
 MASSIVE_SPEEDUP_WS_DIRECT(WebSocketStockTrade, ticker, "sym")
 
@@ -1366,6 +1453,10 @@ std::string WebSocketMessage::asset_class() const {
   return websocket_asset_name(state_->asset());
 }
 
+WebSocketAsset WebSocketMessage::asset() const noexcept {
+  return state_->asset();
+}
+
 std::string WebSocketMessage::repr() const {
   std::ostringstream output;
   output << "WebSocketMessage(asset_class='" << asset_class()
@@ -1375,12 +1466,227 @@ std::string WebSocketMessage::repr() const {
 
 namespace {
 
+enum class WebSocketMarketRowKind : std::uint8_t {
+  Trade,
+  Quote,
+};
+
+struct WebSocketMarketRow {
+  WebSocketMarketRowKind kind;
+  nb::object key;
+  std::uint64_t timestamp_ns;
+};
+
+void require_market_endpoint(nb::handle broker, const char* endpoint) {
+  PyObject* value_pointer = PyObject_GetAttrString(broker.ptr(), endpoint);
+  if (value_pointer == nullptr) {
+    PyErr_Clear();
+    PyErr_Format(
+        PyExc_TypeError,
+        "websocket market broker must provide a callable '%s' endpoint",
+        endpoint);
+    throw nb::python_error();
+  }
+  nb::object value = nb::steal<nb::object>(value_pointer);
+  if (!PyCallable_Check(value.ptr())) {
+    PyErr_Format(
+        PyExc_TypeError,
+        "websocket market broker attribute '%s' must be callable",
+        endpoint);
+    throw nb::python_error();
+  }
+}
+
+nb::object market_source_iterator(nb::handle source) {
+  bool single_item = PyBytes_Check(source.ptr()) || PyUnicode_Check(source.ptr());
+  if (!single_item) {
+    WebSocketMessage* message = nullptr;
+    WebSocketEvent* event = nullptr;
+    single_item = nb::try_cast(source, message, false) ||
+        nb::try_cast(source, event, false);
+  }
+
+  if (single_item) {
+    PyObject* singleton_pointer = PyTuple_Pack(1, source.ptr());
+    if (singleton_pointer == nullptr) {
+      throw nb::python_error();
+    }
+    nb::object singleton = nb::steal<nb::object>(singleton_pointer);
+    PyObject* iterator_pointer = PyObject_GetIter(singleton.ptr());
+    if (iterator_pointer == nullptr) {
+      throw nb::python_error();
+    }
+    return nb::steal<nb::object>(iterator_pointer);
+  }
+
+  PyObject* iterator_pointer = PyObject_GetIter(source.ptr());
+  if (iterator_pointer == nullptr) {
+    throw nb::python_error();
+  }
+  return nb::steal<nb::object>(iterator_pointer);
+}
+
+nb::tuple option_contract_key(
+    const WebSocketOptionTrade& event) {
+  nb::tuple result = nb::steal<nb::tuple>(PyTuple_New(4));
+  if (!result.is_valid()) {
+    throw nb::python_error();
+  }
+  PyTuple_SET_ITEM(result.ptr(), 0, event.root_object().release().ptr());
+  PyTuple_SET_ITEM(result.ptr(), 1, event.expiration_object().release().ptr());
+  PyTuple_SET_ITEM(result.ptr(), 2, event.right_object().release().ptr());
+  PyTuple_SET_ITEM(result.ptr(), 3, event.strike_object().release().ptr());
+  return result;
+}
+
+nb::tuple option_contract_key(
+    const WebSocketOptionQuote& event) {
+  nb::tuple result = nb::steal<nb::tuple>(PyTuple_New(4));
+  if (!result.is_valid()) {
+    throw nb::python_error();
+  }
+  PyTuple_SET_ITEM(result.ptr(), 0, event.root_object().release().ptr());
+  PyTuple_SET_ITEM(result.ptr(), 1, event.expiration_object().release().ptr());
+  PyTuple_SET_ITEM(result.ptr(), 2, event.right_object().release().ptr());
+  PyTuple_SET_ITEM(result.ptr(), 3, event.strike_object().release().ptr());
+  return result;
+}
+
+std::optional<WebSocketMarketRow> market_row(
+    WebSocketAsset asset,
+    const WebSocketEvent& event) {
+  if (dynamic_cast<const WebSocketStatus*>(&event) != nullptr) {
+    return std::nullopt;
+  }
+  if (event.asset() != asset) {
+    std::ostringstream message;
+    message << "cannot feed a " << event.asset_class()
+            << " event into a " << websocket_asset_name(asset)
+            << " websocket market";
+    throw std::invalid_argument(message.str());
+  }
+
+  switch (asset) {
+    case WebSocketAsset::Stocks:
+      if (const auto* trade =
+              dynamic_cast<const WebSocketStockTrade*>(&event)) {
+        return WebSocketMarketRow{
+            WebSocketMarketRowKind::Trade,
+            trade->ticker_object(),
+            python_unsigned(trade->sip_timestamp_object(), "sip_timestamp")};
+      }
+      if (const auto* quote =
+              dynamic_cast<const WebSocketStockQuote*>(&event)) {
+        return WebSocketMarketRow{
+            WebSocketMarketRowKind::Quote,
+            quote->ticker_object(),
+            python_unsigned(quote->sip_timestamp_object(), "sip_timestamp")};
+      }
+      break;
+    case WebSocketAsset::Options:
+      if (const auto* trade =
+              dynamic_cast<const WebSocketOptionTrade*>(&event)) {
+        return WebSocketMarketRow{
+            WebSocketMarketRowKind::Trade,
+            option_contract_key(*trade),
+            python_unsigned(trade->sip_timestamp_object(), "sip_timestamp")};
+      }
+      if (const auto* quote =
+              dynamic_cast<const WebSocketOptionQuote*>(&event)) {
+        return WebSocketMarketRow{
+            WebSocketMarketRowKind::Quote,
+            option_contract_key(*quote),
+            python_unsigned(quote->sip_timestamp_object(), "sip_timestamp")};
+      }
+      break;
+    case WebSocketAsset::Futures:
+      if (const auto* trade =
+              dynamic_cast<const WebSocketFuturesTrade*>(&event)) {
+        return WebSocketMarketRow{
+            WebSocketMarketRowKind::Trade,
+            trade->ticker_object(),
+            python_unsigned(trade->timestamp_object(), "timestamp")};
+      }
+      if (const auto* quote =
+              dynamic_cast<const WebSocketFuturesQuote*>(&event)) {
+        return WebSocketMarketRow{
+            WebSocketMarketRowKind::Quote,
+            quote->ticker_object(),
+            python_unsigned(quote->timestamp_object(), "timestamp")};
+      }
+      break;
+    case WebSocketAsset::Indices:
+      if (const auto* value =
+              dynamic_cast<const WebSocketIndexValue*>(&event)) {
+        return WebSocketMarketRow{
+            WebSocketMarketRowKind::Trade,
+            value->ticker_object(),
+            python_unsigned(value->timestamp_object(), "timestamp")};
+      }
+      break;
+    case WebSocketAsset::Forex:
+      if (const auto* quote =
+              dynamic_cast<const WebSocketCurrencyQuote*>(&event)) {
+        return WebSocketMarketRow{
+            WebSocketMarketRowKind::Quote,
+            quote->ticker_object(),
+            python_unsigned(
+                quote->participant_timestamp_object(),
+                "participant_timestamp")};
+      }
+      break;
+    case WebSocketAsset::Crypto:
+      if (const auto* trade =
+              dynamic_cast<const WebSocketCryptoTrade*>(&event)) {
+        return WebSocketMarketRow{
+            WebSocketMarketRowKind::Trade,
+            trade->ticker_object(),
+            python_unsigned(
+                trade->participant_timestamp_object(),
+                "participant_timestamp")};
+      }
+      if (const auto* quote =
+              dynamic_cast<const WebSocketCryptoQuote*>(&event)) {
+        return WebSocketMarketRow{
+            WebSocketMarketRowKind::Quote,
+            quote->ticker_object(),
+            python_unsigned(
+                quote->participant_timestamp_object(),
+                "participant_timestamp")};
+      }
+      break;
+    case WebSocketAsset::Messages:
+      break;
+  }
+  return std::nullopt;
+}
+
+nb::object market_dictionary(
+    const nb::dict& source,
+    bool fast) {
+  if (fast) {
+    return nb::object(source);
+  }
+  PyObject* copy_pointer = PyDict_Copy(source.ptr());
+  if (copy_pointer == nullptr) {
+    throw nb::python_error();
+  }
+  return nb::steal<nb::object>(copy_pointer);
+}
+
 nb::object typed_event_object(
     WebSocketAsset asset,
     std::string_view event_type,
     std::shared_ptr<websocket_detail::EventState> state) {
   if (event_type == "status") {
     return nb::cast(WebSocketStatus(std::move(state)));
+  }
+  if (event_type == "FMV" &&
+      (asset == WebSocketAsset::Stocks ||
+       asset == WebSocketAsset::Options ||
+       asset == WebSocketAsset::Forex ||
+       asset == WebSocketAsset::Crypto)) {
+    return nb::cast(WebSocketFairMarketValue(std::move(state)));
   }
 
   switch (asset) {
@@ -1390,6 +1696,12 @@ nb::object typed_event_object(
       }
       if (event_type == "Q") {
         return nb::cast(WebSocketStockQuote(std::move(state)));
+      }
+      if (event_type == "LULD") {
+        return nb::cast(WebSocketStockLimitUpLimitDown(std::move(state)));
+      }
+      if (event_type == "NOI") {
+        return nb::cast(WebSocketStockImbalance(std::move(state)));
       }
       break;
     case WebSocketAsset::Options:
@@ -1433,6 +1745,189 @@ nb::object typed_event_object(
 }
 
 }  // namespace
+
+namespace websocket_detail {
+
+class MarketState {
+ public:
+  MarketState(
+      nb::handle messages,
+      nb::handle broker,
+      WebSocketAsset asset,
+      bool emit_quotes,
+      bool fast)
+      : source_iterator_(market_source_iterator(messages)),
+        broker_(nb::borrow<nb::object>(broker)),
+        asset_(asset),
+        emit_quotes_(emit_quotes),
+        fast_(fast) {
+    require_market_endpoint(broker_, "buy");
+    require_market_endpoint(broker_, "sell");
+  }
+
+  nb::object next_event() {
+    while (true) {
+      if (pending_events_.is_valid() &&
+          pending_index_ < PyTuple_GET_SIZE(pending_events_.ptr())) {
+        PyObject* event_pointer =
+            PyTuple_GET_ITEM(pending_events_.ptr(), pending_index_++);
+        return nb::borrow<nb::object>(event_pointer);
+      }
+
+      pending_events_.reset();
+      pending_index_ = 0;
+      PyObject* item_pointer = PyIter_Next(source_iterator_.ptr());
+      if (item_pointer == nullptr) {
+        if (PyErr_Occurred()) {
+          throw nb::python_error();
+        }
+        throw nb::stop_iteration();
+      }
+      nb::object item = nb::steal<nb::object>(item_pointer);
+
+      if (PyBytes_Check(item.ptr()) || PyUnicode_Check(item.ptr())) {
+        WebSocketMessage message = parse_websocket_message(item, asset_);
+        pending_events_ = message.events();
+        continue;
+      }
+
+      WebSocketMessage* message = nullptr;
+      if (nb::try_cast(item, message, false)) {
+        if (message->asset() != asset_) {
+          std::ostringstream error;
+          error << "cannot feed a " << message->asset_class()
+                << " message into a " << websocket_asset_name(asset_)
+                << " websocket market";
+          throw std::invalid_argument(error.str());
+        }
+        pending_events_ = message->events();
+        continue;
+      }
+
+      WebSocketEvent* event = nullptr;
+      if (nb::try_cast(item, event, false)) {
+        return item;
+      }
+
+      PyErr_SetString(
+          PyExc_TypeError,
+          "websocket market input must yield str, bytes, WebSocketMessage, "
+          "or WebSocketEvent objects");
+      throw nb::python_error();
+    }
+  }
+
+  nb::object source_iterator_;
+  nb::object broker_;
+  WebSocketAsset asset_;
+  bool emit_quotes_ = false;
+  bool fast_ = false;
+  nb::tuple pending_events_;
+  Py_ssize_t pending_index_ = 0;
+  nb::dict last_trades_by_key_;
+  nb::dict last_quotes_by_key_;
+};
+
+}  // namespace websocket_detail
+
+WebSocketMarket::WebSocketMarket(
+    nb::handle messages,
+    nb::handle broker,
+    WebSocketAsset asset,
+    bool quotes,
+    bool fast)
+    : state_(std::make_shared<websocket_detail::MarketState>(
+          messages,
+          broker,
+          asset,
+          quotes,
+          fast)) {}
+
+WebSocketMarket::WebSocketMarket(const WebSocketMarket& other) = default;
+WebSocketMarket::WebSocketMarket(WebSocketMarket&& other) noexcept = default;
+WebSocketMarket& WebSocketMarket::operator=(const WebSocketMarket& other) = default;
+WebSocketMarket& WebSocketMarket::operator=(WebSocketMarket&& other) noexcept = default;
+WebSocketMarket::~WebSocketMarket() = default;
+
+WebSocketMarket& WebSocketMarket::iter() { return *this; }
+
+nb::tuple WebSocketMarket::next() {
+  while (true) {
+    nb::object event_object = state_->next_event();
+    WebSocketEvent* event = nullptr;
+    if (!nb::try_cast(event_object, event, false) || event == nullptr) {
+      throw std::logic_error("websocket market received an invalid event object");
+    }
+    std::optional<WebSocketMarketRow> row = market_row(state_->asset_, *event);
+    if (!row.has_value()) {
+      continue;
+    }
+
+    const bool is_quote = row->kind == WebSocketMarketRowKind::Quote;
+    if (is_quote) {
+      state_->last_quotes_by_key_[row->key] = event_object;
+      if (!state_->emit_quotes_) {
+        continue;
+      }
+    } else {
+      state_->last_trades_by_key_[row->key] = event_object;
+    }
+
+    nb::tuple result = nb::steal<nb::tuple>(PyTuple_New(7));
+    if (!result.is_valid()) {
+      throw nb::python_error();
+    }
+    PyTuple_SET_ITEM(result.ptr(), 0, nb::object(row->key).release().ptr());
+    PyTuple_SET_ITEM(
+        result.ptr(),
+        1,
+        nb::float_(static_cast<double>(row->timestamp_ns) / 1'000'000'000.0)
+            .release()
+            .ptr());
+    if (is_quote) {
+      Py_INCREF(Py_None);
+      PyTuple_SET_ITEM(result.ptr(), 2, Py_None);
+      PyTuple_SET_ITEM(result.ptr(), 3, nb::object(event_object).release().ptr());
+    } else {
+      PyTuple_SET_ITEM(result.ptr(), 2, nb::object(event_object).release().ptr());
+      Py_INCREF(Py_None);
+      PyTuple_SET_ITEM(result.ptr(), 3, Py_None);
+    }
+    PyTuple_SET_ITEM(
+        result.ptr(),
+        4,
+        market_dictionary(state_->last_trades_by_key_, state_->fast_)
+            .release()
+            .ptr());
+    PyTuple_SET_ITEM(
+        result.ptr(),
+        5,
+        market_dictionary(state_->last_quotes_by_key_, state_->fast_)
+            .release()
+            .ptr());
+    PyTuple_SET_ITEM(
+        result.ptr(),
+        6,
+        nb::object(state_->broker_).release().ptr());
+    return result;
+  }
+}
+
+nb::object WebSocketMarket::broker() const {
+  return state_->broker_;
+}
+
+bool WebSocketMarket::quotes() const noexcept {
+  return state_->emit_quotes_;
+}
+
+bool WebSocketMarket::fast() const noexcept {
+  return state_->fast_;
+}
+
+std::string WebSocketMarket::asset_class() const {
+  return websocket_asset_name(state_->asset_);
+}
 
 WebSocketMessage parse_websocket_message(
     nb::handle payload,

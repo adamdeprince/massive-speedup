@@ -4,11 +4,16 @@
 
 #include <Python.h>
 
+#include <ixwebsocket/IXNetSystem.h>
+#include <ixwebsocket/IXWebSocket.h>
+
 #include <algorithm>
 #include <bitset>
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <deque>
 #include <initializer_list>
 #include <limits>
 #include <mutex>
@@ -471,6 +476,437 @@ std::string classify_event(
 }
 
 #endif
+
+namespace {
+
+enum class FeedHandshakePhase : std::uint8_t {
+  AwaitingOpen,
+  AwaitingConnected,
+  AwaitingAuthentication,
+  Ready,
+};
+
+struct FeedStatus {
+  std::string status;
+  std::string message;
+};
+
+std::string json_string(std::string_view value) {
+  std::string output;
+  output.reserve(value.size() + 2);
+  output.push_back('"');
+  for (const unsigned char character : value) {
+    switch (character) {
+      case '"':
+        output += "\\\"";
+        break;
+      case '\\':
+        output += "\\\\";
+        break;
+      case '\b':
+        output += "\\b";
+        break;
+      case '\f':
+        output += "\\f";
+        break;
+      case '\n':
+        output += "\\n";
+        break;
+      case '\r':
+        output += "\\r";
+        break;
+      case '\t':
+        output += "\\t";
+        break;
+      default:
+        if (character < 0x20) {
+          constexpr char hexadecimal[] = "0123456789abcdef";
+          output += "\\u00";
+          output.push_back(hexadecimal[character >> 4]);
+          output.push_back(hexadecimal[character & 0x0f]);
+        } else {
+          output.push_back(static_cast<char>(character));
+        }
+    }
+  }
+  output.push_back('"');
+  return output;
+}
+
+std::string feed_command(
+    std::string_view action,
+    std::string_view parameters) {
+  return "{\"action\":" + json_string(action) +
+      ",\"params\":" + json_string(parameters) + "}";
+}
+
+std::vector<FeedStatus> feed_statuses(const MessageState& message) {
+  std::vector<FeedStatus> statuses;
+#if MASSIVE_SPEEDUP_HAS_SIMDJSON
+  simdjson::dom::parser parser;
+  simdjson::dom::element root;
+  if (parser.parse(message.payload()).get(root)) {
+    return statuses;
+  }
+
+  const auto inspect = [&statuses](simdjson::dom::element element) {
+    simdjson::dom::object object;
+    if (element.get_object().get(object)) {
+      return;
+    }
+    std::string_view event_type;
+    if (object["ev"].get_string().get(event_type) ||
+        event_type != "status") {
+      return;
+    }
+    std::string_view status;
+    if (object["status"].get_string().get(status)) {
+      return;
+    }
+    std::string_view detail;
+    if (object["message"].get_string().get(detail)) {
+      detail = {};
+    }
+    statuses.push_back({std::string(status), std::string(detail)});
+  };
+
+  simdjson::dom::array array;
+  if (!root.get_array().get(array)) {
+    for (simdjson::dom::element element : array) {
+      inspect(element);
+    }
+  } else {
+    inspect(root);
+  }
+#else
+  static_cast<void>(message);
+#endif
+  return statuses;
+}
+
+bool failed_feed_status(std::string_view status) {
+  return status == "error" || status == "not_authorized" ||
+      status == "max_connections" || status.find("failed") != status.npos ||
+      status.find("denied") != status.npos;
+}
+
+void initialize_ix_network() {
+  static std::once_flag initialized;
+  std::call_once(initialized, [] { static_cast<void>(ix::initNetSystem()); });
+}
+
+}  // namespace
+
+class FeedState {
+ public:
+  FeedState(
+      WebSocketAsset asset,
+      std::string subscriptions,
+      std::string api_key,
+      std::string url,
+      double timeout_seconds,
+      std::size_t queue_capacity,
+      bool reconnect)
+      : asset_(asset),
+        subscriptions_(std::move(subscriptions)),
+        url_(std::move(url)),
+        auth_command_(feed_command("auth", api_key)),
+        subscribe_command_(feed_command("subscribe", subscriptions_)),
+        queue_capacity_(queue_capacity),
+        reconnect_(reconnect) {
+    if (asset_ == WebSocketAsset::Messages) {
+      throw std::invalid_argument(
+          "the generic websocket parser has no Massive feed endpoint");
+    }
+    if (subscriptions_.empty()) {
+      throw std::invalid_argument("websocket subscriptions cannot be empty");
+    }
+    if (api_key.empty()) {
+      throw std::invalid_argument("Massive API key cannot be empty");
+    }
+    if (url_.empty()) {
+      throw std::invalid_argument("websocket URL cannot be empty");
+    }
+    if (!std::isfinite(timeout_seconds) || timeout_seconds <= 0.0) {
+      throw std::invalid_argument("websocket timeout must be positive and finite");
+    }
+    if (queue_capacity_ == 0) {
+      throw std::invalid_argument("websocket queue_capacity must be positive");
+    }
+
+    initialize_ix_network();
+    socket_.setUrl(url_);
+    socket_.disablePerMessageDeflate();
+    socket_.setHandshakeTimeout(
+        static_cast<int>(std::max(1.0, std::ceil(timeout_seconds))));
+    socket_.setPingInterval(20);
+    if (reconnect_) {
+      socket_.enableAutomaticReconnection();
+    } else {
+      socket_.disableAutomaticReconnection();
+    }
+    socket_.setOnMessageCallback(
+        [this](const ix::WebSocketMessagePtr& message) {
+          handle_socket_message(message);
+        });
+
+    socket_.start();
+    try {
+      wait_until_ready(timeout_seconds);
+    } catch (...) {
+      stop();
+      throw;
+    }
+  }
+
+  ~FeedState() { stop(); }
+
+  std::shared_ptr<MessageState> next_message() {
+    std::unique_lock lock(mutex_);
+    queue_ready_.wait(lock, [this] {
+      return !queue_.empty() || stopped_ || closed_ || !fatal_error_.empty();
+    });
+
+    if (!fatal_error_.empty()) {
+      throw std::runtime_error(fatal_error_);
+    }
+    if (queue_.empty()) {
+      return {};
+    }
+    std::shared_ptr<MessageState> message = std::move(queue_.front());
+    queue_.pop_front();
+    lock.unlock();
+    queue_space_.notify_one();
+    return message;
+  }
+
+  void stop() noexcept {
+    {
+      std::lock_guard lock(mutex_);
+      if (stopped_) {
+        return;
+      }
+      stopped_ = true;
+      closed_ = true;
+    }
+    queue_ready_.notify_all();
+    queue_space_.notify_all();
+    ready_.notify_all();
+    try {
+      socket_.stop();
+    } catch (...) {
+    }
+  }
+
+  bool closed() const noexcept {
+    std::lock_guard lock(mutex_);
+    return closed_ || stopped_;
+  }
+
+  bool reconnect() const noexcept { return reconnect_; }
+  const std::string& subscriptions() const noexcept { return subscriptions_; }
+  const std::string& url() const noexcept { return url_; }
+  WebSocketAsset asset() const noexcept { return asset_; }
+
+ private:
+  void wait_until_ready(double timeout_seconds) {
+    std::unique_lock lock(mutex_);
+    const bool completed = ready_.wait_for(
+        lock,
+        std::chrono::duration<double>(timeout_seconds),
+        [this] { return ready_once_ || !fatal_error_.empty() || stopped_; });
+    if (!completed) {
+      std::ostringstream error;
+      error << "timed out connecting and authenticating to " << url_;
+      if (!last_error_.empty()) {
+        error << ": " << last_error_;
+      }
+      throw std::runtime_error(error.str());
+    }
+    if (!fatal_error_.empty()) {
+      throw std::runtime_error(fatal_error_);
+    }
+    if (stopped_ && !ready_once_) {
+      throw std::runtime_error("websocket feed closed before authentication");
+    }
+  }
+
+  void handle_socket_message(const ix::WebSocketMessagePtr& message) noexcept {
+    try {
+      switch (message->type) {
+        case ix::WebSocketMessageType::Open:
+          handle_open();
+          return;
+        case ix::WebSocketMessageType::Message:
+          handle_frame(message->str);
+          return;
+        case ix::WebSocketMessageType::Close:
+          handle_close(message->closeInfo.reason);
+          return;
+        case ix::WebSocketMessageType::Error:
+          handle_error(message->errorInfo.reason);
+          return;
+        case ix::WebSocketMessageType::Ping:
+        case ix::WebSocketMessageType::Pong:
+        case ix::WebSocketMessageType::Fragment:
+          return;
+      }
+    } catch (const std::exception& error) {
+      fail(std::string("websocket receive error: ") + error.what());
+    } catch (...) {
+      fail("websocket receive error");
+    }
+  }
+
+  void handle_open() {
+    std::lock_guard lock(mutex_);
+    if (!stopped_) {
+      phase_ = FeedHandshakePhase::AwaitingConnected;
+      closed_ = false;
+      last_error_.clear();
+    }
+  }
+
+  void handle_frame(std::string_view payload) {
+    auto message = std::make_shared<MessageState>(payload, asset_);
+    if (payload.find("\"status\"") != std::string_view::npos) {
+      for (const FeedStatus& status : feed_statuses(*message)) {
+        handle_status(status);
+      }
+    }
+    enqueue(std::move(message));
+  }
+
+  void handle_status(const FeedStatus& control) {
+    if (control.status == "connected") {
+      bool send_authentication = false;
+      {
+        std::lock_guard lock(mutex_);
+        send_authentication =
+            !stopped_ && phase_ == FeedHandshakePhase::AwaitingConnected;
+        if (send_authentication) {
+          phase_ = FeedHandshakePhase::AwaitingAuthentication;
+        }
+      }
+      if (send_authentication && !socket_.sendUtf8Text(auth_command_).success) {
+        fail("could not send Massive websocket authentication");
+      }
+      return;
+    }
+
+    if (control.status == "auth_success") {
+      bool send_subscription = false;
+      {
+        std::lock_guard lock(mutex_);
+        send_subscription =
+            !stopped_ && phase_ == FeedHandshakePhase::AwaitingAuthentication;
+      }
+      if (!send_subscription) {
+        return;
+      }
+      if (!socket_.sendUtf8Text(subscribe_command_).success) {
+        fail("could not send Massive websocket subscription");
+        return;
+      }
+      {
+        std::lock_guard lock(mutex_);
+        phase_ = FeedHandshakePhase::Ready;
+        ready_once_ = true;
+      }
+      ready_.notify_all();
+      return;
+    }
+
+    if (failed_feed_status(control.status)) {
+      std::string error = "Massive websocket status " + control.status;
+      if (!control.message.empty()) {
+        error += ": " + control.message;
+      }
+      fail(std::move(error));
+    }
+  }
+
+  void handle_close(std::string_view reason) {
+    {
+      std::lock_guard lock(mutex_);
+      closed_ = !reconnect_;
+      phase_ = FeedHandshakePhase::AwaitingOpen;
+      if (!reason.empty()) {
+        last_error_ = std::string(reason);
+      }
+      if (!reconnect_ && !ready_once_ && fatal_error_.empty()) {
+        fatal_error_ = "websocket closed before authentication";
+        if (!reason.empty()) {
+          fatal_error_ += ": " + std::string(reason);
+        }
+      }
+    }
+    queue_ready_.notify_all();
+    ready_.notify_all();
+  }
+
+  void handle_error(std::string_view reason) {
+    {
+      std::lock_guard lock(mutex_);
+      last_error_ = std::string(reason);
+      if (!reconnect_ && fatal_error_.empty()) {
+        fatal_error_ = "websocket connection failed";
+        if (!reason.empty()) {
+          fatal_error_ += ": " + std::string(reason);
+        }
+      }
+    }
+    queue_ready_.notify_all();
+    ready_.notify_all();
+  }
+
+  void enqueue(std::shared_ptr<MessageState> message) {
+    std::unique_lock lock(mutex_);
+    queue_space_.wait(lock, [this] {
+      return queue_.size() < queue_capacity_ || stopped_ ||
+          !fatal_error_.empty();
+    });
+    if (stopped_ || !fatal_error_.empty()) {
+      return;
+    }
+    queue_.push_back(std::move(message));
+    lock.unlock();
+    queue_ready_.notify_one();
+  }
+
+  void fail(std::string error) noexcept {
+    {
+      std::lock_guard lock(mutex_);
+      if (fatal_error_.empty()) {
+        fatal_error_ = std::move(error);
+      }
+      closed_ = true;
+    }
+    queue_ready_.notify_all();
+    queue_space_.notify_all();
+    ready_.notify_all();
+  }
+
+  WebSocketAsset asset_;
+  std::string subscriptions_;
+  std::string url_;
+  std::string auth_command_;
+  std::string subscribe_command_;
+  std::size_t queue_capacity_;
+  bool reconnect_;
+  ix::WebSocket socket_;
+  mutable std::mutex mutex_;
+  std::condition_variable queue_ready_;
+  std::condition_variable queue_space_;
+  std::condition_variable ready_;
+  std::deque<std::shared_ptr<MessageState>> queue_;
+  FeedHandshakePhase phase_ = FeedHandshakePhase::AwaitingOpen;
+  bool ready_once_ = false;
+  bool stopped_ = false;
+  bool closed_ = false;
+  std::string last_error_;
+  std::string fatal_error_;
+};
 
 }  // namespace websocket_detail
 
@@ -1744,7 +2180,123 @@ nb::object typed_event_object(
   return nb::cast(WebSocketEvent(std::move(state)));
 }
 
+WebSocketMessage parsed_websocket_message(
+    std::shared_ptr<websocket_detail::MessageState> message,
+    WebSocketAsset asset) {
+  if (!message || message->bytes().empty()) {
+    throw std::invalid_argument("websocket message cannot be empty");
+  }
+  if (message->asset() != asset) {
+    throw std::invalid_argument("websocket message asset does not match parser");
+  }
+
+#if MASSIVE_SPEEDUP_HAS_SIMDJSON
+  const std::vector<websocket_detail::EventSlice> slices =
+      websocket_detail::find_event_slices(*message);
+  nb::tuple events = nb::steal<nb::tuple>(
+      PyTuple_New(static_cast<Py_ssize_t>(slices.size())));
+  if (!events.is_valid()) {
+    throw nb::python_error();
+  }
+  simdjson::ondemand::parser classifier;
+  for (std::size_t index = 0; index < slices.size(); ++index) {
+    const auto& slice = slices[index];
+    auto state = std::make_shared<websocket_detail::EventState>(
+        message,
+        slice.offset,
+        slice.length,
+        websocket_detail::classify_event(classifier, *message, slice));
+    const std::string event_type = state->event_type();
+    PyTuple_SET_ITEM(
+        events.ptr(),
+        static_cast<Py_ssize_t>(index),
+        typed_event_object(asset, event_type, std::move(state)).release().ptr());
+  }
+  return WebSocketMessage(std::move(message), std::move(events));
+#else
+  throw std::runtime_error(
+      "websocket parsing requires a build with simdjson support");
+#endif
+}
+
 }  // namespace
+
+WebSocketFeed::WebSocketFeed(
+    WebSocketAsset asset,
+    std::string subscriptions,
+    std::string api_key,
+    std::string url,
+    double timeout_seconds,
+    std::size_t queue_capacity,
+    bool reconnect) {
+  nb::gil_scoped_release release;
+  state_ = std::make_shared<websocket_detail::FeedState>(
+      asset,
+      std::move(subscriptions),
+      std::move(api_key),
+      std::move(url),
+      timeout_seconds,
+      queue_capacity,
+      reconnect);
+}
+
+WebSocketFeed::WebSocketFeed(const WebSocketFeed& other) = default;
+WebSocketFeed::WebSocketFeed(WebSocketFeed&& other) noexcept = default;
+WebSocketFeed& WebSocketFeed::operator=(const WebSocketFeed& other) = default;
+WebSocketFeed& WebSocketFeed::operator=(WebSocketFeed&& other) noexcept = default;
+WebSocketFeed::~WebSocketFeed() = default;
+
+WebSocketFeed& WebSocketFeed::iter() { return *this; }
+
+std::shared_ptr<websocket_detail::MessageState>
+WebSocketFeed::next_message_state() {
+  if (!state_) {
+    throw nb::stop_iteration();
+  }
+  std::shared_ptr<websocket_detail::MessageState> message;
+  {
+    nb::gil_scoped_release release;
+    message = state_->next_message();
+  }
+  if (!message) {
+    throw nb::stop_iteration();
+  }
+  return message;
+}
+
+WebSocketMessage WebSocketFeed::next() {
+  std::shared_ptr<websocket_detail::MessageState> message =
+      next_message_state();
+  return parsed_websocket_message(std::move(message), state_->asset());
+}
+
+void WebSocketFeed::close() {
+  if (!state_) {
+    return;
+  }
+  nb::gil_scoped_release release;
+  state_->stop();
+}
+
+bool WebSocketFeed::closed() const noexcept {
+  return !state_ || state_->closed();
+}
+
+bool WebSocketFeed::reconnect() const noexcept {
+  return state_ && state_->reconnect();
+}
+
+std::string WebSocketFeed::subscriptions() const {
+  return state_ ? state_->subscriptions() : std::string{};
+}
+
+std::string WebSocketFeed::url() const {
+  return state_ ? state_->url() : std::string{};
+}
+
+std::string WebSocketFeed::asset_class() const {
+  return state_ ? websocket_asset_name(state_->asset()) : "messages";
+}
 
 namespace websocket_detail {
 
@@ -1756,13 +2308,27 @@ class MarketState {
       WebSocketAsset asset,
       bool emit_quotes,
       bool fast)
-      : source_iterator_(market_source_iterator(messages)),
-        broker_(nb::borrow<nb::object>(broker)),
+      : broker_(nb::borrow<nb::object>(broker)),
         asset_(asset),
         emit_quotes_(emit_quotes),
         fast_(fast) {
     require_market_endpoint(broker_, "buy");
     require_market_endpoint(broker_, "sell");
+
+    WebSocketFeed* feed = nullptr;
+    if (nb::try_cast(messages, feed, false) && feed != nullptr) {
+      if (!feed->state_ || feed->state_->asset() != asset_) {
+        std::ostringstream error;
+        error << "cannot feed a " << feed->asset_class()
+              << " feed into a " << websocket_asset_name(asset_)
+              << " websocket market";
+        throw std::invalid_argument(error.str());
+      }
+      source_owner_ = nb::borrow<nb::object>(messages);
+      native_feed_ = feed;
+    } else {
+      source_iterator_ = market_source_iterator(messages);
+    }
   }
 
   nb::object next_event() {
@@ -1776,6 +2342,13 @@ class MarketState {
 
       pending_events_.reset();
       pending_index_ = 0;
+
+      if (native_feed_ != nullptr) {
+        WebSocketMessage message = native_feed_->next();
+        pending_events_ = message.events();
+        continue;
+      }
+
       PyObject* item_pointer = PyIter_Next(source_iterator_.ptr());
       if (item_pointer == nullptr) {
         if (PyErr_Occurred()) {
@@ -1818,6 +2391,8 @@ class MarketState {
   }
 
   nb::object source_iterator_;
+  nb::object source_owner_;
+  WebSocketFeed* native_feed_ = nullptr;
   nb::object broker_;
   WebSocketAsset asset_;
   bool emit_quotes_ = false;
@@ -1933,41 +2508,19 @@ WebSocketMessage parse_websocket_message(
     nb::handle payload,
     WebSocketAsset asset) {
   const std::string materialized = payload_to_string(payload);
-  if (materialized.empty()) {
-    throw std::invalid_argument("websocket message cannot be empty");
-  }
-
   auto message = std::make_shared<websocket_detail::MessageState>(
       materialized,
       asset);
+  return parsed_websocket_message(std::move(message), asset);
+}
 
-#if MASSIVE_SPEEDUP_HAS_SIMDJSON
-  const std::vector<websocket_detail::EventSlice> slices =
-      websocket_detail::find_event_slices(*message);
-  nb::tuple events = nb::steal<nb::tuple>(
-      PyTuple_New(static_cast<Py_ssize_t>(slices.size())));
-  if (!events.is_valid()) {
-    throw nb::python_error();
+std::string default_websocket_url(WebSocketAsset asset) {
+  if (asset == WebSocketAsset::Messages) {
+    throw std::invalid_argument(
+        "the generic websocket parser has no Massive feed endpoint");
   }
-  simdjson::ondemand::parser classifier;
-  for (std::size_t index = 0; index < slices.size(); ++index) {
-    const auto& slice = slices[index];
-    auto state = std::make_shared<websocket_detail::EventState>(
-        message,
-        slice.offset,
-        slice.length,
-        websocket_detail::classify_event(classifier, *message, slice));
-    const std::string event_type = state->event_type();
-    PyTuple_SET_ITEM(
-        events.ptr(),
-        static_cast<Py_ssize_t>(index),
-        typed_event_object(asset, event_type, std::move(state)).release().ptr());
-  }
-  return WebSocketMessage(std::move(message), std::move(events));
-#else
-  throw std::runtime_error(
-      "websocket parsing requires a build with simdjson support");
-#endif
+  return std::string("wss://socket.massive.com/") +
+      websocket_asset_name(asset);
 }
 
 const char* websocket_asset_name(WebSocketAsset asset) noexcept {

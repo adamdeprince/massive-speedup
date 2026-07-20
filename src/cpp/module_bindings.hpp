@@ -41,6 +41,22 @@ inline std::filesystem::path configured_database_path(
   return configured;
 }
 
+inline std::string configured_massive_api_key(
+    const std::optional<std::string>& api_key) {
+  if (api_key.has_value()) {
+    if (api_key->empty()) {
+      throw std::invalid_argument("api_key cannot be empty");
+    }
+    return *api_key;
+  }
+  const char* configured = std::getenv("MASSIVE_API_KEY");
+  if (configured == nullptr || *configured == '\0') {
+    throw std::runtime_error(
+        "api_key is not configured; set MASSIVE_API_KEY or pass api_key=...");
+  }
+  return configured;
+}
+
 template <typename ParserType>
 std::vector<nb::bytes> read_gzip_lines_bytes(
     const std::filesystem::path& path,
@@ -2639,6 +2655,30 @@ void bind_websocket_asset(
           nb::kw_only(),
           nb::arg("quotes") = false,
           nb::arg("fast") = false)
+      .def_static(
+          "connect",
+          [asset](const std::string& subscriptions,
+                  const std::optional<std::string>& api_key,
+                  const std::optional<std::string>& url,
+                  double timeout,
+                  std::size_t queue_capacity,
+                  bool reconnect) {
+            return native::WebSocketFeed(
+                asset,
+                subscriptions,
+                configured_massive_api_key(api_key),
+                url.value_or(native::default_websocket_url(asset)),
+                timeout,
+                queue_capacity,
+                reconnect);
+          },
+          nb::arg("subscriptions"),
+          nb::kw_only(),
+          nb::arg("api_key") = nb::none(),
+          nb::arg("url") = nb::none(),
+          nb::arg("timeout") = 10.0,
+          nb::arg("queue_capacity") = 1024,
+          nb::arg("reconnect") = true)
       .def_static("serialize", &serialize_static<ImplAsset>)
       .def_static("processor_name", &processor_name_static<ImplAsset>);
 }
@@ -3011,6 +3051,33 @@ inline void bind_websocket_models(nb::module_& m) {
       .def_prop_ro("raw_json", &native::WebSocketMessage::raw_json)
       .def_prop_ro("asset_class", &native::WebSocketMessage::asset_class)
       .def("__repr__", &native::WebSocketMessage::repr);
+
+  nb::class_<native::WebSocketFeed>(m, "WebSocketFeed")
+      .def(
+          "__iter__",
+          [](native::WebSocketFeed& self) -> native::WebSocketFeed& {
+            return self.iter();
+          },
+          nb::rv_policy::reference_internal)
+      .def("__next__", &native::WebSocketFeed::next)
+      .def("close", &native::WebSocketFeed::close)
+      .def(
+          "__enter__",
+          [](native::WebSocketFeed& self) -> native::WebSocketFeed& {
+            return self;
+          },
+          nb::rv_policy::reference_internal)
+      .def(
+          "__exit__",
+          [](native::WebSocketFeed& self, nb::args) {
+            self.close();
+            return false;
+          })
+      .def_prop_ro("closed", &native::WebSocketFeed::closed)
+      .def_prop_ro("reconnect", &native::WebSocketFeed::reconnect)
+      .def_prop_ro("subscriptions", &native::WebSocketFeed::subscriptions)
+      .def_prop_ro("url", &native::WebSocketFeed::url)
+      .def_prop_ro("asset_class", &native::WebSocketFeed::asset_class);
 
   nb::class_<native::WebSocketMarket>(m, "WebSocketMarket")
       .def(
@@ -3420,7 +3487,14 @@ void bind_native_module(nb::module_& m, const char* alias_prefix) {
       native::WebSocketAsset::Crypto);
 
   websocket.attr("Status") = m.attr("WebSocketStatus");
+  websocket.attr("Feed") = m.attr("WebSocketFeed");
   websocket.attr("Market") = m.attr("WebSocketMarket");
+  websocket.attr("Stocks").attr("Feed") = m.attr("WebSocketFeed");
+  websocket.attr("Options").attr("Feed") = m.attr("WebSocketFeed");
+  websocket.attr("Futures").attr("Feed") = m.attr("WebSocketFeed");
+  websocket.attr("Indices").attr("Feed") = m.attr("WebSocketFeed");
+  websocket.attr("Forex").attr("Feed") = m.attr("WebSocketFeed");
+  websocket.attr("Crypto").attr("Feed") = m.attr("WebSocketFeed");
   websocket.attr("Stocks").attr("FairMarketValue") =
       m.attr("WebSocketFairMarketValue");
   websocket.attr("Stocks").attr("LimitUpLimitDown") =

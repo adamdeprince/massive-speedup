@@ -27,6 +27,7 @@ namespace websocket_detail {
 
 class MessageState;
 class EventState;
+class FeedState;
 class MarketState;
 
 }  // namespace websocket_detail
@@ -295,6 +296,39 @@ class WebSocketMessage {
   nb::tuple events_;
 };
 
+class WebSocketFeed {
+ public:
+  WebSocketFeed(
+      WebSocketAsset asset,
+      std::string subscriptions,
+      std::string api_key,
+      std::string url,
+      double timeout_seconds,
+      std::size_t queue_capacity,
+      bool reconnect);
+  WebSocketFeed(const WebSocketFeed& other);
+  WebSocketFeed(WebSocketFeed&& other) noexcept;
+  WebSocketFeed& operator=(const WebSocketFeed& other);
+  WebSocketFeed& operator=(WebSocketFeed&& other) noexcept;
+  ~WebSocketFeed();
+
+  WebSocketFeed& iter();
+  WebSocketMessage next();
+  void close();
+  bool closed() const noexcept;
+  bool reconnect() const noexcept;
+  std::string subscriptions() const;
+  std::string url() const;
+  std::string asset_class() const;
+
+ private:
+  std::shared_ptr<websocket_detail::MessageState> next_message_state();
+
+  std::shared_ptr<websocket_detail::FeedState> state_;
+
+  friend class websocket_detail::MarketState;
+};
+
 class WebSocketMarket {
  public:
   WebSocketMarket(
@@ -324,6 +358,7 @@ WebSocketMessage parse_websocket_message(
     nb::handle payload,
     WebSocketAsset asset);
 
+std::string default_websocket_url(WebSocketAsset asset);
 const char* websocket_asset_name(WebSocketAsset asset) noexcept;
 
 }  // namespace massive_speedup::native

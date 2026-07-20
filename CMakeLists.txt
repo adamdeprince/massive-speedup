@@ -19,6 +19,7 @@ set(
 
 option(MASSIVE_SPEEDUP_USE_SYSTEM_SIMDJSON "Use an already-installed simdjson package." OFF)
 option(MASSIVE_SPEEDUP_USE_SYSTEM_RAPIDGZIP "Use a pre-vendored rapidgzip checkout." OFF)
+option(MASSIVE_SPEEDUP_USE_SYSTEM_IXWEBSOCKET "Use an already-installed IXWebSocket package." OFF)
 option(
   MASSIVE_SPEEDUP_OFFLINE
   "Never download missing third-party dependency sources."
@@ -64,6 +65,7 @@ endfunction()
 
 massive_speedup_clear_stale_fetchcontent_subbuild(simdjson)
 massive_speedup_clear_stale_fetchcontent_subbuild(rapidgzip)
+massive_speedup_clear_stale_fetchcontent_subbuild(ixwebsocket)
 
 if(MASSIVE_SPEEDUP_USE_SYSTEM_SIMDJSON)
   find_package(simdjson REQUIRED)
@@ -95,6 +97,40 @@ else()
     UPDATE_DISCONNECTED TRUE
   )
   FetchContent_MakeAvailable(simdjson)
+endif()
+
+set(BUILD_DEMO OFF CACHE BOOL "" FORCE)
+set(IXWEBSOCKET_INSTALL OFF CACHE BOOL "" FORCE)
+set(USE_TEST OFF CACHE BOOL "" FORCE)
+set(USE_TLS ON CACHE BOOL "" FORCE)
+set(USE_WS OFF CACHE BOOL "" FORCE)
+set(USE_ZLIB ON CACHE BOOL "" FORCE)
+
+if(MASSIVE_SPEEDUP_USE_SYSTEM_IXWEBSOCKET)
+  find_package(ixwebsocket CONFIG REQUIRED)
+elseif(EXISTS "${MASSIVE_SPEEDUP_DEPS_DIR}/ixwebsocket-src/CMakeLists.txt")
+  FetchContent_Declare(
+    ixwebsocket
+    SOURCE_DIR "${MASSIVE_SPEEDUP_DEPS_DIR}/ixwebsocket-src"
+    BINARY_DIR "${MASSIVE_SPEEDUP_DEPS_DIR}/ixwebsocket-build"
+  )
+  FetchContent_MakeAvailable(ixwebsocket)
+elseif(MASSIVE_SPEEDUP_OFFLINE)
+  message(
+    FATAL_ERROR
+    "IXWebSocket source checkout is missing at "
+    "${MASSIVE_SPEEDUP_DEPS_DIR}/ixwebsocket-src. Disable MASSIVE_SPEEDUP_OFFLINE "
+    "or install IXWebSocket and set MASSIVE_SPEEDUP_USE_SYSTEM_IXWEBSOCKET=ON."
+  )
+else()
+  FetchContent_Declare(
+    ixwebsocket
+    GIT_REPOSITORY https://github.com/machinezone/IXWebSocket.git
+    GIT_TAG v11.4.6
+    GIT_SHALLOW TRUE
+    UPDATE_DISCONNECTED TRUE
+  )
+  FetchContent_MakeAvailable(ixwebsocket)
 endif()
 
 if(MASSIVE_SPEEDUP_USE_SYSTEM_RAPIDGZIP)
@@ -161,6 +197,7 @@ target_link_libraries(
   INTERFACE
   rapidgzip
   simdjson
+  ixwebsocket::ixwebsocket
   ZLIB::ZLIB
 )
 target_compile_definitions(

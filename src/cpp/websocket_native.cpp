@@ -661,11 +661,17 @@ class FeedState {
 
   ~FeedState() { stop(); }
 
-  std::shared_ptr<MessageState> next_message() {
+  std::shared_ptr<MessageState> next_message_for(
+      std::chrono::milliseconds timeout,
+      bool& timed_out) {
     std::unique_lock lock(mutex_);
-    queue_ready_.wait(lock, [this] {
+    const bool awakened = queue_ready_.wait_for(lock, timeout, [this] {
       return !queue_.empty() || stopped_ || closed_ || !fatal_error_.empty();
     });
+    timed_out = !awakened;
+    if (!awakened) {
+      return {};
+    }
 
     if (!fatal_error_.empty()) {
       throw std::runtime_error(fatal_error_);
@@ -2253,15 +2259,25 @@ WebSocketFeed::next_message_state() {
   if (!state_) {
     throw nb::stop_iteration();
   }
-  std::shared_ptr<websocket_detail::MessageState> message;
-  {
-    nb::gil_scoped_release release;
-    message = state_->next_message();
+  while (true) {
+    std::shared_ptr<websocket_detail::MessageState> message;
+    bool timed_out = false;
+    {
+      nb::gil_scoped_release release;
+      message = state_->next_message_for(
+          std::chrono::milliseconds(100),
+          timed_out);
+    }
+    if (message) {
+      return message;
+    }
+    if (!timed_out) {
+      throw nb::stop_iteration();
+    }
+    if (PyErr_CheckSignals() != 0) {
+      throw nb::python_error();
+    }
   }
-  if (!message) {
-    throw nb::stop_iteration();
-  }
-  return message;
 }
 
 WebSocketMessage WebSocketFeed::next() {

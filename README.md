@@ -290,29 +290,55 @@ contradictions between its field descriptions and examples, so those typed
 events accept either millisecond or nanosecond epoch values and expose
 normalized nanoseconds.
 
-No network client is included yet. A synchronous iterable of frames can be
-adapted to the same row-at-a-time 7-tuple used by the database markets:
+`WebSocket.<Asset>.connect(...)` is a native C++ WebSocket client. It owns TLS,
+authentication, subscription, reconnection, and a bounded frame queue; the GIL
+is released while Python waits for data. When a native feed is passed to
+`market(...)`, C++ consumes it directly and hands its padded message buffers to
+simdjson without a Python frame callback or iterator dispatch.
+
+Set `MASSIVE_API_KEY`, then provide the comma-separated Massive subscriptions:
 
 ```python
-class LiveExecution:
+import massive_speedup
+
+
+class PrintExecution:
     def buy(self, quantity, symbol=None):
-        send_order("buy", quantity, symbol)
+        print("buy")
 
     def sell(self, quantity, symbol=None):
-        send_order("sell", quantity, symbol)
+        print("sell")
 
 
-execution = LiveExecution()
-market = massive_speedup.WebSocket.Stocks.market(
-    websocket_frames,
-    execution,
-    quotes=True,
-)
+with massive_speedup.WebSocket.Stocks.connect(
+    "T.AAPL,Q.AAPL",
+) as feed:
+    market = massive_speedup.WebSocket.Stocks.market(
+        feed,
+        PrintExecution(),
+        fast=True,
+    )
 
-for symbol, timestamp, trade, quote, trades, quotes, broker in market:
-    if trade is not None and should_buy(trade, quotes.get(symbol)):
-        broker.buy(100, symbol)
+    for symbol, timestamp, trade, quote, trades, quotes, endpoint in market:
+        if trade is not None and should_buy(trade, quotes.get(symbol)):
+            endpoint.buy(100, symbol)
 ```
+
+The default URL is `wss://socket.massive.com/{asset}`. Pass `url=...` to use a
+different Massive endpoint, such as the delayed stock feed. `timeout`,
+`queue_capacity`, and `reconnect` are keyword-only controls. Iterating the feed
+itself yields parsed `WebSocketMessage` objects, including status messages.
+
+The complete live counterpart to the `SimpleMarket` price-versus-NBBO example
+prints exactly `buy` or `sell` when its paper strategy signals:
+
+```bash
+export MASSIVE_API_KEY="your-key"
+python examples/howto_realtime_stock_signals.py TICKER
+```
+
+See
+[examples/howto_realtime_stock_signals.py](examples/howto_realtime_stock_signals.py).
 
 The seventh value is the exact object supplied as `broker`; construction only
 checks that its `buy` and `sell` attributes are callable. The library does not

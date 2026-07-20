@@ -8,12 +8,13 @@ scikit-build-core and CMake.
 - Python 3.9 or newer
 - A C++23-capable compiler
 - CMake 3.24 or newer
+- OpenSSL development headers and libraries for native `wss://` feeds
 - `pip`
 - `git` when third-party C++ dependency sources are not already cached
 
-The build uses `simdjson` and `rapidgzip` at the C++ level. If their source
-trees are already present under the build directory, CMake reuses them. Missing
-sources are downloaded only when offline mode is not enabled.
+The build uses `simdjson`, `rapidgzip`, and `IXWebSocket` at the C++ level. If
+their source trees are already present under the build directory, CMake reuses
+them. Missing sources are downloaded only when offline mode is not enabled.
 
 ## Install From Source
 

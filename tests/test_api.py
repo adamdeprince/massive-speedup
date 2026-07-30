@@ -19,7 +19,6 @@ from massive_speedup import (
     StockQuoteCondition,
     StockTrade,
     StockTradeCondition,
-    WebSocket,
     gzip_lines,
     read_gzip_lines,
 )
@@ -448,544 +447,6 @@ def test_massive_flatfile_aggregate_apis_are_not_exposed() -> None:
         assert not hasattr(parser, "parse_raw_daily_aggregates")
 
 
-# WebSocket fixtures below are invented protocol-shaped records, not captured
-# market data or copied vendor examples.
-def test_websocket_messages_parse_message_is_class_based() -> None:
-    message = WebSocket.Messages.parse_message(
-        '[{"ev":"status"},{"ev":"trade"}]'
-    )
-
-    assert message.asset_class == "messages"
-    assert len(message) == 2
-    assert [event.event_type for event in message] == ["status", "trade"]
-
-
-def test_websocket_crypto_parse_message_uses_selected_processor_module() -> None:
-    message = WebSocket.Crypto.parse_message('{"ev":"XT"}')
-    assert message.asset_class == "crypto"
-    assert WebSocket.Crypto.processor_name() in {
-        "generic",
-        "sse42",
-        "avx2",
-        "avx512",
-        "neon",
-        "sve",
-        "sve2",
-        "lsx",
-        "lasx",
-    }
-
-
-def test_websocket_message_owns_payload_and_lazily_caches_fields() -> None:
-    payload = (
-        b'[{"ev":"T","sym":"ZZTEST","p":12.5,"c":[1,37],'
-        b'"details":{"source":"sip"},"nullable":null},'
-        b'{"ev":"Q","sym":"ZZALT"}]'
-    )
-    message = WebSocket.Stocks.parse(payload)
-    event = message[0]
-    del payload
-
-    assert len(message) == 2
-    assert message.events[0] is event
-    assert message[-1].event_type == "Q"
-    assert event.cached_fields == ()
-    assert not event.is_cached("sym")
-
-    assert event.event_type == "T"
-    assert event.cached_fields == ("ev",)
-    assert event["p"] == pytest.approx(12.5)
-    assert event["sym"] == "ZZTEST"
-    assert event["sym"] is event["sym"]
-    assert event["c"] == [1, 37]
-    assert event["details"] == {"source": "sip"}
-    assert event["nullable"] is None
-    assert event["nullable"] is None
-    assert event.get("absent") is None
-    sentinel = object()
-    assert event.get("another_absent", sentinel) is sentinel
-    assert "details" in event
-    assert "not_there" not in event
-    assert event.message_bytes == message.raw_json
-    assert event.raw_json.startswith(b'{"ev":"T"')
-
-
-def test_websocket_message_accepts_one_object_and_sequence_indexing() -> None:
-    message = WebSocket.Crypto.parse_message(
-        b'{"ev":"XT","pair":"AAA-BBB","i":184467440737095516150}'
-    )
-
-    assert len(message) == 1
-    assert message[0]["pair"] == "AAA-BBB"
-    assert message[:] == message.events
-    assert message[0]["i"] == 184467440737095516150
-
-
-def test_websocket_stock_events_are_lazy_database_compatible_rows() -> None:
-    message = WebSocket.Stocks.parse(
-        '[{"ev":"T","sym":"ZZTEST","x":4,"i":"123","z":3,'
-        '"p":12.5,"s":3,"ds":"3.125","c":[0,12],'
-        '"t":1700000000123,"pt":1700000000100,"q":456,'
-        '"trfi":7,"trft":1700000000000},'
-        '{"ev":"Q","sym":"ZZTEST","bx":4,"bp":12.5,"bs":10,'
-        '"ax":7,"ap":12.75,"as":16,"c":0,"i":[42],'
-        '"t":1700000000123,"q":789,"z":3}]'
-    )
-    trade, quote = message
-
-    assert isinstance(trade, WebSocket.Stocks.Trade)
-    assert trade.cached_fields == ()
-    assert trade.cached_properties == ()
-    assert trade.price == pytest.approx(12.5)
-    assert trade.price is trade.price
-    assert trade.cached_fields == ("p",)
-    assert trade.cached_properties == ("price",)
-    assert trade.ticker == "ZZTEST"
-    assert trade.conditions == frozenset({0, 12})
-    assert trade.correction == 0
-    assert trade.exchange == 4
-    assert trade.id == 123
-    assert trade.participant_timestamp == 1700000000100000000
-    assert trade.sequence_number == 456
-    assert trade.sip_timestamp == 1700000000123000000
-    assert trade.size == pytest.approx(3.125)
-    assert trade.decimal_size == "3.125"
-    assert trade.size_coefficient == 3125
-    assert trade.size_scale == 3
-    assert trade.tape == 3
-    assert trade.trf_id == 7
-    assert trade.trf_timestamp == 1700000000000000000
-    assert not trade.updates_high_low()
-    assert not trade.updates_open_close()
-    assert trade.updates_volume()
-    with pytest.raises(AttributeError):
-        trade.price = 1.0
-
-    assert isinstance(quote, WebSocket.Stocks.Quote)
-    assert quote.ticker == "ZZTEST"
-    assert quote.ask_exchange == 7
-    assert quote.ask_price == pytest.approx(12.75)
-    assert quote.ask_size == 16
-    assert quote.bid_exchange == 4
-    assert quote.bid_price == pytest.approx(12.5)
-    assert quote.bid_size == 10
-    assert quote.conditions == frozenset({0})
-    assert quote.indicators == frozenset({42})
-    assert quote.participant_timestamp == 1700000000123000000
-    assert quote.sequence_number == 789
-    assert quote.sip_timestamp == 1700000000123000000
-    assert quote.tape == 3
-    assert quote.trf_timestamp == 0
-    assert quote.updates_high_low()
-    assert quote.updates_open_close()
-    assert quote.updates_volume()
-
-
-def test_websocket_option_events_decode_contract_keys_lazily() -> None:
-    trade, quote = WebSocket.Options.parse(
-        '[{"ev":"T","sym":"O:TEST300101C00125000","x":21,'
-        '"p":2.5,"s":2,"c":[209,227],"t":1700000000200,"q":42},'
-        '{"ev":"Q","sym":"O:TEST300101C00125000","bx":21,"ax":22,'
-        '"bp":2.4,"ap":2.6,"bs":7,"as":8,'
-        '"t":1700000000201,"q":43}]'
-    )
-
-    assert isinstance(trade, WebSocket.Options.Trade)
-    assert trade.ticker == "O:TEST300101C00125000"
-    assert trade.root == "TEST"
-    assert trade.expiration == "2030-01-01"
-    assert trade.right == "C"
-    assert trade.strike == pytest.approx(125.0)
-    assert trade.conditions == frozenset({209, 227})
-    assert trade.correction == 0
-    assert trade.exchange == 21
-    assert trade.price == pytest.approx(2.5)
-    assert trade.sequence_number == 42
-    assert trade.sip_timestamp == 1700000000200000000
-    assert trade.size == 2
-
-    assert isinstance(quote, WebSocket.Options.Quote)
-    assert quote.ticker == trade.ticker
-    assert (quote.root, quote.expiration, quote.right, quote.strike) == (
-        "TEST",
-        "2030-01-01",
-        "C",
-        125.0,
-    )
-    assert quote.ask_exchange == 22
-    assert quote.ask_price == pytest.approx(2.6)
-    assert quote.ask_size == 8
-    assert quote.bid_exchange == 21
-    assert quote.bid_price == pytest.approx(2.4)
-    assert quote.bid_size == 7
-    assert quote.sequence_number == 43
-    assert quote.sip_timestamp == 1700000000201000000
-
-
-def test_websocket_futures_events_expose_live_fields_and_explicit_defaults() -> None:
-    trade, quote = WebSocket.Futures.parse(
-        '[{"ev":"T","sym":"ZZZ9","z":3,"p":123.5,"s":10,'
-        '"t":1700000000300,"q":50},'
-        '{"ev":"Q","sym":"ZZZ9","bp":123.25,"bs":10,'
-        '"bt":1700000000299,"ap":123.75,"as":16,'
-        '"at":1700000000298,"t":1700000000301}]'
-    )
-
-    assert isinstance(trade, WebSocket.Futures.Trade)
-    assert trade.ticker == "ZZZ9"
-    assert trade.timestamp == 1700000000300000000
-    assert trade.sequence_number == 50
-    assert trade.report_sequence == 0
-    assert trade.price == pytest.approx(123.5)
-    assert trade.size == 10
-    assert trade.correction == 0
-    assert trade.exchange == 0
-    assert trade.session_end_date == ""
-    assert trade["z"] == 3
-
-    assert isinstance(quote, WebSocket.Futures.Quote)
-    assert quote.ticker == "ZZZ9"
-    assert quote.timestamp == 1700000000301000000
-    assert quote.sequence_number == 0
-    assert quote.report_sequence == 0
-    assert quote.ask_timestamp == 1700000000298000000
-    assert quote.ask_price == pytest.approx(123.75)
-    assert quote.ask_size == 16
-    assert quote.bid_timestamp == 1700000000299000000
-    assert quote.bid_price == pytest.approx(123.25)
-    assert quote.bid_size == 10
-    assert quote.exchange == 0
-    assert quote.session_end_date == ""
-
-
-def test_websocket_currency_crypto_and_index_events_match_database_names() -> None:
-    crypto_trade, crypto_quote = WebSocket.Crypto.parse(
-        '[{"ev":"XT","pair":"AAA-BBB","p":10.5,"t":1700000000400,'
-        '"s":0.125,"c":[2],"i":1234,"x":3,"r":1700000000401},'
-        '{"ev":"XQ","pair":"AAA-BBB","bp":10.25,"bs":0.5,'
-        '"ap":10.75,"as":0.75,"t":1700000000500,'
-        '"x":1,"r":1700000000501}]'
-    )
-    currency_quote = WebSocket.Forex.parse(
-        '{"ev":"C","p":"AAA/BBB","x":"44","a":1.25,'
-        '"b":1.2,"t":1700000000600}'
-    )[0]
-    index_value = WebSocket.Indices.parse(
-        '{"ev":"V","val":42.5,"T":"I:TEST","t":1700000000700}'
-    )[0]
-
-    assert isinstance(crypto_trade, WebSocket.Crypto.Trade)
-    assert crypto_trade.ticker == "X:AAA-BBB"
-    assert crypto_trade.conditions == frozenset({2})
-    assert crypto_trade.exchange == 3
-    assert crypto_trade.id == 1234
-    assert crypto_trade.participant_timestamp == 1700000000400000000
-    assert crypto_trade.received_timestamp == 1700000000401000000
-    assert crypto_trade.price == pytest.approx(10.5)
-    assert crypto_trade.size == pytest.approx(0.125)
-
-    assert isinstance(crypto_quote, WebSocket.Crypto.Quote)
-    assert crypto_quote.ticker == "X:AAA-BBB"
-    assert crypto_quote.ask_price == pytest.approx(10.75)
-    assert crypto_quote.ask_size == pytest.approx(0.75)
-    assert crypto_quote.bid_price == pytest.approx(10.25)
-    assert crypto_quote.bid_size == pytest.approx(0.5)
-    assert crypto_quote.exchange == 1
-    assert crypto_quote.participant_timestamp == 1700000000500000000
-    assert crypto_quote.received_timestamp == 1700000000501000000
-
-    assert isinstance(currency_quote, WebSocket.Forex.Quote)
-    assert currency_quote.ticker == "C:AAA-BBB"
-    assert currency_quote.tickers == ("AAA", "BBB")
-    assert currency_quote.ask_exchange == 44
-    assert currency_quote.ask_price == pytest.approx(1.25)
-    assert currency_quote.bid_exchange == 44
-    assert currency_quote.bid_price == pytest.approx(1.2)
-    assert currency_quote.participant_timestamp == 1700000000600000000
-
-    assert isinstance(index_value, WebSocket.Indices.Value)
-    assert index_value.ticker == "I:TEST"
-    assert index_value.value == pytest.approx(42.5)
-    assert index_value.timestamp == 1700000000700000000
-
-
-def test_websocket_status_and_unsupported_events_remain_lossless() -> None:
-    package = import_module("massive_speedup")
-    status, aggregate = WebSocket.Stocks.parse(
-        '[{"ev":"status","status":"auth_success","message":"authenticated"},'
-        '{"ev":"AM","sym":"ZZTEST","o":12.0}]'
-    )
-
-    assert isinstance(status, WebSocket.Status)
-    assert status.status == "auth_success"
-    assert status.message == "authenticated"
-    assert type(aggregate) is package.WebSocketEvent
-    assert aggregate.event_type == "AM"
-    assert aggregate["sym"] == "ZZTEST"
-    assert aggregate["o"] == pytest.approx(12.0)
-
-
-def test_websocket_non_aggregate_stock_events_are_typed_and_lazy() -> None:
-    fair_value, luld, imbalance = WebSocket.Stocks.parse(
-        '[{"ev":"FMV","fmv":12.5,"sym":"ZZTEST","t":1700000000800},'
-        '{"ev":"LULD","T":"ZZALT","h":15.0,"l":10.0,"i":[16],'
-        '"z":3,"t":1700000000900000000,"q":50},'
-        '{"ev":"NOI","T":"ZZTEST","t":1700000001000000000,'
-        '"at":930,"a":"M","i":44,"x":10,"o":80,"p":40,"b":12.25}]'
-    )
-
-    assert isinstance(fair_value, WebSocket.Stocks.FairMarketValue)
-    assert fair_value.asset_class == "stocks"
-    assert fair_value.ticker == "ZZTEST"
-    assert fair_value.value == pytest.approx(12.5)
-    assert fair_value.fair_market_value == pytest.approx(12.5)
-    assert fair_value.timestamp == 1700000000800000000
-
-    assert isinstance(luld, WebSocket.Stocks.LimitUpLimitDown)
-    assert isinstance(luld, WebSocket.Stocks.LULD)
-    assert luld.ticker == "ZZALT"
-    assert luld.high_price == pytest.approx(15.0)
-    assert luld.low_price == pytest.approx(10.0)
-    assert luld.indicators == frozenset({16})
-    assert luld.tape == 3
-    assert luld.timestamp == 1700000000900000000
-    assert luld.sequence_number == 50
-
-    assert isinstance(imbalance, WebSocket.Stocks.NetOrderImbalance)
-    assert isinstance(imbalance, WebSocket.Stocks.Imbalance)
-    assert imbalance.ticker == "ZZTEST"
-    assert imbalance.timestamp == 1700000001000000000
-    assert imbalance.auction_time == 930
-    assert imbalance.auction_type == "M"
-    assert imbalance.sequence_number == 44
-    assert imbalance.exchange == 10
-    assert imbalance.imbalance_quantity == 80
-    assert imbalance.paired_quantity == 40
-    assert imbalance.book_clearing_price == pytest.approx(12.25)
-
-
-def test_websocket_fair_market_value_is_typed_for_every_documented_asset() -> None:
-    option_value = WebSocket.Options.parse(
-        '{"ev":"FMV","fmv":2.25,"sym":"O:TEST300101C00125000",'
-        '"t":1700000001100000000}'
-    )[0]
-    crypto_value = WebSocket.Crypto.parse(
-        '{"ev":"FMV","fmv":10.5,"sym":"X:AAA-BBB","t":1700000001200}'
-    )[0]
-    forex_value = WebSocket.Forex.parse(
-        '{"ev":"FMV","fmv":1.25,"sym":"C:AAABBB","t":1700000001300}'
-    )[0]
-
-    assert isinstance(option_value, WebSocket.Options.FairMarketValue)
-    assert option_value.ticker == "O:TEST300101C00125000"
-    assert option_value.timestamp == 1700000001100000000
-    assert isinstance(crypto_value, WebSocket.Crypto.FairMarketValue)
-    assert crypto_value.ticker == "X:AAA-BBB"
-    assert crypto_value.timestamp == 1700000001200000000
-    assert isinstance(forex_value, WebSocket.Forex.FairMarketValue)
-    assert forex_value.ticker == "C:AAA-BBB"
-    assert forex_value.timestamp == 1700000001300000000
-
-
-def test_websocket_typed_field_validation_is_deferred_until_access() -> None:
-    trade = WebSocket.Stocks.parse(
-        '{"ev":"T","sym":"ZZTEST","p":"not-a-number"}'
-    )[0]
-
-    assert isinstance(trade, WebSocket.Stocks.Trade)
-    assert trade.cached_fields == ()
-    with pytest.raises(ValueError, match="field 'p'"):
-        _ = trade.price
-    assert trade.cached_fields == ("p",)
-    assert trade.cached_properties == ()
-
-
-def test_websocket_market_matches_database_iteration_shape() -> None:
-    class Broker:
-        def __init__(self) -> None:
-            self.calls = []
-
-        def buy(self, quantity, symbol=None) -> None:
-            self.calls.append(("buy", quantity, symbol))
-
-        def sell(self, quantity, symbol=None) -> None:
-            self.calls.append(("sell", quantity, symbol))
-
-    broker = Broker()
-    frames = [
-        '[{"ev":"status","status":"connected"},'
-        '{"ev":"Q","sym":"ZZTEST","bx":1,"bp":10,"bs":1,'
-        '"ax":2,"ap":11,"as":2,"c":0,"i":[],"t":1000,"q":1,"z":3}]',
-        '[{"ev":"T","sym":"ZZTEST","x":4,"i":"1","z":3,'
-        '"p":10.5,"s":2,"c":[],"t":1100,"q":2},'
-        '{"ev":"AM","sym":"ZZTEST","o":10}]',
-    ]
-    market = WebSocket.Stocks.market(frames, broker)
-
-    assert isinstance(market, WebSocket.Market)
-    assert market.asset_class == "stocks"
-    assert not market.quotes
-    assert not market.fast
-    assert market.broker is broker
-
-    symbol, timestamp, trade, quote, trades, quotes, endpoint = next(market)
-    assert symbol == "ZZTEST"
-    assert timestamp == pytest.approx(1.1)
-    assert isinstance(trade, WebSocket.Stocks.Trade)
-    assert quote is None
-    assert trades == {"ZZTEST": trade}
-    assert isinstance(quotes["ZZTEST"], WebSocket.Stocks.Quote)
-    assert endpoint is broker
-    assert trade.cached_fields == ("sym", "t")
-    assert trade.cached_properties == ("ticker", "sip_timestamp")
-    assert quotes["ZZTEST"].cached_fields == ("sym", "t")
-    assert quotes["ZZTEST"].cached_properties == ("ticker", "sip_timestamp")
-    assert broker.calls == []
-
-    endpoint.buy(3, symbol)
-    assert broker.calls == [("buy", 3, "ZZTEST")]
-    with pytest.raises(StopIteration):
-        next(market)
-
-
-def test_websocket_market_can_emit_quotes_and_reuse_state_dicts() -> None:
-    class Broker:
-        def buy(self, quantity) -> None:
-            pass
-
-        def sell(self, quantity) -> None:
-            pass
-
-    payload = (
-        '[{"ev":"Q","sym":"ZZTEST","t":1000},'
-        '{"ev":"T","sym":"ZZTEST","t":1100},'
-        '{"ev":"T","sym":"ZZALT","t":1200}]'
-    )
-
-    slow_rows = list(
-        WebSocket.Stocks.market(payload, Broker(), quotes=True, fast=False)
-    )
-    assert len(slow_rows) == 3
-    assert slow_rows[0][2] is None
-    assert isinstance(slow_rows[0][3], WebSocket.Stocks.Quote)
-    assert slow_rows[0][4] == {}
-    assert slow_rows[0][5] == {"ZZTEST": slow_rows[0][3]}
-    assert slow_rows[0][4] is not slow_rows[1][4]
-    assert slow_rows[0][5] is not slow_rows[1][5]
-
-    fast_rows = list(
-        WebSocket.Stocks.market(payload, Broker(), quotes=True, fast=True)
-    )
-    assert fast_rows[0][4] is fast_rows[1][4] is fast_rows[2][4]
-    assert fast_rows[0][5] is fast_rows[1][5] is fast_rows[2][5]
-    assert set(fast_rows[0][4]) == {"ZZTEST", "ZZALT"}
-
-
-def test_websocket_market_accepts_parsed_messages_and_rejects_asset_mixing() -> None:
-    class Broker:
-        def buy(self, quantity) -> None:
-            pass
-
-        def sell(self, quantity) -> None:
-            pass
-
-    message = WebSocket.Stocks.parse('{"ev":"T","sym":"ZZTEST","t":1000}')
-    row = next(WebSocket.Stocks.market(message, Broker()))
-    assert row[0] == "ZZTEST"
-    assert row[2] is message[0]
-
-    mismatched = WebSocket.Futures.market(message, Broker())
-    with pytest.raises(ValueError, match="stocks message.*futures websocket market"):
-        next(mismatched)
-
-
-def test_websocket_market_requires_callable_buy_and_sell_endpoints() -> None:
-    class MissingSell:
-        def buy(self, quantity) -> None:
-            pass
-
-    class NonCallableSell:
-        def buy(self, quantity) -> None:
-            pass
-
-        sell = 3
-
-    with pytest.raises(TypeError, match="callable 'sell'"):
-        WebSocket.Stocks.market([], MissingSell())
-    with pytest.raises(TypeError, match="attribute 'sell' must be callable"):
-        WebSocket.Stocks.market([], NonCallableSell())
-
-
-def test_websocket_market_uses_asset_compatible_keys_and_slots() -> None:
-    class Broker:
-        def buy(self, quantity) -> None:
-            pass
-
-        def sell(self, quantity) -> None:
-            pass
-
-    broker = Broker()
-    option_row = next(
-        WebSocket.Options.market(
-            '{"ev":"T","sym":"O:TEST300101C00125000","t":1000}',
-            broker,
-        )
-    )
-    futures_row = next(
-        WebSocket.Futures.market(
-            '{"ev":"T","sym":"ZZZ9","t":1100}',
-            broker,
-        )
-    )
-    crypto_row = next(
-        WebSocket.Crypto.market(
-            '{"ev":"XT","pair":"AAA-BBB","t":1200}',
-            broker,
-        )
-    )
-    forex_row = next(
-        WebSocket.Forex.market(
-            '{"ev":"C","p":"AAA/BBB","t":1300}',
-            broker,
-            quotes=True,
-        )
-    )
-    index_row = next(
-        WebSocket.Indices.market(
-            '{"ev":"V","T":"I:TEST","t":1400}',
-            broker,
-        )
-    )
-
-    assert option_row[0] == ("TEST", "2030-01-01", "C", 125.0)
-    assert isinstance(option_row[2], WebSocket.Options.Trade)
-    assert futures_row[0] == "ZZZ9"
-    assert isinstance(futures_row[2], WebSocket.Futures.Trade)
-    assert crypto_row[0] == "X:AAA-BBB"
-    assert isinstance(crypto_row[2], WebSocket.Crypto.Trade)
-    assert forex_row[0] == "C:AAA-BBB"
-    assert forex_row[2] is None
-    assert isinstance(forex_row[3], WebSocket.Forex.Quote)
-    assert index_row[0] == "I:TEST"
-    assert isinstance(index_row[2], WebSocket.Indices.Value)
-    assert index_row[3] is None
-
-
-@pytest.mark.parametrize(
-    "payload",
-    [
-        b"",
-        b"42",
-        b'[{}, 3]',
-        b'[{"ev":"T"}',
-        b'{"ev":3}',
-    ],
-)
-def test_websocket_message_rejects_invalid_shapes(payload: bytes) -> None:
-    with pytest.raises((ValueError, RuntimeError)):
-        WebSocket.Messages.parse_message(payload)
-
-
 def test_gzip_lines_yields_hello_world_lines() -> None:
     path = Path(__file__).resolve().parent / "data" / "hello_world.txt.gz"
     assert list(gzip_lines(path)) == [b"Hello", b"World!"]
@@ -1279,9 +740,634 @@ def test_build_database_parser_accepts_positional_files() -> None:
     assert args.database_path == Path("db")
     assert args.benchmark is False
     assert args.force is False
+    assert args.bsort is False
+    assert args.external_sort_path == Path("/var/tmp")
     assert not hasattr(args, "record_type")
     assert not hasattr(args, "input_stdin")
     assert not hasattr(args, "input_file")
+
+
+def test_build_database_parser_allows_configured_input_default() -> None:
+    from massive_speedup import build_database
+
+    args = build_database.build_parser().parse_args([])
+
+    assert args.input_files == []
+    assert args.database_path is None
+    assert args.processes == 1
+    assert args.only is None
+    assert args.not_before is None
+    assert args.lockstep_writer is False
+    assert args.block_size == 1 << 20
+    assert args.bsort is False
+    assert args.external_sort_path == Path("/var/tmp")
+
+
+def test_build_database_parser_accepts_not_before_date() -> None:
+    from massive_speedup import build_database
+
+    args = build_database.build_parser().parse_args(
+        ["--not-before", "2026-07-24"]
+    )
+
+    assert args.not_before == dt.date(2026, 7, 24)
+
+
+@pytest.mark.parametrize("value", ["2026-02-30", "07/24/2026", "20260724"])
+def test_build_database_parser_rejects_invalid_not_before_date(value: str) -> None:
+    from massive_speedup import build_database
+
+    with pytest.raises(SystemExit):
+        build_database.build_parser().parse_args(["--not-before", value])
+
+
+def test_build_database_parser_accepts_external_bsort_path() -> None:
+    from massive_speedup import build_database
+
+    args = build_database.build_parser().parse_args(
+        ["--bsort", "--external-sort-path", "/fast/local"]
+    )
+
+    assert args.bsort is True
+    assert args.external_sort_path == Path("/fast/local")
+
+
+def test_build_database_finds_bsort_beside_virtualenv_python(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from massive_speedup import build_database
+
+    bin_path = tmp_path / ".venv" / "bin"
+    bin_path.mkdir(parents=True)
+    python = bin_path / "python"
+    bsort = bin_path / "bsort"
+    python.write_bytes(b"")
+    bsort.write_bytes(b"")
+    bsort.chmod(0o755)
+
+    monkeypatch.setattr(build_database.shutil, "which", lambda name: None)
+    monkeypatch.setattr(build_database.sys, "executable", str(python))
+
+    assert build_database._resolve_bsort_executable() == bsort.resolve()
+
+
+def test_build_database_parser_rejects_nonpositive_process_count() -> None:
+    from massive_speedup import build_database
+
+    with pytest.raises(SystemExit):
+        build_database.build_parser().parse_args(["--processes", "0"])
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("8192", 8 << 10),
+        ("256KiB", 256 << 10),
+        ("1M", 1 << 20),
+        ("8MiB", 8 << 20),
+    ],
+)
+def test_build_database_parser_accepts_configurable_block_size(
+    value: str,
+    expected: int,
+) -> None:
+    from massive_speedup import build_database
+
+    args = build_database.build_parser().parse_args(
+        ["--lockstep-writer", "--block-size", value]
+    )
+
+    assert args.lockstep_writer is True
+    assert args.block_size == expected
+
+
+@pytest.mark.parametrize("value", ["0", "4KiB", "large"])
+def test_build_database_parser_rejects_invalid_block_size(value: str) -> None:
+    from massive_speedup import build_database
+
+    with pytest.raises(SystemExit):
+        build_database.build_parser().parse_args(["--block-size", value])
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("stock", "stock"),
+        ("stocks", "stock"),
+        ("currencies", "currency"),
+        ("forex", "currency"),
+        ("cryptos", "crypto"),
+        ("options", "option"),
+        ("futures", "future"),
+        ("indices", "index"),
+    ],
+)
+def test_build_database_parser_accepts_only_family_aliases(
+    value: str,
+    expected: str,
+) -> None:
+    from massive_speedup import build_database
+
+    args = build_database.build_parser().parse_args(["--only", value])
+
+    assert args.only == expected
+
+
+def test_build_database_parser_rejects_unknown_only_family() -> None:
+    from massive_speedup import build_database
+
+    with pytest.raises(SystemExit):
+        build_database.build_parser().parse_args(["--only", "fund"])
+
+
+def test_build_database_processes_tasks_in_separate_workers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from massive_speedup import build_database
+
+    tasks = [
+        (Path("one.csv.gz"), Path("database"), False),
+        (Path("two.csv.gz"), Path("database"), False),
+    ]
+    expected = [
+        (Path("one.csv.gz"), "stock_trade", 1, 0.1, None),
+        (Path("two.csv.gz"), "stock_quote", 2, 0.2, None),
+    ]
+    calls = []
+    write_block_lock = object()
+
+    class FakePool:
+        def __init__(
+            self,
+            *,
+            processes: int,
+            initializer,
+            initargs,
+            maxtasksperchild: int,
+        ) -> None:
+            calls.append(
+                (
+                    "create",
+                    processes,
+                    initializer,
+                    initargs,
+                    maxtasksperchild,
+                )
+            )
+
+        def imap_unordered(self, function, received_tasks, *, chunksize: int):
+            calls.append(("imap_unordered", function, received_tasks, chunksize))
+            return iter(expected)
+
+        def close(self) -> None:
+            calls.append(("close",))
+
+        def join(self) -> None:
+            calls.append(("join",))
+
+        def terminate(self) -> None:
+            calls.append(("terminate",))
+
+    class FakeContext:
+        @staticmethod
+        def Lock():
+            return write_block_lock
+
+        @staticmethod
+        def Pool(*, processes: int, initializer, initargs, maxtasksperchild: int):
+            return FakePool(
+                processes=processes,
+                initializer=initializer,
+                initargs=initargs,
+                maxtasksperchild=maxtasksperchild,
+            )
+
+    def fake_get_context(method: str) -> FakeContext:
+        calls.append(("context", method))
+        return FakeContext()
+
+    monkeypatch.setattr(
+        build_database.multiprocessing,
+        "get_context",
+        fake_get_context,
+    )
+    monkeypatch.setattr(build_database.os, "cpu_count", lambda: 8)
+
+    results = list(
+        build_database._process_tasks(
+            tasks,
+            processes=8,
+            lockstep_writer=True,
+            block_size=8 << 20,
+        )
+    )
+
+    assert results == expected
+    assert calls == [
+        ("context", "spawn"),
+        (
+            "create",
+                2,
+                build_database._initialize_worker,
+                (
+                    write_block_lock,
+                    8 << 20,
+                    4,
+                    None,
+                    build_database.DEFAULT_EXTERNAL_SORT_PATH,
+                ),
+                1,
+        ),
+        ("imap_unordered", build_database._process_input_file, tasks, 1),
+        ("close",),
+        ("join",),
+    ]
+
+
+def test_build_database_terminates_workers_immediately_on_interrupt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from massive_speedup import build_database
+
+    tasks = [(Path("one.csv.gz"), Path("database"), False)]
+    calls = []
+
+    class InterruptedResults:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            raise KeyboardInterrupt
+
+    class FakePool:
+        @staticmethod
+        def imap_unordered(function, received_tasks, *, chunksize: int):
+            calls.append(("imap_unordered", function, received_tasks, chunksize))
+            return InterruptedResults()
+
+        @staticmethod
+        def close() -> None:
+            calls.append(("close",))
+
+        @staticmethod
+        def join() -> None:
+            calls.append(("join",))
+
+        @staticmethod
+        def terminate() -> None:
+            calls.append(("terminate",))
+
+    class FakeContext:
+        @staticmethod
+        def Lock():
+            raise AssertionError("lock should not be created")
+
+        @staticmethod
+        def Pool(**kwargs):
+            calls.append(("create", kwargs))
+            return FakePool()
+
+    monkeypatch.setattr(
+        build_database.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        list(build_database._process_tasks(tasks, processes=2))
+
+    assert calls[-2:] == [("terminate",), ("join",)]
+    assert ("close",) not in calls
+
+
+def test_build_database_worker_uses_single_native_inferred_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from massive_speedup import build_database
+
+    input_path = Path("stock.csv.gz")
+    database = Path("database")
+    events = []
+    write_block_lock = object()
+
+    def fake_write_database_file_inferred(
+        path: Path,
+        *,
+        database_path: Path,
+        force: bool,
+        write_lock: object,
+        block_size: int,
+        reader_parallelization: int,
+    ) -> tuple[str, int, int]:
+        events.append(
+            (
+                "infer_and_build",
+                path,
+                database_path,
+                force,
+                write_lock,
+                block_size,
+                reader_parallelization,
+            )
+        )
+        return "stock_trade", 3, 3
+
+    monkeypatch.setattr(
+        build_database,
+        "write_database_file_inferred_with_stats",
+        fake_write_database_file_inferred,
+    )
+    monkeypatch.setattr(build_database, "_WRITE_BLOCK_LOCK", write_block_lock)
+    monkeypatch.setattr(build_database, "_IO_BLOCK_SIZE", 2 << 20)
+    monkeypatch.setattr(build_database, "_READER_PARALLELIZATION", 3)
+
+    result = build_database._process_input_file((input_path, database, True))
+
+    assert result[0:3] == (input_path, "stock_trade", 3)
+    assert events == [
+        (
+            "infer_and_build",
+            input_path,
+            database,
+            True,
+            write_block_lock,
+            2 << 20,
+            3,
+        ),
+    ]
+
+
+def test_build_database_main_cleans_local_bsort_run_on_interrupt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from massive_speedup import build_database
+
+    input_path = tmp_path / "stock_quote" / "1970-01-01.csv.gz"
+    input_path.parent.mkdir()
+    input_path.write_bytes(b"")
+    external_sort_path = tmp_path / "local-sort"
+    external_sort_path.mkdir()
+    fake_bsort = tmp_path / "bin" / "bsort"
+    closed = False
+
+    class InterruptedResults:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            raise KeyboardInterrupt
+
+        def close(self) -> None:
+            nonlocal closed
+            closed = True
+
+    monkeypatch.setattr(
+        build_database,
+        "_resolve_bsort_executable",
+        lambda: fake_bsort,
+    )
+    monkeypatch.setattr(
+        build_database,
+        "_process_tasks",
+        lambda *args, **kwargs: InterruptedResults(),
+    )
+
+    result = build_database.main(
+        [
+            "--processes",
+            "2",
+            "--bsort",
+            "--external-sort-path",
+            str(external_sort_path),
+            "--database",
+            str(tmp_path / "database"),
+            str(input_path),
+        ]
+    )
+
+    assert result == 130
+    assert closed is True
+    assert list(external_sort_path.iterdir()) == []
+    output = capsys.readouterr().out
+    assert "complete database files were left intact" in output
+    assert ".incomplete" in output
+
+
+def test_build_database_main_handles_interrupt_while_scanning_targets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from massive_speedup import build_database
+
+    input_path = tmp_path / "stock_quote" / "1970-01-01.csv.gz"
+    input_path.parent.mkdir()
+    input_path.write_bytes(b"")
+
+    def interrupt(task):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        build_database,
+        "_complete_target_directory",
+        interrupt,
+    )
+
+    result = build_database.main(
+        [
+            "--database",
+            str(tmp_path / "database"),
+            str(input_path),
+        ]
+    )
+
+    assert result == 130
+    assert "Interrupted: complete database files were left intact" in (
+        capsys.readouterr().out
+    )
+
+
+def test_build_database_main_uses_configured_storage_roots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from massive_speedup import build_database
+
+    download = tmp_path / "download"
+    database = tmp_path / "database"
+    stock_path = download / "stock_quote" / "1970-01-01.csv.gz"
+    stock_path.parent.mkdir(parents=True)
+    with gzip.open(stock_path, "wt", encoding="utf-8", newline="") as handle:
+        handle.write(build_database.STOCK_QUOTE_HEADER + "\n")
+
+    calls = []
+
+    def fake_write_database_file_inferred(
+        input_path: Path,
+        *,
+        database_path: Path,
+        force: bool = False,
+    ) -> tuple[str, int, int]:
+        calls.append((input_path, database_path, force))
+        return "stock_quote", 1, 1
+
+    monkeypatch.setenv("MASSIVE_SPEEDUP_DOWNLOAD_PATH", str(download))
+    monkeypatch.setenv("MASSIVE_SPEEDUP_DB_PATH", str(database))
+    monkeypatch.setattr(
+        build_database,
+        "write_database_file_inferred_with_stats",
+        fake_write_database_file_inferred,
+    )
+
+    result = build_database.main(["--processes", "1"])
+
+    assert result == 0
+    assert calls == [(stock_path, database, False)]
+
+
+def test_build_database_main_only_dispatches_selected_family(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from massive_speedup import build_database
+
+    stock_path = tmp_path / "download" / "stock_trade" / "1970-01-01.csv.gz"
+    option_path = tmp_path / "download" / "option_trade" / "1970-01-01.csv.gz"
+    for path in (stock_path, option_path):
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"")
+    database = tmp_path / "database"
+    calls = []
+
+    def fake_write_database_file_inferred(
+        input_path: Path,
+        *,
+        database_path: Path,
+        force: bool = False,
+    ) -> tuple[str, int, int]:
+        calls.append((input_path, database_path, force))
+        return "stock_trade", 1, 1
+
+    monkeypatch.setattr(
+        build_database,
+        "write_database_file_inferred_with_stats",
+        fake_write_database_file_inferred,
+    )
+
+    result = build_database.main(
+        [
+            "--processes",
+            "1",
+            "--only",
+            "stock",
+            "--database",
+            str(database),
+            str(tmp_path / "download"),
+        ]
+    )
+
+    assert result == 0
+    assert calls == [(stock_path, database, False)]
+
+
+def test_build_database_main_only_dispatches_dates_not_before_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from massive_speedup import build_database
+
+    download = tmp_path / "download" / "stock_trade"
+    download.mkdir(parents=True)
+    input_paths = [
+        download / f"{date}.csv.gz"
+        for date in ("1970-01-01", "1970-01-02", "1970-01-03")
+    ]
+    for input_path in input_paths:
+        input_path.write_bytes(b"")
+
+    database = tmp_path / "database"
+    calls = []
+
+    def fake_write_database_file_inferred(
+        input_path: Path,
+        *,
+        database_path: Path,
+        force: bool = False,
+    ) -> tuple[str, int, int]:
+        calls.append((input_path, database_path, force))
+        return "stock_trade", 0, 0
+
+    monkeypatch.setattr(
+        build_database,
+        "write_database_file_inferred_with_stats",
+        fake_write_database_file_inferred,
+    )
+
+    result = build_database.main(
+        [
+            "--processes",
+            "1",
+            "--not-before",
+            "1970-01-02",
+            "--database",
+            str(database),
+            str(download),
+        ]
+    )
+
+    assert result == 0
+    assert calls == [
+        (input_paths[2], database, False),
+        (input_paths[1], database, False),
+    ]
+
+
+def test_build_database_main_builds_files_in_worker_processes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from massive_speedup import build_database
+
+    try:
+        module = import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
+
+    download = tmp_path / "download"
+    database = tmp_path / "database"
+    for date in ("1970-01-01", "1970-01-02"):
+        input_path = download / "stock_quote" / f"{date}.csv.gz"
+        input_path.parent.mkdir(parents=True, exist_ok=True)
+        with gzip.open(input_path, "wt", encoding="utf-8", newline="") as handle:
+            handle.write(build_database.STOCK_QUOTE_HEADER + "\n")
+            for index in range(300):
+                handle.write(
+                    f"A,8,10.1,1,8,10.0,1,1,,{index},{index},{index},1,0\n"
+                )
+
+    monkeypatch.setenv("MASSIVE_SPEEDUP_DOWNLOAD_PATH", str(download))
+    monkeypatch.setenv("MASSIVE_SPEEDUP_DB_PATH", str(database))
+
+    result = build_database.main(
+        [
+            "--processes",
+            "2",
+            "--lockstep-writer",
+            "--block-size",
+            "8KiB",
+        ]
+    )
+
+    assert result == 0
+    assert (
+        database / "stock_quote" / "1970-01-01" / "A"
+    ).stat().st_size == 300 * module.StockQuote.packed_size
+    assert (
+        database / "stock_quote" / "1970-01-02" / "A"
+    ).stat().st_size == 300 * module.StockQuote.packed_size
 
 
 def test_build_database_expand_input_files_recurses_directories(tmp_path: Path) -> None:
@@ -1289,16 +1375,90 @@ def test_build_database_expand_input_files_recurses_directories(tmp_path: Path) 
 
     nested = tmp_path / "nested"
     nested.mkdir()
-    top_csv = tmp_path / "a.csv.gz"
-    nested_csv = nested / "b.csv.gz"
+    top_csv = tmp_path / "2026-07-23.csv.gz"
+    nested_csv = nested / "2026-07-24.csv.gz"
+    undated_csv = nested / "foobar.csv.gz"
     ignored = nested / "c.txt"
     top_csv.write_bytes(b"")
     nested_csv.write_bytes(b"")
+    undated_csv.write_bytes(b"")
     ignored.write_text("x", encoding="utf-8")
 
     files = build_database.expand_input_files([tmp_path])
 
-    assert files == sorted([top_csv.resolve(), nested_csv.resolve()])
+    assert files == [nested_csv.resolve(), top_csv.resolve()]
+    assert undated_csv.resolve() not in files
+
+
+def test_build_database_expand_input_files_filters_family_before_dispatch(
+    tmp_path: Path,
+) -> None:
+    from massive_speedup import build_database
+
+    stock_trade = tmp_path / "stock_trade" / "1970-01-01.csv.gz"
+    stock_quote = tmp_path / "stock_quote" / "1970-01-01.csv.gz"
+    option_trade = tmp_path / "option_trade" / "1970-01-01.csv.gz"
+    future_trade = tmp_path / "future_cme_trade" / "1970-01-01.csv.gz"
+    for path in (stock_trade, stock_quote, option_trade, future_trade):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"")
+
+    files = build_database.expand_input_files([tmp_path], only_family="stock")
+
+    assert files == sorted([stock_quote.resolve(), stock_trade.resolve()])
+
+
+def test_build_database_expand_input_files_filters_not_before_inclusively(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from massive_speedup import build_database
+
+    root = tmp_path / "stock_trade"
+    root.mkdir()
+    before = root / "2026-07-22.csv.gz"
+    boundary = root / "2026-07-23.csv.gz"
+    after = root / "2026-07-24.csv.gz"
+    undated = root / "latest.csv.gz"
+    for path in (before, boundary, after, undated):
+        path.write_bytes(b"")
+
+    files = build_database.expand_input_files(
+        [root],
+        not_before=dt.date(2026, 7, 23),
+    )
+
+    assert files == [after.resolve(), boundary.resolve()]
+    output = capsys.readouterr().out
+    assert "Skipping input without a valid YYYY-MM-DD.csv.gz filename" in output
+    assert str(undated.resolve()) in output
+
+
+def test_build_database_expand_input_files_orders_newest_dates_first_globally(
+    tmp_path: Path,
+) -> None:
+    from massive_speedup import build_database
+
+    paths = [
+        tmp_path / "stock_trade" / "2026-07-22.csv.gz",
+        tmp_path / "option_quote" / "2026-07-24.csv.gz",
+        tmp_path / "stock_quote" / "2026-07-24.csv.gz",
+        tmp_path / "currency_quote" / "2026-07-23.csv.gz",
+        tmp_path / "stock_trade" / "latest.csv.gz",
+    ]
+    for path in paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"")
+
+    files = build_database.expand_input_files([tmp_path])
+
+    assert files == [
+        paths[1].resolve(),
+        paths[2].resolve(),
+        paths[3].resolve(),
+        paths[0].resolve(),
+    ]
+    assert paths[4].resolve() not in files
 
 
 def test_build_database_infers_record_type_from_header(tmp_path: Path) -> None:
@@ -1337,6 +1497,124 @@ def test_build_database_infers_record_type_from_header(tmp_path: Path) -> None:
     assert build_database.infer_record_type(futures_quote_path) == "future_nymex_quote"
 
 
+def test_native_build_database_infers_header_from_active_rapidgzip_reader(
+    tmp_path: Path,
+) -> None:
+    from massive_speedup import build_database
+
+    try:
+        import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
+
+    cases = [
+        (build_database.STOCK_TRADE_HEADER, "stock_trade", "stock_trade"),
+        (build_database.STOCK_QUOTE_HEADER, "stock_quote", "stock_quote"),
+        (build_database.CURRENCY_QUOTE_HEADER, "currency_quote", "currency_quote"),
+        (build_database.CRYPTO_TRADE_HEADER, "crypto_trade", "crypto_trade"),
+        (build_database.INDEX_VALUE_HEADER, "index_value", "index_value"),
+        (build_database.OPTION_TRADE_HEADER, "option_trade", "option_trade"),
+        (build_database.OPTION_QUOTE_HEADER, "option_quote", "option_quote"),
+        (build_database.FUTURES_TRADE_HEADER, "future_cme_trade", "future_cme_trade"),
+        (build_database.FUTURES_QUOTE_HEADER, "future_nymex_quote", "future_nymex_quote"),
+    ]
+
+    for index, (header, category, expected_type) in enumerate(cases):
+        input_path = tmp_path / category / f"1970-01-{index + 1:02d}.csv.gz"
+        input_path.parent.mkdir(parents=True)
+        with gzip.open(input_path, "wt", encoding="utf-8", newline="") as handle:
+            handle.write(header + "\n")
+
+        result = build_database.write_database_file_inferred(
+            input_path,
+            database_path=tmp_path / "database",
+        )
+
+        assert result == (expected_type, 0)
+
+
+def test_native_build_database_stats_count_processed_rows_when_output_exists(
+    tmp_path: Path,
+) -> None:
+    from massive_speedup import build_database
+
+    try:
+        import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
+
+    input_path = tmp_path / "stock_trade" / "1970-01-01.csv.gz"
+    input_path.parent.mkdir()
+    with gzip.open(input_path, "wt", encoding="utf-8", newline="") as handle:
+        handle.write(build_database.STOCK_TRADE_HEADER + "\n")
+        handle.write("A,12,0,8,1,1000,10.0,1,1000,1,1,0,0\n")
+        handle.write("A,12,0,8,2,2000,11.0,1,2000,1,1,0,0\n")
+
+    database = tmp_path / "database"
+    assert (
+        build_database.write_database_file_inferred(
+            input_path,
+            database_path=database,
+        )
+        == ("stock_trade", 2)
+    )
+    assert build_database.write_database_file_inferred_with_stats(
+        input_path,
+        database_path=database,
+    ) == ("stock_trade", 0, 2)
+
+
+def test_native_build_database_inferred_rejects_unsupported_header(
+    tmp_path: Path,
+) -> None:
+    from massive_speedup import build_database
+
+    try:
+        import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
+
+    input_path = tmp_path / "unsupported" / "1970-01-01.csv.gz"
+    input_path.parent.mkdir()
+    with gzip.open(input_path, "wt", encoding="utf-8", newline="") as handle:
+        handle.write("not,a,supported,header\n")
+
+    with pytest.raises(ValueError, match="unsupported input header"):
+        build_database.write_database_file_inferred(
+            input_path,
+            database_path=tmp_path / "database",
+        )
+
+
+def test_build_database_main_skips_native_malformed_gzip(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from massive_speedup import build_database
+
+    try:
+        import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
+
+    input_path = tmp_path / "stock_quote" / "1970-01-01.csv.gz"
+    input_path.parent.mkdir()
+    input_path.write_bytes(b"not a gzip stream")
+
+    result = build_database.main(
+        [
+            "--processes",
+            "1",
+            "--database",
+            str(tmp_path / "database"),
+            str(input_path),
+        ]
+    )
+
+    assert result == 0
+    assert "Skipping malformed gzip" in capsys.readouterr().out
+
+
 def test_build_database_main_processes_mixed_positional_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1355,21 +1633,27 @@ def test_build_database_main_processes_mixed_positional_files(
     calls = []
     titles: list[str] = []
 
-    def fake_write_database_file(
+    def fake_write_database_file_inferred(
         input_path: Path,
-        record_type: str,
         *,
         database_path: Path,
         force: bool = False,
-    ) -> int:
+    ) -> tuple[str, int, int]:
+        record_type = build_database.infer_record_type(input_path)
         calls.append(("write", input_path, database_path, record_type, force))
-        return 1
+        return record_type, 1, 1
 
     monkeypatch.setattr(build_database, "set_process_title", titles.append)
-    monkeypatch.setattr(build_database, "write_database_file", fake_write_database_file)
+    monkeypatch.setattr(
+        build_database,
+        "write_database_file_inferred_with_stats",
+        fake_write_database_file_inferred,
+    )
 
     result = build_database.main(
         [
+            "--processes",
+            "1",
             "--database",
             str(tmp_path / "db"),
             str(stock_path),
@@ -1403,20 +1687,26 @@ def test_build_database_main_skips_bad_header_and_logs(
 
     calls = []
 
-    def fake_write_database_file(
+    def fake_write_database_file_inferred(
         input_path: Path,
-        record_type: str,
         *,
         database_path: Path,
         force: bool = False,
-    ) -> int:
+    ) -> tuple[str, int, int]:
+        record_type = build_database.infer_record_type(input_path)
         calls.append((input_path, record_type))
-        return 0
+        return record_type, 0, 0
 
-    monkeypatch.setattr(build_database, "write_database_file", fake_write_database_file)
+    monkeypatch.setattr(
+        build_database,
+        "write_database_file_inferred_with_stats",
+        fake_write_database_file_inferred,
+    )
 
     result = build_database.main(
         [
+            "--processes",
+            "1",
             "--database",
             str(tmp_path / "db"),
             str(bad_path),
@@ -1444,20 +1734,25 @@ def test_build_database_main_force_passes_through(
 
     calls = []
 
-    def fake_write_database_file(
+    def fake_write_database_file_inferred(
         input_path: Path,
-        record_type: str,
         *,
         database_path: Path,
         force: bool = False,
-    ) -> int:
-        calls.append((input_path, database_path, record_type, force))
-        return 1
+    ) -> tuple[str, int, int]:
+        calls.append((input_path, database_path, force))
+        return "stock_quote", 1, 1
 
-    monkeypatch.setattr(build_database, "write_database_file", fake_write_database_file)
+    monkeypatch.setattr(
+        build_database,
+        "write_database_file_inferred_with_stats",
+        fake_write_database_file_inferred,
+    )
 
     result = build_database.main(
         [
+            "--processes",
+            "1",
             "--force",
             "--database",
             str(tmp_path / "db"),
@@ -1466,7 +1761,7 @@ def test_build_database_main_force_passes_through(
     )
 
     assert result == 0
-    assert calls == [(stock_path, tmp_path / "db", "stock_quote", True)]
+    assert calls == [(stock_path, tmp_path / "db", True)]
 
 
 def test_build_database_main_delegates_existing_date_directory_to_native_builder(
@@ -1486,22 +1781,122 @@ def test_build_database_main_delegates_existing_date_directory_to_native_builder
 
     calls = []
 
-    def fake_write_database_file(
+    def fake_write_database_file_inferred(
         input_path: Path,
-        record_type: str,
         *,
         database_path: Path,
         force: bool = False,
-    ) -> int:
-        calls.append((input_path, database_path, record_type, force))
-        return 1
+    ) -> tuple[str, int, int]:
+        calls.append((input_path, database_path, force))
+        return "stock_quote", 1, 1
 
-    monkeypatch.setattr(build_database, "write_database_file", fake_write_database_file)
+    monkeypatch.setattr(
+        build_database,
+        "write_database_file_inferred_with_stats",
+        fake_write_database_file_inferred,
+    )
 
-    result = build_database.main(["--database", str(database), str(stock_path)])
+    result = build_database.main(
+        ["--processes", "1", "--database", str(database), str(stock_path)]
+    )
 
     assert result == 0
-    assert calls == [(stock_path, database, "stock_quote", False)]
+    assert calls == [(stock_path, database, False)]
+
+
+def test_build_database_main_skips_complete_target_without_opening_gzip(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from massive_speedup import build_database
+
+    stock_path = tmp_path / "stock_quote" / "1970-01-01.csv.gz"
+    stock_path.parent.mkdir()
+    stock_path.write_bytes(b"this must never be opened as gzip")
+
+    database = tmp_path / "db"
+    target = database / "stock_quote" / "1970-01-01"
+    target.mkdir(parents=True)
+    (target / "A").write_bytes(b"complete database bytes")
+
+    def fail_if_opened(*args, **kwargs):
+        raise AssertionError("complete source gzip was opened")
+
+    monkeypatch.setattr(
+        build_database,
+        "write_database_file_inferred_with_stats",
+        fail_if_opened,
+    )
+
+    result = build_database.main(
+        ["--processes", "1", "--database", str(database), str(stock_path)]
+    )
+
+    assert result == 0
+    output = capsys.readouterr().out
+    assert "Skipping 1 complete target directory" in output
+    assert "without opening the source gzip" in output
+
+
+def test_build_database_does_not_skip_target_with_nested_incomplete_file(
+    tmp_path: Path,
+) -> None:
+    from massive_speedup import build_database
+
+    option_path = tmp_path / "option_quote" / "1970-01-01.csv.gz"
+    database = tmp_path / "db"
+    target = database / "option_quote" / "1970-01-01"
+    nested = target / "A" / "1970-02-01" / "C"
+    nested.mkdir(parents=True)
+    (nested / "00100000").write_bytes(b"complete database bytes")
+    (nested / "00200000.incomplete").write_bytes(b"partial database bytes")
+
+    task = (option_path, database, False)
+
+    assert build_database._complete_target_directory(task) is None
+
+
+def test_build_database_directory_marker_tracks_success_and_interrupt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from massive_speedup import build_database
+
+    stock_path = tmp_path / "stock_quote" / "1970-01-01.csv.gz"
+    database = tmp_path / "db"
+    target = database / "stock_quote" / "1970-01-01"
+    task = (stock_path, database, False)
+
+    monkeypatch.setattr(
+        build_database,
+        "write_database_file_inferred_with_stats",
+        lambda *args, **kwargs: ("stock_quote", 0, 0),
+    )
+
+    assert build_database._process_input_file(task)[1:3] == ("stock_quote", 0)
+    assert (target / build_database.DIRECTORY_COMPLETE_MARKER).is_file()
+    assert not (target / build_database.DIRECTORY_INCOMPLETE_MARKER).exists()
+    assert build_database._complete_target_directory(task) == (
+        "stock_quote",
+        target,
+    )
+
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        build_database,
+        "write_database_file_inferred_with_stats",
+        interrupt,
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        build_database._process_input_file((stock_path, database, True))
+
+    assert (target / build_database.DIRECTORY_INCOMPLETE_MARKER).is_file()
+    assert not (target / build_database.DIRECTORY_COMPLETE_MARKER).exists()
+    assert build_database._complete_target_directory(task) is None
 
 
 def test_build_database_main_force_overrides_complete_date_directory_skip(
@@ -1521,20 +1916,25 @@ def test_build_database_main_force_overrides_complete_date_directory_skip(
 
     calls = []
 
-    def fake_write_database_file(
+    def fake_write_database_file_inferred(
         input_path: Path,
-        record_type: str,
         *,
         database_path: Path,
         force: bool = False,
-    ) -> int:
-        calls.append((input_path, database_path, record_type, force))
-        return 1
+    ) -> tuple[str, int, int]:
+        calls.append((input_path, database_path, force))
+        return "stock_quote", 1, 1
 
-    monkeypatch.setattr(build_database, "write_database_file", fake_write_database_file)
+    monkeypatch.setattr(
+        build_database,
+        "write_database_file_inferred_with_stats",
+        fake_write_database_file_inferred,
+    )
 
     result = build_database.main(
         [
+            "--processes",
+            "1",
             "--force",
             "--database",
             str(database),
@@ -1543,7 +1943,7 @@ def test_build_database_main_force_overrides_complete_date_directory_skip(
     )
 
     assert result == 0
-    assert calls == [(stock_path, database, "stock_quote", True)]
+    assert calls == [(stock_path, database, True)]
 
 
 def test_build_database_main_malformed_gzip_logs_and_continues(
@@ -1560,12 +1960,18 @@ def test_build_database_main_malformed_gzip_logs_and_continues(
         handle.write("A,8,0.0,0,8,0.0,0,1,,0,322,0,1,0\n")
 
     database = tmp_path / "db"
-    def fake_write_database_file(*args, **kwargs):
+    def fake_write_database_file_inferred(*args, **kwargs):
         raise gzip.BadGzipFile("corrupt stream")
 
-    monkeypatch.setattr(build_database, "write_database_file", fake_write_database_file)
+    monkeypatch.setattr(
+        build_database,
+        "write_database_file_inferred_with_stats",
+        fake_write_database_file_inferred,
+    )
 
-    result = build_database.main(["--database", str(database), str(stock_path)])
+    result = build_database.main(
+        ["--processes", "1", "--database", str(database), str(stock_path)]
+    )
 
     assert result == 0
     output = capsys.readouterr().out
@@ -1589,13 +1995,15 @@ def test_build_database_main_benchmark_prints_metrics(
 
     monkeypatch.setattr(
         build_database,
-        "write_database_file",
-        lambda input_path, record_type, *, database_path, force=False: 2,
+        "write_database_file_inferred_with_stats",
+        lambda input_path, *, database_path, force=False: ("stock_quote", 2, 2),
     )
     monkeypatch.setattr(build_database.time, "perf_counter", lambda: next(timer_values))
 
     result = build_database.main(
         [
+            "--processes",
+            "1",
             "--benchmark",
             "--database",
             str(tmp_path / "db"),
@@ -1612,7 +2020,7 @@ def test_build_database_main_benchmark_prints_metrics(
     assert "throughput=0.000001 Mlines/s" in stdout
 
 
-def test_build_database_main_benchmark_reports_native_skip_count(
+def test_build_database_main_benchmark_reports_processed_count_when_outputs_exist(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1628,11 +2036,17 @@ def test_build_database_main_benchmark_reports_native_skip_count(
     database = tmp_path / "db"
     (database / "stock_quote" / "1970-01-01").mkdir(parents=True)
     timer_values = iter([10.0, 12.0])
-    monkeypatch.setattr(build_database, "write_database_file", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(
+        build_database,
+        "write_database_file_inferred_with_stats",
+        lambda *args, **kwargs: ("stock_quote", 0, 2),
+    )
     monkeypatch.setattr(build_database.time, "perf_counter", lambda: next(timer_values))
 
     result = build_database.main(
         [
+            "--processes",
+            "1",
             "--benchmark",
             "--database",
             str(database),
@@ -1642,7 +2056,8 @@ def test_build_database_main_benchmark_reports_native_skip_count(
 
     assert result == 0
     output = capsys.readouterr().out
-    assert "lines=0 lines" in output
+    assert "lines=2 lines" in output
+    assert "throughput=0.000001 Mlines/s" in output
 
 
 def test_build_database_file_native_groups_records_by_ticker_using_filename_date(
@@ -1677,6 +2092,307 @@ def test_build_database_file_native_groups_records_by_ticker_using_filename_date
     assert module.StockTrade.from_packed((root / "A").read_bytes(), "A").ticker == "A"
     assert module.StockTrade.from_packed((root / "B").read_bytes(), "B").ticker == "B"
     assert not (tmp_path / "db" / "stock_trade" / "1970-01-02").exists()
+
+
+def test_build_database_file_native_flushes_configurable_blocks_under_lock(
+    tmp_path: Path,
+) -> None:
+    from massive_speedup import build_database
+    try:
+        module = import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
+
+    class RecordingLock:
+        def __init__(self) -> None:
+            self.acquisitions = 0
+            self.releases = 0
+            self.active = False
+
+        def acquire(self) -> None:
+            assert self.active is False
+            self.active = True
+            self.acquisitions += 1
+
+        def release(self) -> None:
+            assert self.active is True
+            self.active = False
+            self.releases += 1
+
+    path = tmp_path / "stock_trade" / "1970-01-01.csv.gz"
+    path.parent.mkdir()
+    with gzip.open(path, "wt", encoding="utf-8", newline="") as handle:
+        handle.write(build_database.STOCK_TRADE_HEADER + "\n")
+        for index in range(300):
+            handle.write(
+                f"A,12,0,8,{index},{index},129.79,{index},{index},100,1,0,0\n"
+            )
+
+    write_lock = RecordingLock()
+    rows_written = build_database.write_database_file(
+        path,
+        "stock_trade",
+        database_path=tmp_path / "db",
+        write_lock=write_lock,
+        block_size=8 << 10,
+    )
+
+    output = tmp_path / "db" / "stock_trade" / "1970-01-01" / "A"
+    assert rows_written == 300
+    assert output.stat().st_size == 300 * module.StockTrade.packed_size
+    assert write_lock.active is False
+    assert write_lock.acquisitions == write_lock.releases
+    assert 6 <= write_lock.acquisitions < 20
+
+
+def test_external_bsort_stages_unsorted_and_locksteps_final_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from massive_speedup import build_database
+    try:
+        module = import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
+
+    input_path = tmp_path / "stock_quote" / "1970-01-02.csv.gz"
+    input_path.parent.mkdir()
+    with gzip.open(input_path, "wt", encoding="utf-8", newline="") as handle:
+        handle.write(build_database.STOCK_QUOTE_HEADER + "\n")
+        for sequence, timestamp in enumerate((30, 10, 20), start=1):
+            handle.write(
+                f"A,8,10.1,1,8,10.0,1,1,,{timestamp},{sequence},"
+                f"{timestamp},1,0\n"
+            )
+
+    bsort_calls = []
+
+    def fake_bsort(command, **kwargs):
+        record_size = int(command[2])
+        staged_file = Path(command[-1])
+        payload = staged_file.read_bytes()
+        records = [
+            payload[offset:offset + record_size]
+            for offset in range(0, len(payload), record_size)
+        ]
+        bsort_calls.append(
+            (
+                command,
+                kwargs,
+                [int.from_bytes(record[:8], "big") for record in records],
+            )
+        )
+        records.sort(key=lambda record: record[:8])
+        staged_file.write_bytes(b"".join(records))
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    class RecordingLock:
+        def __init__(self) -> None:
+            self.acquisitions = 0
+            self.releases = 0
+            self.active = False
+
+        def acquire(self) -> None:
+            assert self.active is False
+            self.active = True
+            self.acquisitions += 1
+
+        def release(self) -> None:
+            assert self.active is True
+            self.active = False
+            self.releases += 1
+
+    monkeypatch.setattr(build_database.subprocess, "run", fake_bsort)
+    local_sort = tmp_path / "local-sort"
+    local_sort.mkdir()
+    database = tmp_path / "database"
+    write_lock = RecordingLock()
+
+    result = build_database._build_database_with_bsort(
+        input_path,
+        database,
+        force=False,
+        executable=Path("/opt/bsort/bin/bsort"),
+        external_sort_path=local_sort,
+        write_lock=write_lock,
+        block_size=8 << 10,
+        reader_parallelization=1,
+    )
+
+    records = module.StockQuoteDatabase(
+        "1970-01-02",
+        "A",
+        database_path=database,
+    )
+    output = database / "stock_quote" / "1970-01-02" / "A"
+
+    assert result == ("stock_quote", 3)
+    assert [row.sip_timestamp for row in records] == [10, 20, 30]
+    assert len(bsort_calls) == 1
+    command, keyword_arguments, staged_timestamps = bsort_calls[0]
+    assert command[0:5] == [
+        "/opt/bsort/bin/bsort",
+        "-r",
+        str(module.StockQuote.packed_size),
+        "-k",
+        "8",
+    ]
+    assert staged_timestamps == [30, 10, 20]
+    assert keyword_arguments == {
+        "check": False,
+        "capture_output": True,
+        "text": True,
+    }
+    assert write_lock.active is False
+    assert write_lock.acquisitions == write_lock.releases
+    assert write_lock.acquisitions >= 3
+    assert output.exists()
+    assert not output.with_name("A.incomplete").exists()
+    assert list(local_sort.iterdir()) == []
+
+
+def test_external_option_staging_streams_interleaved_contracts_without_sorting(
+    tmp_path: Path,
+) -> None:
+    from massive_speedup import build_database
+    try:
+        module = import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
+
+    input_path = tmp_path / "option_trade" / "2026-06-18.csv.gz"
+    input_path.parent.mkdir()
+    with gzip.open(input_path, "wt", encoding="utf-8", newline="") as handle:
+        handle.write(build_database.OPTION_TRADE_HEADER + "\n")
+        handle.write("O:A260618P00135000,209,0,320,13.5,20,2\n")
+        handle.write("O:A260618P00080000,227,0,308,8.0,10,1\n")
+        handle.write("O:A260618P00135000,227,0,308,13.0,5,1\n")
+
+    staging_database = tmp_path / "staging"
+    rows_written = build_database.write_database_file(
+        input_path,
+        "option_trade",
+        database_path=staging_database,
+        force=True,
+        sort_records=False,
+    )
+
+    root = staging_database / "option_trade" / "2026-06-18" / "A" / "2026-06-18" / "P"
+    high_strike = (root / "00135000").read_bytes()
+    low_strike = (root / "00080000").read_bytes()
+
+    def timestamps(payload: bytes) -> list[int]:
+        return [
+            module.OptionTrade.sip_timestamp_from_packed(
+                payload[offset:offset + module.OptionTrade.packed_size]
+            )
+            for offset in range(0, len(payload), module.OptionTrade.packed_size)
+        ]
+
+    assert rows_written == 3
+    assert timestamps(high_strike) == [20, 5]
+    assert timestamps(low_strike) == [10]
+
+
+def test_external_publish_leaves_rewrite_marker_and_preserves_final_on_interrupt(
+    tmp_path: Path,
+) -> None:
+    from massive_speedup import build_database
+
+    staged_file = tmp_path / "staged"
+    staged_file.write_bytes(b"new complete bytes")
+    destination = tmp_path / "database" / "record"
+    destination.parent.mkdir()
+    destination.write_bytes(b"old complete bytes")
+
+    class InterruptingLock:
+        def __init__(self) -> None:
+            self.acquisitions = 0
+            self.active = False
+
+        def acquire(self) -> None:
+            self.acquisitions += 1
+            if self.acquisitions == 2:
+                raise KeyboardInterrupt
+            assert self.active is False
+            self.active = True
+
+        def release(self) -> None:
+            assert self.active is True
+            self.active = False
+
+    with pytest.raises(KeyboardInterrupt):
+        build_database._publish_sorted_file(
+            staged_file,
+            destination,
+            force=True,
+            write_lock=InterruptingLock(),
+            block_size=8 << 10,
+        )
+
+    assert destination.read_bytes() == b"old complete bytes"
+    assert destination.with_name("record.incomplete").exists()
+
+
+def test_external_publish_overwrites_stale_incomplete_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from massive_speedup import build_database
+
+    cache_advice = []
+    monkeypatch.setattr(
+        build_database.os,
+        "posix_fadvise",
+        lambda descriptor, offset, length, advice: cache_advice.append(
+            (descriptor, offset, length, advice)
+        ),
+    )
+    staged_file = tmp_path / "staged"
+    staged_file.write_bytes(b"new complete bytes")
+    destination = tmp_path / "database" / "record"
+    destination.parent.mkdir()
+    incomplete = destination.with_name("record.incomplete")
+    incomplete.write_bytes(b"stale partial bytes that must be truncated")
+
+    assert build_database._publish_sorted_file(
+        staged_file,
+        destination,
+        force=False,
+        write_lock=None,
+        block_size=8 << 10,
+    )
+    assert destination.read_bytes() == b"new complete bytes"
+    assert not incomplete.exists()
+    assert len(cache_advice) == 2
+    assert all(
+        (offset, length, advice) == (0, 0, build_database.os.POSIX_FADV_DONTNEED)
+        for _, offset, length, advice in cache_advice
+    )
+
+
+def test_build_database_file_rejects_unbounded_reader_parallelization(
+    tmp_path: Path,
+) -> None:
+    from massive_speedup import build_database
+
+    try:
+        import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
+
+    path = tmp_path / "stock_trade" / "1970-01-01.csv.gz"
+    path.parent.mkdir()
+    with gzip.open(path, "wt", encoding="utf-8", newline="") as handle:
+        handle.write(build_database.STOCK_TRADE_HEADER + "\n")
+
+    with pytest.raises(ValueError, match="reader_parallelization"):
+        build_database.write_database_file(
+            path,
+            "stock_trade",
+            database_path=tmp_path / "db",
+            reader_parallelization=0,
+        )
 
 
 def test_build_database_file_native_skips_existing_tickers_unless_forced(
@@ -1737,6 +2453,41 @@ def test_build_database_file_native_skips_existing_tickers_unless_forced(
     assert overwritten.price == pytest.approx(200.25)
 
 
+def test_build_database_file_native_overwrites_stale_incomplete_file(
+    tmp_path: Path,
+) -> None:
+    from massive_speedup import build_database
+    try:
+        module = import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
+
+    input_path = tmp_path / "stock_trade" / "1970-01-01.csv.gz"
+    input_path.parent.mkdir()
+    with gzip.open(input_path, "wt", encoding="utf-8", newline="") as handle:
+        handle.write(build_database.STOCK_TRADE_HEADER + "\n")
+        handle.write("A,12,0,8,1,1000,10.0,1,1000,1.25,1,0,0\n")
+
+    output = tmp_path / "db" / "stock_trade" / "1970-01-01" / "A"
+    output.parent.mkdir(parents=True)
+    incomplete = output.with_name("A.incomplete")
+    incomplete.write_bytes(b"stale partial bytes that must be truncated")
+
+    assert (
+        build_database.write_database_file(
+            input_path,
+            "stock_trade",
+            database_path=tmp_path / "db",
+        )
+        == 1
+    )
+    assert output.stat().st_size == module.StockTrade.packed_size
+    assert module.StockTrade.from_packed(output.read_bytes(), "A").price == pytest.approx(
+        10.0
+    )
+    assert not incomplete.exists()
+
+
 def test_build_database_file_native_publishes_only_completed_symbol_files(
     tmp_path: Path,
 ) -> None:
@@ -1766,7 +2517,7 @@ def test_build_database_file_native_publishes_only_completed_symbol_files(
     assert module.StockTrade.from_packed((root / "A").read_bytes(), "A").decimal_size == "1.25"
     assert not (root / "A.incomplete").exists()
     assert not (root / "B").exists()
-    assert len((root / "B.incomplete").read_bytes()) == module.StockTrade.packed_size
+    assert not (root / "B.incomplete").exists()
 
 
 def test_build_database_file_native_force_keeps_old_file_until_replacement_completes(
@@ -1810,7 +2561,7 @@ def test_build_database_file_native_force_keeps_old_file_until_replacement_compl
 
     output = database / "stock_trade" / "1970-01-01" / "A"
     assert module.StockTrade.from_packed(output.read_bytes(), "A").price == pytest.approx(10.0)
-    assert (output.parent / "A.incomplete").exists()
+    assert not (output.parent / "A.incomplete").exists()
 
 
 def test_build_database_file_native_uses_configured_database_root(
@@ -1863,6 +2614,41 @@ def test_build_database_file_native_uses_filename_date_for_currency_quote(
     assert rows_written == 1
     output = tmp_path / "db" / "currency_quote" / "2026-06-17" / "C:AED-AUD"
     assert len(output.read_bytes()) == module.CurrencyQuote.packed_size
+
+
+def test_build_database_file_native_sorts_stock_quotes_by_sip_timestamp(
+    tmp_path: Path,
+) -> None:
+    from massive_speedup import build_database
+    try:
+        module = import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
+
+    path = tmp_path / "stock_quote" / "1970-01-02.csv.gz"
+    path.parent.mkdir()
+    with gzip.open(path, "wt", encoding="utf-8", newline="") as handle:
+        handle.write(build_database.STOCK_QUOTE_HEADER + "\n")
+        for sequence, timestamp in enumerate((30, 10, 20), start=1):
+            handle.write(
+                f"A,8,10.1,1,8,10.0,1,1,,{timestamp},{sequence},"
+                f"{timestamp},1,0\n"
+            )
+
+    rows_written = build_database.write_database_file(
+        path,
+        "stock_quote",
+        database_path=tmp_path / "db",
+    )
+    records = module.StockQuoteDatabase(
+        "1970-01-02",
+        "A",
+        database_path=tmp_path / "db",
+    )
+
+    assert rows_written == 3
+    assert [row.sip_timestamp for row in records] == [10, 20, 30]
+    assert [row.sequence_number for row in records] == [2, 3, 1]
 
 
 def test_build_database_file_native_writes_searchable_index_values(
@@ -1949,12 +2735,12 @@ def test_build_database_file_native_writes_crypto_trade_databases(
     assert list(records.iterate_bounded(5)) == [records[1]]
 
 
-def test_build_database_file_native_rejects_misordered_crypto_trade_timestamps(
+def test_build_database_file_native_sorts_misordered_crypto_trade_timestamps(
     tmp_path: Path,
 ) -> None:
     from massive_speedup import build_database
     try:
-        import_module("massive_speedup._native")
+        module = import_module("massive_speedup._native")
     except ImportError:
         pytest.skip("massive_speedup._native is not built in this environment")
 
@@ -1965,12 +2751,20 @@ def test_build_database_file_native_rejects_misordered_crypto_trade_timestamps(
         handle.write("X:00-USD,2,1,3641496,10,0.0037,7575.0\n")
         handle.write("X:00-USD,2,1,3641495,9,0.0036,30000.0\n")
 
-    with pytest.raises(ValueError, match="ticker,participant_timestamp"):
-        build_database.write_database_file(
-            path,
-            "crypto_trade",
-            database_path=tmp_path / "db",
-        )
+    rows_written = build_database.write_database_file(
+        path,
+        "crypto_trade",
+        database_path=tmp_path / "db",
+    )
+    records = module.CryptoTradeDatabase(
+        "2026-06-17",
+        "X:00-USD",
+        database_path=tmp_path / "db",
+    )
+
+    assert rows_written == 2
+    assert [row.participant_timestamp for row in records] == [9, 10]
+    assert [row.id for row in records] == [3641495, 3641496]
 
 
 def test_build_database_file_native_writes_futures_trade_databases(
@@ -2403,7 +3197,6 @@ def test_direct_native_module_exports_api() -> None:
         pytest.skip("massive_speedup._native is not built in this environment")
 
     assert hasattr(module, "FlatFiles")
-    assert hasattr(module, "WebSocket")
     assert hasattr(module, "StockTrade")
     assert hasattr(module, "StockQuote")
     assert not hasattr(module, "StockAggregate")
@@ -2428,6 +3221,8 @@ def test_direct_native_module_exports_api() -> None:
     assert hasattr(module, "IndexValueDatabase")
     assert hasattr(module, "gzip_lines")
     assert hasattr(module, "build_database_file")
+    assert hasattr(module, "build_database_file_inferred")
+    assert hasattr(module, "build_database_file_inferred_with_stats")
 
 
 def test_direct_native_module_classes_are_callable_when_built() -> None:
@@ -2437,7 +3232,6 @@ def test_direct_native_module_classes_are_callable_when_built() -> None:
         pytest.skip("massive_speedup._native is not built in this environment")
 
     path = Path(__file__).resolve().parent / "data" / "hello_world.txt.gz"
-    message = module.WebSocket.Messages.parse_message(b'{"ev":"status"}')
 
     assert hasattr(module.FlatFiles.Stock, "parse_quotes")
     assert hasattr(module.FlatFiles.Stock, "parse_trades")
@@ -2463,8 +3257,6 @@ def test_direct_native_module_classes_are_callable_when_built() -> None:
     assert hasattr(module.FlatFiles.Options, "Quote")
     assert hasattr(module, "read_gzip_lines_bytes")
     assert list(module.read_gzip_lines_bytes(path)) == [b"Hello", b"World!"]
-    assert message.asset_class == "messages"
-    assert message[0].event_type == "status"
 
 
 def test_native_row_models_pack_roundtrip_and_extract_timestamps_when_built() -> None:
@@ -2560,9 +3352,174 @@ def test_native_row_models_pack_roundtrip_and_extract_timestamps_when_built() ->
         == trade.participant_timestamp
     )
     assert (
-        int.from_bytes(packed_quote[quote_offset:quote_offset + 8], "little")
+        int.from_bytes(packed_quote[quote_offset:quote_offset + 8], "big")
         == quote.sip_timestamp
     )
+
+
+def test_native_packed_records_start_with_big_endian_sort_key_when_built() -> None:
+    try:
+        module = import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
+
+    timestamp = 0x0102030405060708
+    rows = [
+        (
+            module.StockTrade(
+                [
+                    "A",
+                    "12",
+                    "0",
+                    "8",
+                    "1",
+                    str(timestamp - 1),
+                    "10.25",
+                    "2",
+                    str(timestamp),
+                    "100",
+                    "1",
+                    "0",
+                    "0",
+                ]
+            ),
+            "sip_timestamp",
+            "packed_sip_timestamp_offset",
+        ),
+        (
+            module.StockQuote(
+                [
+                    "A",
+                    "8",
+                    "10.5",
+                    "100",
+                    "9",
+                    "10.0",
+                    "200",
+                    "1",
+                    "",
+                    str(timestamp - 1),
+                    "2",
+                    str(timestamp),
+                    "1",
+                    "0",
+                ]
+            ),
+            "sip_timestamp",
+            "packed_sip_timestamp_offset",
+        ),
+        (
+            module.CryptoTrade(
+                [
+                    "X:BTC-USD",
+                    "2",
+                    "1",
+                    "3",
+                    str(timestamp),
+                    "50000.25",
+                    "0.5",
+                ]
+            ),
+            "participant_timestamp",
+            "packed_participant_timestamp_offset",
+        ),
+        (
+            module.CurrencyQuote(
+                [
+                    "C:EUR-USD",
+                    "1",
+                    "1.1",
+                    "2",
+                    "1.09",
+                    str(timestamp),
+                ]
+            ),
+            "participant_timestamp",
+            "packed_participant_timestamp_offset",
+        ),
+        (
+            module.IndexValue(["I:SPX", "5000.5", str(timestamp)]),
+            "timestamp",
+            "packed_timestamp_offset",
+        ),
+        (
+            module.FuturesTrade(
+                [
+                    "0BTZ9",
+                    str(timestamp),
+                    "1",
+                    "2",
+                    "100.25",
+                    "3",
+                    "0",
+                    "4",
+                    "2026-05-21",
+                ]
+            ),
+            "timestamp",
+            "packed_timestamp_offset",
+        ),
+        (
+            module.FuturesQuote(
+                [
+                    "0BTZ9",
+                    str(timestamp),
+                    "1",
+                    "2",
+                    str(timestamp - 2),
+                    "100.5",
+                    "3",
+                    str(timestamp - 1),
+                    "100.0",
+                    "4",
+                    "5",
+                    "2026-05-21",
+                ]
+            ),
+            "timestamp",
+            "packed_timestamp_offset",
+        ),
+        (
+            module.OptionTrade(
+                [
+                    "O:A260618C00115000",
+                    "209",
+                    "0",
+                    "320",
+                    "10.7",
+                    str(timestamp),
+                    "2",
+                ]
+            ),
+            "sip_timestamp",
+            "packed_sip_timestamp_offset",
+        ),
+        (
+            module.OptionQuote(
+                [
+                    "O:A260618C00115000",
+                    "320",
+                    "11.0",
+                    "1",
+                    "320",
+                    "10.5",
+                    "2",
+                    "3",
+                    str(timestamp),
+                ]
+            ),
+            "sip_timestamp",
+            "packed_sip_timestamp_offset",
+        ),
+    ]
+
+    expected_prefix = timestamp.to_bytes(8, "big")
+    for row, key_attribute, offset_attribute in rows:
+        row_type = type(row)
+        packed = row.pack()
+        assert getattr(row_type, offset_attribute) == 0
+        assert getattr(row, key_attribute) == timestamp
+        assert packed[:8] == expected_prefix
 
 
 def test_native_row_attributes_are_immutable_and_cached_when_built() -> None:
@@ -2736,6 +3693,22 @@ def test_native_quote_and_trade_aggregators_yield_native_result_objects() -> Non
     assert custom_start[0].open == 14.0
     assert custom_start[0].close == 7.0
 
+    # Sub-second intervals are accepted as float seconds.
+    half_second = list(
+        module.StockTradeAggregator(
+            trade_rows,
+            interval_seconds=0.5,
+        )
+    )
+    assert [bar.window_start for bar in half_second] == [
+        1_000_000_000,
+        1_500_000_000,
+        2_000_000_000,
+    ]
+    assert half_second[0].close == 10.0
+    assert half_second[1].close == 14.0
+    assert half_second[2].close == 7.0
+
     index_values = [
         module.IndexValue(["I:TEST", "100", "100000000"]),
         module.IndexValue(["I:TEST", "104", "900000000"]),
@@ -2873,6 +3846,33 @@ def test_native_database_record_files_mmap_iter_index_search_and_market_calendar
     database = tmp_path / "db"
     date = "1970-01-01"
     date_object = dt.date(1970, 1, 1)
+
+    class FakeTimestamp:
+        def __init__(self, value: int) -> None:
+            self.value = value
+
+    class FakeRow:
+        def __getitem__(self, key: str) -> FakeTimestamp:
+            return FakeTimestamp({"market_open": 123, "market_close": 456}[key])
+
+    class FakeILoc:
+        def __getitem__(self, index: int) -> FakeRow:
+            assert index == 0
+            return FakeRow()
+
+    class FakeSchedule:
+        empty = False
+        iloc = FakeILoc()
+
+    class FakeCalendar:
+        def schedule(self, *, start_date: str, end_date: str) -> FakeSchedule:
+            assert start_date == date
+            assert end_date == date
+            return FakeSchedule()
+
+    fake_pmc = types.ModuleType("pandas_market_calendars")
+    fake_pmc.get_calendar = lambda name: FakeCalendar()
+    monkeypatch.setitem(sys.modules, "pandas_market_calendars", fake_pmc)
 
     def write_records(record_type: str, ticker: str, rows) -> Path:
         path = database / record_type / date / ticker
@@ -3075,33 +4075,6 @@ def test_native_database_record_files_mmap_iter_index_search_and_market_calendar
     assert currency_bar.transactions == 2
     assert currency_bar.ask_avg == pytest.approx(0.4125)
 
-    class FakeTimestamp:
-        def __init__(self, value: int) -> None:
-            self.value = value
-
-    class FakeRow:
-        def __getitem__(self, key: str) -> FakeTimestamp:
-            return FakeTimestamp({"market_open": 123, "market_close": 456}[key])
-
-    class FakeILoc:
-        def __getitem__(self, index: int) -> FakeRow:
-            assert index == 0
-            return FakeRow()
-
-    class FakeSchedule:
-        empty = False
-        iloc = FakeILoc()
-
-    class FakeCalendar:
-        def schedule(self, *, start_date: str, end_date: str) -> FakeSchedule:
-            assert start_date == date
-            assert end_date == date
-            return FakeSchedule()
-
-    fake_pmc = types.ModuleType("pandas_market_calendars")
-    fake_pmc.get_calendar = lambda name: FakeCalendar()
-    monkeypatch.setitem(sys.modules, "pandas_market_calendars", fake_pmc)
-
     assert trade_records.market_open == 123
     assert trade_records.market_close == 456
     assert quote_records.market_open == 123
@@ -3144,11 +4117,11 @@ def test_multi_day_database_streams_and_searches_across_dates(tmp_path: Path) ->
     rows = [
         trade(timestamp_ns(16, 14), 1),
         trade(timestamp_ns(16, 15), 2),
-        trade(timestamp_ns(18, 14), 3),
+        trade(timestamp_ns(20, 14), 3),
     ]
     for date, daily_rows in (
         ("2026-07-16", rows[:2]),
-        ("2026-07-18", rows[2:]),
+        ("2026-07-20", rows[2:]),
     ):
         path = database / "stock_trade" / date / "A"
         path.parent.mkdir(parents=True)
@@ -3165,17 +4138,17 @@ def test_multi_day_database_streams_and_searches_across_dates(tmp_path: Path) ->
         max_open_days=1,
     )
 
-    assert records.dates == ("2026-07-16", "2026-07-18")
+    assert records.dates == ("2026-07-16", "2026-07-20")
     assert len(records) == 3
     assert records[-1] == rows[2]
     assert list(records) == rows
-    assert records.open_dates == ("2026-07-18",)
+    assert records.open_dates == ("2026-07-20",)
 
     between = timestamp_ns(17, 12)
     before = records.locate_before_timestamp(between)
     after = records.locate_after_timestamp(between)
     assert (before.date, before.index, before.record) == ("2026-07-16", 1, rows[1])
-    assert (after.date, after.index, after.record) == ("2026-07-18", 0, rows[2])
+    assert (after.date, after.index, after.record) == ("2026-07-20", 0, rows[2])
     assert records.find_before_timestamp(rows[1].sip_timestamp, on=False) == rows[0]
     assert records.find_after_timestamp(rows[1].sip_timestamp, on=False) == rows[2]
     assert list(
@@ -3198,7 +4171,7 @@ def test_database_loaders_use_environment_and_reject_positional_path(
         pytest.skip("massive_speedup._native is not built in this environment")
 
     database = tmp_path / "db"
-    date = "1970-01-01"
+    date = "1970-01-02"
     row = module.StockTrade(
         [
             "A",
@@ -3269,7 +4242,7 @@ def test_simple_market_hides_fills_until_session_summary(tmp_path: Path) -> None
         pytest.skip("massive_speedup._native is not built in this environment")
 
     database = tmp_path / "db"
-    date = "1970-01-01"
+    date = "1970-01-02"
 
     def write_records(record_type: str, ticker: str, rows) -> None:
         path = database / record_type / date / ticker
@@ -3377,8 +4350,10 @@ def test_simple_market_hides_fills_until_session_summary(tmp_path: Path) -> None
     assert inventory == {"A": 2.0, "B": -1.0}
     with pytest.raises(RuntimeError, match="iterator is exhausted"):
         market.summary()
-    with pytest.raises(TypeError):
-        market["A"]
+    # Holdings/cash are always available from the market's TradeEmulator.
+    assert market["A"] == pytest.approx(2.0)
+    assert market["B"] == pytest.approx(-1.0)
+    assert market[None] == pytest.approx(-2.0)
     assert not hasattr(market, "as_dict")
 
     remaining = list(market)
@@ -3402,10 +4377,18 @@ def test_simple_market_hides_fills_until_session_summary(tmp_path: Path) -> None
     assert summary == {
         "session_date": date,
         "trade_latency_ns": 1000,
+        "execution": "market",
+        "passivity": 0.0,
+        "unit_shares": 1.0,
         "order_count": 2,
         "fill_count": 2,
+        "cancel_count": 0,
         "rejection_count": 0,
+        "working_order_count": 0,
         "cash_flow": pytest.approx(-2.0),
+        "cash": pytest.approx(-2.0),
+        "positions": {"A": 2.0, "B": -1.0},
+        "desired_positions": {},
         "orders": [
             {
                 "instrument": "A",
@@ -3413,6 +4396,7 @@ def test_simple_market_hides_fills_until_session_summary(tmp_path: Path) -> None
                 "quantity": 2.0,
                 "submitted_timestamp": 1000,
                 "execution_timestamp": 2000,
+                "style": "market",
                 "status": "filled",
                 "quote_timestamp": 900,
                 "price": 11.0,
@@ -3424,6 +4408,7 @@ def test_simple_market_hides_fills_until_session_summary(tmp_path: Path) -> None
                 "quantity": 1.0,
                 "submitted_timestamp": 1000,
                 "execution_timestamp": 2000,
+                "style": "market",
                 "status": "filled",
                 "quote_timestamp": 2000,
                 "price": 20.0,
@@ -3442,7 +4427,7 @@ def test_simple_market_skips_quote_events_by_default(tmp_path: Path) -> None:
         pytest.skip("massive_speedup._native is not built in this environment")
 
     database = tmp_path / "db"
-    date = "1970-01-01"
+    date = "1970-01-02"
     trade_row = module.StockTrade(
         ["A", "", "0", "8", "1", "1000", "10.0", "1", "1000", "100", "1", "0", "0"]
     )
@@ -3457,7 +4442,7 @@ def test_simple_market_skips_quote_events_by_default(tmp_path: Path) -> None:
     quote_path.write_bytes(quote_row.pack())
 
     market = module.SimpleMarket(
-        dt.date(1970, 1, 1),
+        dt.date(1970, 1, 2),
         ["A"],
         0,
         database_path=database,
@@ -3480,7 +4465,7 @@ def test_simple_market_defaults_to_150ms_execution_latency(tmp_path: Path) -> No
         pytest.skip("massive_speedup._native is not built in this environment")
 
     database = tmp_path / "db"
-    date = "1970-01-01"
+    date = "1970-01-02"
     trade_timestamp = 1_000_000_000
     execution_timestamp = trade_timestamp + 150_000_000
     trade = module.StockTrade(
@@ -3554,7 +4539,7 @@ def test_simple_market_hides_execution_rejection_until_summary(tmp_path: Path) -
         pytest.skip("massive_speedup._native is not built in this environment")
 
     database = tmp_path / "db"
-    date = "1970-01-01"
+    date = "1970-01-02"
     trade = module.StockTrade(
         ["A", "", "0", "8", "1", "1000", "10", "1", "1000", "1", "1", "0", "0"]
     )
@@ -3588,7 +4573,7 @@ def test_simple_market_fast_reuses_recent_record_dicts(tmp_path: Path) -> None:
         pytest.skip("massive_speedup._native is not built in this environment")
 
     database = tmp_path / "db"
-    date = "1970-01-01"
+    date = "1970-01-02"
     trade_rows = [
         module.StockTrade(
             ["A", "", "0", "8", "1", "1000", "10.0", "1", "1000", "100", "1", "0", "0"]
@@ -3633,6 +4618,473 @@ def test_simple_market_fast_reuses_recent_record_dicts(tmp_path: Path) -> None:
     assert fast_first[4]["A"] == trade_rows[1]
 
 
+def _write_stock_day(database: Path, date: str, symbol: str, trades, quotes) -> None:
+    trade_path = database / "stock_trade" / date / symbol
+    quote_path = database / "stock_quote" / date / symbol
+    trade_path.parent.mkdir(parents=True, exist_ok=True)
+    quote_path.parent.mkdir(parents=True, exist_ok=True)
+    trade_path.write_bytes(b"".join(row.pack() for row in trades))
+    quote_path.write_bytes(b"".join(row.pack() for row in quotes))
+
+
+def test_trade_emulator_carries_holdings_across_simple_market_days(
+    tmp_path: Path,
+) -> None:
+    try:
+        module = import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
+
+    database = tmp_path / "db"
+    day1 = "1970-01-02"
+    day2 = "1970-01-05"
+
+    def trade(date_ts: int, price: float):
+        return module.StockTrade(
+            [
+                "A",
+                "",
+                "0",
+                "8",
+                "1",
+                str(date_ts),
+                str(price),
+                "1",
+                str(date_ts),
+                "1",
+                "1",
+                "0",
+                "0",
+            ]
+        )
+
+    def quote(date_ts: int, bid: float, ask: float):
+        return module.StockQuote(
+            [
+                "A",
+                "8",
+                str(ask),
+                "1",
+                "8",
+                str(bid),
+                "1",
+                "",
+                "",
+                str(date_ts),
+                str(date_ts),
+                str(date_ts),
+                "1",
+                "0",
+            ]
+        )
+
+    _write_stock_day(
+        database,
+        day1,
+        "A",
+        [trade(1_000, 10.0)],
+        [quote(900, 9.0, 11.0), quote(2_000, 10.0, 12.0)],
+    )
+    _write_stock_day(
+        database,
+        day2,
+        "A",
+        [trade(1_000, 13.0)],
+        [quote(900, 12.0, 14.0), quote(2_000, 12.5, 13.5)],
+    )
+
+    emulator = module.TradeEmulator(0)
+    market1 = module.SimpleMarket(
+        day1,
+        ["A"],
+        0,
+        database_path=database,
+        trade_emulator=emulator,
+    )
+    broker1 = next(market1)[6]
+    assert broker1.buy(10) is None
+    assert emulator.position("A") == 10.0
+    assert emulator["A"] == 10.0
+    assert market1["A"] == 10.0
+    assert list(market1) == []
+    assert emulator.cash == pytest.approx(-110.0)
+
+    assert emulator.position("A") == 10.0
+    market2 = module.SimpleMarket(
+        day2,
+        ["A"],
+        0,
+        database_path=database,
+        trade_emulator=emulator,
+    )
+    assert market2["A"] == 10.0
+    broker2 = next(market2)[6]
+    assert broker2.sell(10) is None
+    assert emulator.position("A") == 0.0
+    assert list(market2) == []
+    summary = emulator.summary()
+    assert summary["order_count"] == 2
+    assert summary["fill_count"] == 2
+    # Day1 buy 10 @ ask 11, day2 sell 10 @ bid 12 (quote at/before trade ts).
+    assert summary["cash"] == pytest.approx(10.0)
+    assert summary["positions"] == {"A": 0.0}
+
+
+def test_stock_trade_aggregator_broker_with_shared_emulator(tmp_path: Path) -> None:
+    try:
+        module = import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
+
+    database = tmp_path / "db"
+    day1 = "1970-01-02"
+    day2 = "1970-01-05"
+
+    def trade(ts: int, price: float, size: str = "1"):
+        return module.StockTrade(
+            [
+                "A",
+                "",
+                "0",
+                "8",
+                "1",
+                str(ts),
+                str(price),
+                size,
+                str(ts),
+                "1",
+                "1",
+                "0",
+                "0",
+            ]
+        )
+
+    def quote(ts: int, bid: float, ask: float):
+        return module.StockQuote(
+            [
+                "A",
+                "8",
+                str(ask),
+                "1",
+                "8",
+                str(bid),
+                "1",
+                "",
+                "",
+                str(ts),
+                str(ts),
+                str(ts),
+                "1",
+                "0",
+            ]
+        )
+
+    # One-second bars: trades at 1.0s and 2.0s produce two bars when interval=1.
+    _write_stock_day(
+        database,
+        day1,
+        "A",
+        [trade(1_000_000_000, 10.0), trade(2_000_000_000, 11.0)],
+        [
+            quote(1_000_000_000, 9.0, 11.0),
+            quote(2_000_000_000, 10.0, 12.0),
+            quote(3_000_000_000, 10.5, 12.5),
+        ],
+    )
+    _write_stock_day(
+        database,
+        day2,
+        "A",
+        [trade(1_000_000_000, 12.0)],
+        [quote(1_000_000_000, 11.0, 13.0), quote(2_000_000_000, 11.5, 12.5)],
+    )
+
+    emulator = module.TradeEmulator(0)
+    trades1 = module.StockTradeDatabase(day1, "A", database_path=database)
+    quotes1 = module.StockQuoteDatabase(day1, "A", database_path=database)
+    bars1 = module.StockTradeAggregator(
+        trades1,
+        interval_seconds=1,
+        quotes=quotes1,
+        trade_emulator=emulator,
+    )
+    first = next(bars1)
+    assert first.window_start == 1_000_000_000
+    # Decision timestamp is window_end = window_start + interval.
+    assert bars1.broker.sip_timestamp == 2_000_000_000
+    assert bars1.broker.buy(5) is None
+    assert emulator.position("A") == 5.0
+    assert emulator.cash == pytest.approx(-60.0)  # ask at 2s = 12.0
+    remaining = list(bars1)  # exhaust day 1
+    assert len(remaining) == 1
+
+    with pytest.raises(IndexError):
+        _ = bars1.broker
+
+    trades2 = module.StockTradeDatabase(day2, "A", database_path=database)
+    quotes2 = module.StockQuoteDatabase(day2, "A", database_path=database)
+    bars2 = module.StockTradeAggregator(
+        trades2,
+        interval_seconds=1,
+        quotes=quotes2,
+        trade_emulator=emulator,
+    )
+    assert emulator.position("A") == 5.0
+    next(bars2)
+    # window_end = 2s; bid at 2s is 11.5
+    assert bars2.broker.sell(5) is None
+    assert emulator.position("A") == 0.0
+    assert emulator.cash == pytest.approx(-2.5)
+    assert list(bars2) == []
+    summary = emulator.summary()
+    assert summary["order_count"] == 2
+    assert summary["positions"]["A"] == 0.0
+
+
+def test_simple_market_execution_middle_and_set_desired(tmp_path: Path) -> None:
+    """SimpleMarket owns the simulator: execution knobs + intent API + auto poll."""
+    try:
+        module = import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
+
+    database = tmp_path / "db"
+    date = "1970-01-02"
+
+    def trade(ts: int, price: float):
+        return module.StockTrade(
+            [
+                "A",
+                "",
+                "0",
+                "8",
+                "1",
+                str(ts),
+                str(price),
+                "1",
+                str(ts),
+                "1",
+                "1",
+                "0",
+                "0",
+            ]
+        )
+
+    def quote(ts: int, bid: float, ask: float):
+        return module.StockQuote(
+            [
+                "A",
+                "8",
+                str(ask),
+                "1",
+                "8",
+                str(bid),
+                "1",
+                "",
+                "",
+                str(ts),
+                str(ts),
+                str(ts),
+                "1",
+                "0",
+            ]
+        )
+
+    # Wide book first; later ask drops to the resting bid limit so poll fills.
+    _write_stock_day(
+        database,
+        date,
+        "A",
+        [trade(1000, 10.0), trade(3000, 9.0)],
+        [
+            quote(900, 9.0, 11.0),   # set_desired here → buy limit @ bid=9
+            quote(2000, 9.0, 11.0),
+            quote(2500, 8.5, 9.0),   # ask <= limit → marketable
+            quote(3000, 8.5, 9.0),
+        ],
+    )
+
+    market = module.SimpleMarket(
+        date,
+        ["A"],
+        0,
+        database_path=database,
+        quotes=True,
+        execution="middle",
+        passivity=1.0,
+        unit_shares=1.0,
+    )
+    assert market.execution == "middle"
+    assert market.passivity == pytest.approx(1.0)
+    assert market.unit_shares == pytest.approx(1.0)
+
+    symbol, ts, trade_ev, quote_ev, trades, quotes, broker = next(market)
+    assert symbol == "A"
+    # First event is quote @ 900 (quotes=True).
+    broker.set_desired(1)
+    # Far-side buy rests at bid=9; not marketable yet (ask=11).
+    assert market["A"] == pytest.approx(0.0)
+    assert market.trade_emulator.working_order_count == 1
+    assert market.trade_emulator.working_order("A")["limit_price"] == pytest.approx(9.0)
+
+    # Stream; poll_working on quote @ 2500 should fill without a new intent.
+    filled = False
+    for _symbol, _ts, _tr, _q, _trs, _qs, _br in market:
+        if market["A"] == 1.0:
+            filled = True
+            break
+    assert filled
+    assert market[None] == pytest.approx(-9.0)  # filled at ask when marketable
+    list(market)  # exhaust
+    summary = market.summary()
+    assert summary["execution"] == "middle"
+    assert summary["fill_count"] >= 1
+    assert summary["positions"]["A"] == pytest.approx(1.0)
+
+
+def test_trade_emulator_set_desired_market_and_middle(tmp_path: Path) -> None:
+    try:
+        module = import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
+
+    database = tmp_path / "db"
+    day = "1970-01-02"
+
+    def trade(ts: int, price: float):
+        return module.StockTrade(
+            [
+                "A",
+                "",
+                "0",
+                "8",
+                "1",
+                str(ts),
+                str(price),
+                "1",
+                str(ts),
+                "1",
+                "1",
+                "0",
+                "0",
+            ]
+        )
+
+    def quote(ts: int, bid: float, ask: float):
+        return module.StockQuote(
+            [
+                "A",
+                "8",
+                str(ask),
+                "1",
+                "8",
+                str(bid),
+                "1",
+                "",
+                "",
+                str(ts),
+                str(ts),
+                str(ts),
+                "1",
+                "0",
+            ]
+        )
+
+    _write_stock_day(
+        database,
+        day,
+        "A",
+        [
+            trade(1_000_000_000, 10.0),
+            trade(2_000_000_000, 11.0),
+            trade(3_000_000_000, 10.5),
+        ],
+        [
+            quote(1_000_000_000, 9.0, 11.0),
+            quote(2_000_000_000, 10.0, 12.0),
+            quote(3_000_000_000, 10.0, 10.0),  # locked — passive bid buy becomes marketable
+        ],
+    )
+
+    def bars_for(emulator):
+        trades = module.StockTradeDatabase(day, "A", database_path=database)
+        quotes = module.StockQuoteDatabase(day, "A", database_path=database)
+        return module.StockTradeAggregator(
+            trades,
+            interval_seconds=1,
+            quotes=quotes,
+            trade_emulator=emulator,
+        )
+
+    # Market mode: immediate cross.
+    market = module.TradeEmulator(0, execution="market")
+    bars = bars_for(market)
+    next(bars)
+    bars.broker.set_desired(1)
+    assert market.position("A") == 1.0
+    assert market.cash == pytest.approx(-12.0)  # ask at window end
+    bars.broker.set_desired(0)
+    assert market.position("A") == 0.0
+    list(bars)
+
+    # Middle passivity=1: rest at bid; fill when quote locks.
+    middle = module.TradeEmulator(0, execution="middle", passivity=1.0)
+    bars = bars_for(middle)
+    next(bars)
+    bars.broker.set_desired(1)
+    assert middle.position("A") == 0.0
+    assert middle.working_order_count == 1
+    assert middle.working_order("A")["limit_price"] == pytest.approx(10.0)
+    next(bars)
+    bars.broker.set_desired(1)  # poll same intent
+    assert middle.position("A") == 1.0
+    assert middle.cash == pytest.approx(-10.0)
+    assert middle.working_order_count == 0
+    list(bars)
+
+    # Intent flip cancels resting order before fill.
+    cancel_case = module.TradeEmulator(0, execution="middle", passivity=1.0)
+    bars = bars_for(cancel_case)
+    next(bars)
+    bars.broker.set_desired(1)
+    assert cancel_case.working_order_count == 1
+    bars.broker.set_desired(0)
+    assert cancel_case.working_order_count == 0
+    assert cancel_case.position("A") == 0.0
+    assert any(o["status"] == "cancelled" for o in cancel_case.summary()["orders"])
+    list(bars)
+
+    # Middle passivity=0 is marketable immediately.
+    mid0 = module.TradeEmulator(0, execution="middle", passivity=0.0)
+    bars = bars_for(mid0)
+    next(bars)
+    bars.broker.set_desired(1)
+    assert mid0.position("A") == 1.0
+    assert mid0.cash == pytest.approx(-12.0)
+    list(bars)
+
+    summary = mid0.summary()
+    assert summary["execution"] == "middle"
+    assert summary["passivity"] == 0.0
+    assert summary["unit_shares"] == 1.0
+
+
+def test_stock_trade_aggregator_without_emulator_has_no_broker() -> None:
+    try:
+        module = import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
+
+    trade = module.StockTrade(
+        ["A", "", "0", "8", "1", "1000000000", "10.0", "1", "1000000000", "1", "1", "0", "0"]
+    )
+    bars = module.StockTradeAggregator([trade], interval_seconds=1)
+    bar = next(bars)
+    assert bar.close == 10.0
+    with pytest.raises(IndexError):
+        _ = bars.broker
+
+
 def test_option_market_hides_fills_until_session_summary(tmp_path: Path) -> None:
     try:
         module = import_module("massive_speedup._native")
@@ -3640,7 +5092,7 @@ def test_option_market_hides_fills_until_session_summary(tmp_path: Path) -> None
         pytest.skip("massive_speedup._native is not built in this environment")
 
     database = tmp_path / "db"
-    date = "1970-01-01"
+    date = "1970-01-02"
     root = "A"
     expiration = "2026-06-18"
     right = "C"
@@ -4874,3 +6326,73 @@ def test_flatfiles_crypto_parse_trade_rows(tmp_path: Path) -> None:
     )
     assert CryptoTrade.from_packed(packed, "X:00-USD") == trades[0]
     assert "CryptoTrade(" in repr(trades[0])
+
+
+def test_stock_trade_database_missing_file_errors_even_with_api_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Flat-file only: missing on-disk DB never falls back to Massive REST."""
+    try:
+        module = import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
+
+    monkeypatch.setenv("MASSIVE_API_KEY", "must-not-be-used")
+    monkeypatch.setenv("POLYGON_API_KEY", "must-not-be-used")
+
+    # 2026-01-23 is a Friday (NYSE session): missing file is a hard error.
+    with pytest.raises(Exception, match="missing market data|no on-disk file|Flat-file only"):
+        module.StockTradeDatabase("2026-01-23", "ZZTEST", database_path=tmp_path / "empty")
+
+
+def test_stock_quote_database_missing_file_errors_even_with_api_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    try:
+        module = import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
+
+    monkeypatch.setenv("MASSIVE_API_KEY", "must-not-be-used")
+    with pytest.raises(Exception, match="missing market data|no on-disk file|Flat-file only"):
+        module.StockQuoteDatabase("2026-01-23", "ZZTEST", database_path=tmp_path / "empty")
+
+
+def test_stock_trade_database_missing_file_without_api_key_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    try:
+        module = import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
+
+    monkeypatch.delenv("MASSIVE_API_KEY", raising=False)
+    monkeypatch.delenv("POLYGON_API_KEY", raising=False)
+
+    # 2026-01-23 is a Friday (NYSE session): missing file without API key is an error.
+    with pytest.raises(Exception, match="missing market data"):
+        module.StockTradeDatabase("2026-01-23", "ZZTEST", database_path=tmp_path / "empty")
+
+
+def test_stock_trade_database_non_session_is_empty_without_nfs_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Weekends/holidays have no on-disk files by design; open as empty DB."""
+    try:
+        module = import_module("massive_speedup._native")
+    except ImportError:
+        pytest.skip("massive_speedup._native is not built in this environment")
+
+    monkeypatch.delenv("MASSIVE_API_KEY", raising=False)
+    monkeypatch.delenv("POLYGON_API_KEY", raising=False)
+
+    # 2026-01-24 is a Saturday — not an NYSE session.
+    db = module.StockTradeDatabase(
+        "2026-01-24", "SPY", database_path=tmp_path / "empty"
+    )
+    assert list(db) == []
+    assert len(db) == 0

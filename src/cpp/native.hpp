@@ -8,12 +8,15 @@
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cctype>
 #include <cstring>
 #include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <generator>
+#include <iomanip>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -24,8 +27,10 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -399,8 +404,11 @@ struct ConditionCodeMask {
     words[index / 64] |= std::uint64_t{1} << (index % 64);
   }
 
-  bool intersects_packed(const void* packed_data) const {
-    const auto* bytes = static_cast<const std::uint8_t*>(packed_data);
+  bool intersects_packed(
+      const void* packed_data,
+      std::size_t packed_offset = 0) const {
+    const auto* bytes =
+        static_cast<const std::uint8_t*>(packed_data) + packed_offset;
     const std::uint64_t low =
         static_cast<std::uint64_t>(bytes[0]) |
         (static_cast<std::uint64_t>(bytes[1]) << 8U) |
@@ -875,6 +883,76 @@ inline std::string decode_iso_date(
   return output;
 }
 
+class ProcessWriteLockGuard {
+ public:
+  explicit ProcessWriteLockGuard(PyObject* lock)
+      : lock_(lock == Py_None ? nullptr : lock) {
+    if (lock_ == nullptr) {
+      return;
+    }
+
+    nanobind::gil_scoped_acquire acquire;
+    nanobind::object method = nanobind::steal<nanobind::object>(
+        PyObject_GetAttrString(lock_, "acquire"));
+    if (!method.is_valid()) {
+      throw nanobind::python_error();
+    }
+    nanobind::object result = nanobind::steal<nanobind::object>(
+        PyObject_CallNoArgs(method.ptr()));
+    if (!result.is_valid()) {
+      throw nanobind::python_error();
+    }
+    locked_ = true;
+  }
+
+  ProcessWriteLockGuard(const ProcessWriteLockGuard&) = delete;
+  ProcessWriteLockGuard& operator=(const ProcessWriteLockGuard&) = delete;
+
+  ~ProcessWriteLockGuard() noexcept {
+    if (!locked_) {
+      return;
+    }
+
+    nanobind::gil_scoped_acquire acquire;
+    PyObject* method = PyObject_GetAttrString(lock_, "release");
+    if (method == nullptr) {
+      PyErr_WriteUnraisable(lock_);
+      return;
+    }
+    PyObject* result = PyObject_CallNoArgs(method);
+    Py_DECREF(method);
+    if (result == nullptr) {
+      PyErr_WriteUnraisable(lock_);
+      return;
+    }
+    Py_DECREF(result);
+  }
+
+ private:
+  PyObject* lock_ = nullptr;
+  bool locked_ = false;
+};
+
+inline void create_directories_for_output(
+    const std::filesystem::path& path,
+    PyObject* write_lock) {
+  ProcessWriteLockGuard guard(write_lock);
+  std::filesystem::create_directories(path);
+}
+
+inline void drop_file_cache(const std::filesystem::path& path) noexcept {
+#if defined(POSIX_FADV_DONTNEED)
+  const int descriptor = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+  if (descriptor < 0) {
+    return;
+  }
+  static_cast<void>(::posix_fadvise(descriptor, 0, 0, POSIX_FADV_DONTNEED));
+  static_cast<void>(::close(descriptor));
+#else
+  static_cast<void>(path);
+#endif
+}
+
 class BinaryRecordWriter {
  public:
   explicit BinaryRecordWriter(std::size_t buffer_size = 1U << 20)
@@ -882,7 +960,9 @@ class BinaryRecordWriter {
 
   ~BinaryRecordWriter() {
     if (file_ != nullptr) {
-      std::fclose(file_);
+      FILE* file = std::exchange(file_, nullptr);
+      static_cast<void>(std::fclose(file));
+      drop_file_cache(path_);
     }
   }
 
@@ -890,30 +970,33 @@ class BinaryRecordWriter {
   BinaryRecordWriter& operator=(const BinaryRecordWriter&) = delete;
 
   void open(const std::filesystem::path& path) {
-    close();
-    const std::string filename = path.string();
-    file_ = std::fopen(filename.c_str(), "wb");
-    if (file_ == nullptr) {
-      std::ostringstream message;
-      message << "unable to open database output file " << path << ": "
-              << std::strerror(errno);
-      throw std::runtime_error(message.str());
-    }
+    open_with_mode(path, "wb");
+  }
 
-    if (!buffer_.empty()) {
-      std::setvbuf(file_, buffer_.data(), _IOFBF, buffer_.size());
-    }
+  void open_append(const std::filesystem::path& path) {
+    open_with_mode(path, "ab");
   }
 
   template <std::size_t PackedSize>
   void write(const PackedBuffer<PackedSize>& data) {
+    write(data.data(), data.size());
+  }
+
+  void write(const void* data, std::size_t size) {
     if (file_ == nullptr) {
       throw std::logic_error("database output file is not open");
     }
 
-    const std::size_t written = std::fwrite(data.data(), 1, data.size(), file_);
-    if (written != data.size()) {
+    const std::size_t written = std::fwrite(data, 1, size, file_);
+    if (written != size) {
       throw std::runtime_error("failed to write packed database record");
+    }
+  }
+
+  void flush() {
+    if (file_ != nullptr && std::fflush(file_) != 0) {
+      throw std::runtime_error(
+          "failed to flush database output file: " + std::string(std::strerror(errno)));
     }
   }
 
@@ -923,7 +1006,9 @@ class BinaryRecordWriter {
     }
 
     FILE* file = std::exchange(file_, nullptr);
-    if (std::fclose(file) != 0) {
+    const int close_result = std::fclose(file);
+    drop_file_cache(path_);
+    if (close_result != 0) {
       std::ostringstream message;
       message << "failed to close database output file: " << std::strerror(errno);
       throw std::runtime_error(message.str());
@@ -931,14 +1016,126 @@ class BinaryRecordWriter {
   }
 
  private:
+  void open_with_mode(const std::filesystem::path& path, const char* mode) {
+    close();
+    path_ = path;
+    const std::string filename = path.string();
+    file_ = std::fopen(filename.c_str(), mode);
+    if (file_ == nullptr) {
+      std::ostringstream message;
+      message << "unable to open database output file " << path << ": "
+              << std::strerror(errno);
+      throw std::runtime_error(message.str());
+    }
+
+    if (!buffer_.empty()) {
+      std::setvbuf(file_, buffer_.data(), _IOFBF, buffer_.size());
+    } else {
+      std::setvbuf(file_, nullptr, _IONBF, 0);
+    }
+  }
+
   std::vector<char> buffer_;
   FILE* file_ = nullptr;
+  std::filesystem::path path_;
+};
+
+class StagedRecordWriterCache {
+ public:
+  explicit StagedRecordWriterCache(
+      std::size_t max_open_files = 64,
+      std::size_t buffer_size = 64U << 10)
+      : max_open_files_(max_open_files),
+        buffer_size_(buffer_size) {
+    if (max_open_files_ == 0) {
+      throw std::invalid_argument(
+          "staged record writer cache must allow at least one open file");
+    }
+  }
+
+  StagedRecordWriterCache(const StagedRecordWriterCache&) = delete;
+  StagedRecordWriterCache& operator=(const StagedRecordWriterCache&) = delete;
+
+  template <std::size_t PackedSize>
+  void write(
+      const std::filesystem::path& path,
+      const PackedBuffer<PackedSize>& data) {
+    Entry& entry = writer_for(path);
+    entry.last_used = ++clock_;
+    entry.writer->write(data);
+  }
+
+  void close_all() {
+    for (auto& [path, entry] : entries_) {
+      static_cast<void>(path);
+      entry.writer->close();
+    }
+    entries_.clear();
+  }
+
+ private:
+  struct Entry {
+    std::unique_ptr<BinaryRecordWriter> writer;
+    std::uint64_t last_used = 0;
+  };
+
+  Entry& writer_for(const std::filesystem::path& path) {
+    const std::string key = path.string();
+    if (auto found = entries_.find(key); found != entries_.end()) {
+      return found->second;
+    }
+
+    if (entries_.size() >= max_open_files_) {
+      const auto victim = std::min_element(
+          entries_.begin(),
+          entries_.end(),
+          [](const auto& left, const auto& right) {
+            return left.second.last_used < right.second.last_used;
+          });
+      victim->second.writer->close();
+      entries_.erase(victim);
+    }
+
+    std::filesystem::create_directories(path.parent_path());
+    auto writer = std::make_unique<BinaryRecordWriter>(buffer_size_);
+    if (seen_paths_.insert(key).second) {
+      writer->open(path);
+    } else {
+      writer->open_append(path);
+    }
+
+    const auto [inserted, was_inserted] = entries_.emplace(
+        key,
+        Entry{
+            .writer = std::move(writer),
+            .last_used = ++clock_,
+        });
+    static_cast<void>(was_inserted);
+    return inserted->second;
+  }
+
+  std::unordered_map<std::string, Entry> entries_;
+  std::unordered_set<std::string> seen_paths_;
+  std::size_t max_open_files_ = 0;
+  std::size_t buffer_size_ = 0;
+  std::uint64_t clock_ = 0;
 };
 
 class AtomicBinaryRecordWriter {
  public:
-  explicit AtomicBinaryRecordWriter(std::size_t buffer_size = 1U << 20)
-      : writer_(buffer_size) {}
+  explicit AtomicBinaryRecordWriter(
+      std::size_t block_size = 1U << 20,
+      PyObject* write_lock = nullptr)
+      : writer_(write_lock == nullptr || write_lock == Py_None ? block_size : 0),
+        write_lock_(write_lock == Py_None ? nullptr : write_lock),
+        block_size_(block_size) {
+    if (block_size_ == 0) {
+      throw std::invalid_argument("database output block size must be greater than zero");
+    }
+    if (write_lock_ != nullptr) {
+      block_.reserve(block_size_);
+    }
+  }
 
   AtomicBinaryRecordWriter(const AtomicBinaryRecordWriter&) = delete;
   AtomicBinaryRecordWriter& operator=(const AtomicBinaryRecordWriter&) = delete;
@@ -951,19 +1148,60 @@ class AtomicBinaryRecordWriter {
     final_path_ = final_path;
     incomplete_path_ = final_path;
     incomplete_path_ += ".incomplete";
-    writer_.open(incomplete_path_);
+    if (write_lock_ == nullptr) {
+      writer_.open(incomplete_path_);
+    } else {
+      ProcessWriteLockGuard guard(write_lock_);
+      writer_.open(incomplete_path_);
+    }
     active_ = true;
   }
 
   template <std::size_t PackedSize>
   void write(const PackedBuffer<PackedSize>& data) {
-    writer_.write(data);
+    if (write_lock_ == nullptr) {
+      writer_.write(data);
+      return;
+    }
+
+    if (!block_.empty() && block_.size() + data.size() > block_size_) {
+      flush_block();
+    }
+    block_.insert(block_.end(), data.begin(), data.end());
+    if (block_.size() >= block_size_) {
+      flush_block();
+    }
   }
 
   void commit() {
     if (!active_) {
       return;
     }
+    if (write_lock_ == nullptr) {
+      close_and_publish();
+    } else {
+      ProcessWriteLockGuard guard(write_lock_);
+      write_pending_block();
+      close_and_publish();
+    }
+  }
+
+ private:
+  void write_pending_block() {
+    if (block_.empty()) {
+      return;
+    }
+    writer_.write(block_.data(), block_.size());
+    block_.clear();
+  }
+
+  void flush_block() {
+    ProcessWriteLockGuard guard(write_lock_);
+    write_pending_block();
+    writer_.flush();
+  }
+
+  void close_and_publish() {
     writer_.close();
     active_ = false;
 
@@ -977,10 +1215,12 @@ class AtomicBinaryRecordWriter {
     }
   }
 
- private:
   BinaryRecordWriter writer_;
   std::filesystem::path final_path_;
   std::filesystem::path incomplete_path_;
+  PyObject* write_lock_ = nullptr;
+  std::size_t block_size_ = 0;
+  std::vector<std::uint8_t> block_;
   bool active_ = false;
 };
 
@@ -1088,6 +1328,19 @@ void write_unsigned_le(
   }
 }
 
+template <typename UIntType, std::size_t PackedSize>
+void write_unsigned_be(
+    PackedBuffer<PackedSize>& output,
+    std::size_t& offset,
+    UIntType value) {
+  static_assert(std::is_unsigned_v<UIntType>);
+  for (std::size_t byte_index = 0; byte_index < sizeof(UIntType); ++byte_index) {
+    const std::size_t shift = (sizeof(UIntType) - byte_index - 1U) * 8U;
+    output[offset++] = static_cast<std::uint8_t>(
+        (value >> shift) & static_cast<UIntType>(0xffU));
+  }
+}
+
 template <typename UIntType>
 UIntType read_unsigned_le(std::string_view input, std::size_t& offset) {
   static_assert(std::is_unsigned_v<UIntType>);
@@ -1100,6 +1353,19 @@ UIntType read_unsigned_le(std::string_view input, std::size_t& offset) {
   return value;
 }
 
+template <typename UIntType>
+UIntType read_unsigned_be(std::string_view input, std::size_t& offset) {
+  static_assert(std::is_unsigned_v<UIntType>);
+  UIntType value = 0;
+  for (std::size_t byte_index = 0; byte_index < sizeof(UIntType); ++byte_index) {
+    value = static_cast<UIntType>(
+        (value << 8U) |
+        static_cast<UIntType>(
+            static_cast<unsigned char>(input[offset++])));
+  }
+  return value;
+}
+
 inline std::uint64_t read_uint64_le_at(const void* data, std::size_t offset) {
   std::uint64_t value = 0;
   std::memcpy(
@@ -1107,6 +1373,19 @@ inline std::uint64_t read_uint64_le_at(const void* data, std::size_t offset) {
       static_cast<const std::uint8_t*>(data) + offset,
       sizeof(value));
   if constexpr (std::endian::native == std::endian::little) {
+    return value;
+  } else {
+    return std::byteswap(value);
+  }
+}
+
+inline std::uint64_t read_uint64_be_at(const void* data, std::size_t offset) {
+  std::uint64_t value = 0;
+  std::memcpy(
+      &value,
+      static_cast<const std::uint8_t*>(data) + offset,
+      sizeof(value));
+  if constexpr (std::endian::native == std::endian::big) {
     return value;
   } else {
     return std::byteswap(value);
@@ -1994,40 +2273,133 @@ nanobind::tuple bytes_tuple(
   return result;
 }
 
+#if MASSIVE_SPEEDUP_HAS_RAPIDGZIP_HEADERS
+class StreamingStandardFileReader : public rapidgzip::StandardFileReader {
+ public:
+  explicit StreamingStandardFileReader(std::filesystem::path path)
+      : rapidgzip::StandardFileReader(path),
+        path_(std::move(path)) {
+    drop_file_cache(path_);
+#if defined(POSIX_FADV_NOREUSE)
+    static_cast<void>(::posix_fadvise(fileno(), 0, 0, POSIX_FADV_NOREUSE));
+#endif
+  }
+
+  ~StreamingStandardFileReader() override {
+    StreamingStandardFileReader::close();
+  }
+
+  void close() override {
+    if (closed()) {
+      return;
+    }
+#if defined(POSIX_FADV_DONTNEED)
+    static_cast<void>(::posix_fadvise(fileno(), 0, 0, POSIX_FADV_DONTNEED));
+#endif
+    rapidgzip::StandardFileReader::close();
+  }
+
+ private:
+  std::filesystem::path path_;
+};
+#endif
+
+inline void check_pending_python_signals() {
+  nanobind::gil_scoped_acquire acquire;
+  if (PyErr_CheckSignals() != 0) {
+    throw nanobind::python_error();
+  }
+}
+
 class BufferedGzipLineReader {
  public:
   explicit BufferedGzipLineReader(
       std::filesystem::path path,
       std::size_t parallelization = 0,
-      std::size_t chunk_size = 1U << 20)
-      : buffer_(chunk_size) {
+      std::size_t chunk_size = 1U << 20,
+      std::size_t read_block_size = 0) {
 #if MASSIVE_SPEEDUP_HAS_RAPIDGZIP_HEADERS
     if (chunk_size == 0) {
       throw std::invalid_argument("chunk_size must be greater than zero");
+    }
+    if (read_block_size == 0) {
+      read_block_size = chunk_size;
     }
 
     const auto workers = parallelization == 0
         ? static_cast<std::size_t>(std::max(1u, std::thread::hardware_concurrency()))
         : parallelization;
 
-    auto file_reader = std::make_unique<rapidgzip::StandardFileReader>(path.string());
-    reader_ = std::make_unique<rapidgzip::ParallelGzipReader<rapidgzip::ChunkData>>(
+    prefetch_ = std::make_unique<PrefetchState>(read_block_size);
+    auto file_reader = std::make_unique<StreamingStandardFileReader>(std::move(path));
+    prefetch_->reader =
+        std::make_unique<rapidgzip::ParallelGzipReader<rapidgzip::ChunkData>>(
         std::move(file_reader),
         workers,
         chunk_size);
+    // Database and flat-file parsing are strictly forward-only. Retaining
+    // rapidgzip's seek windows makes memory grow with the decompressed stream
+    // and can consume tens of GiB for a single large daily file.
+    prefetch_->reader->setKeepIndex(false);
+    PrefetchState* state = prefetch_.get();
+    state->thread = std::thread([state] { prefetch_blocks(state); });
 #else
     static_cast<void>(path);
     static_cast<void>(parallelization);
     static_cast<void>(chunk_size);
+    static_cast<void>(read_block_size);
     throw std::runtime_error(
         "rapidgzip headers are not available in the current build tree; "
         "check out the rapidgzip/librapidarchive sources before using gzip_lines");
 #endif
   }
 
+  ~BufferedGzipLineReader() { stop_prefetch(); }
+
+  BufferedGzipLineReader(const BufferedGzipLineReader&) = delete;
+  BufferedGzipLineReader& operator=(const BufferedGzipLineReader&) = delete;
+
+  BufferedGzipLineReader(BufferedGzipLineReader&& other) noexcept
+      : pending_(std::move(other.pending_)),
+        line_start_(other.line_start_),
+        search_offset_(other.search_offset_),
+        nonempty_lines_read_(other.nonempty_lines_read_),
+        prefetch_(std::move(other.prefetch_)) {
+    other.line_start_ = 0;
+    other.search_offset_ = 0;
+    other.nonempty_lines_read_ = 0;
+  }
+
+  BufferedGzipLineReader& operator=(BufferedGzipLineReader&& other) noexcept {
+    if (this == &other) {
+      return *this;
+    }
+    stop_prefetch();
+    pending_ = std::move(other.pending_);
+    line_start_ = other.line_start_;
+    search_offset_ = other.search_offset_;
+    nonempty_lines_read_ = other.nonempty_lines_read_;
+    prefetch_ = std::move(other.prefetch_);
+    other.line_start_ = 0;
+    other.search_offset_ = 0;
+    other.nonempty_lines_read_ = 0;
+    return *this;
+  }
+
   template <typename Specialization>
   bool next_line(std::string_view& line) {
-    return Specialization::next_line(*this, line);
+    const bool has_line = Specialization::next_line(*this, line);
+    if (has_line && !line.empty()) {
+      ++nonempty_lines_read_;
+      if ((nonempty_lines_read_ & ((1U << 14) - 1U)) == 0) {
+        check_pending_python_signals();
+      }
+    }
+    return has_line;
+  }
+
+  [[nodiscard]] std::uint64_t nonempty_lines_read() const noexcept {
+    return nonempty_lines_read_;
   }
 
   std::string_view line_view(std::size_t start, std::size_t end) const {
@@ -2070,12 +2442,35 @@ class BufferedGzipLineReader {
 #if MASSIVE_SPEEDUP_HAS_RAPIDGZIP_HEADERS
     release_consumed_prefix();
 
-    const auto bytes_read = reader_->read(-1, buffer_.data(), buffer_.size());
-    if (bytes_read == 0) {
+    PrefetchState& state = *prefetch_;
+    std::unique_lock<std::mutex> lock(state.mutex);
+    while (!state.buffer_ready && !state.error && !state.finished) {
+      if (state.ready.wait_for(lock, std::chrono::milliseconds(100)) ==
+          std::cv_status::timeout) {
+        lock.unlock();
+        check_pending_python_signals();
+        lock.lock();
+      }
+    }
+    if (state.error) {
+      std::rethrow_exception(state.error);
+    }
+    if (!state.buffer_ready) {
       return false;
     }
 
-    pending_.append(buffer_.data(), bytes_read);
+    const std::size_t bytes_read = state.ready_size;
+    if (bytes_read == 0) {
+      state.buffer_ready = false;
+      lock.unlock();
+      state.can_fill.notify_one();
+      return false;
+    }
+
+    pending_.append(state.buffers[state.ready_buffer].data(), bytes_read);
+    state.buffer_ready = false;
+    lock.unlock();
+    state.can_fill.notify_one();
     return true;
 #else
     throw std::runtime_error(
@@ -2090,15 +2485,102 @@ class BufferedGzipLineReader {
     search_offset_ = 0;
   }
 
-  std::vector<char> buffer_;
   std::string pending_;
   std::size_t line_start_ = 0;
   std::size_t search_offset_ = 0;
+  std::uint64_t nonempty_lines_read_ = 0;
 
  private:
 #if MASSIVE_SPEEDUP_HAS_RAPIDGZIP_HEADERS
-  std::unique_ptr<rapidgzip::ParallelGzipReader<rapidgzip::ChunkData>> reader_;
+  struct PrefetchState {
+    explicit PrefetchState(std::size_t block_size)
+        : buffers{
+              std::vector<char>(block_size),
+              std::vector<char>(block_size),
+          } {}
+
+    std::unique_ptr<rapidgzip::ParallelGzipReader<rapidgzip::ChunkData>> reader;
+    std::array<std::vector<char>, 2> buffers;
+    std::thread thread;
+    std::mutex mutex;
+    std::condition_variable can_fill;
+    std::condition_variable ready;
+    std::exception_ptr error;
+    std::size_t ready_buffer = 0;
+    std::size_t ready_size = 0;
+    bool buffer_ready = false;
+    bool finished = false;
+    bool stop = false;
+  };
+
+  static void prefetch_blocks(PrefetchState* state) noexcept {
+    std::size_t write_buffer = 0;
+    while (true) {
+      {
+        std::unique_lock<std::mutex> lock(state->mutex);
+        state->can_fill.wait(lock, [state] {
+          return !state->buffer_ready || state->stop;
+        });
+        if (state->stop) {
+          return;
+        }
+      }
+
+      std::size_t bytes_read = 0;
+      try {
+        bytes_read = state->reader->read(
+            -1,
+            state->buffers[write_buffer].data(),
+            state->buffers[write_buffer].size());
+      } catch (...) {
+        {
+          std::lock_guard<std::mutex> lock(state->mutex);
+          state->error = std::current_exception();
+          state->finished = true;
+        }
+        state->ready.notify_one();
+        return;
+      }
+
+      {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        if (state->stop) {
+          return;
+        }
+        state->ready_buffer = write_buffer;
+        state->ready_size = bytes_read;
+        state->buffer_ready = true;
+        if (bytes_read == 0) {
+          state->finished = true;
+        }
+      }
+      state->ready.notify_one();
+      if (bytes_read == 0) {
+        return;
+      }
+      write_buffer = 1 - write_buffer;
+    }
+  }
+
+  void stop_prefetch() noexcept {
+    if (!prefetch_) {
+      return;
+    }
+    {
+      std::lock_guard<std::mutex> lock(prefetch_->mutex);
+      prefetch_->stop = true;
+    }
+    prefetch_->can_fill.notify_all();
+    prefetch_->ready.notify_all();
+    if (prefetch_->thread.joinable()) {
+      prefetch_->thread.join();
+    }
+  }
+#else
+  struct PrefetchState {};
+  void stop_prefetch() noexcept {}
 #endif
+  std::unique_ptr<PrefetchState> prefetch_;
 };
 
 class CsvLineCursor {
@@ -2377,9 +2859,10 @@ class AggregateObjectCache {
 
 struct StockTrade {
   static constexpr std::size_t packed_size = 78;
-  static constexpr std::size_t packed_participant_timestamp_offset = 25;
-  static constexpr std::size_t packed_price_offset = 33;
-  static constexpr std::size_t packed_sip_timestamp_offset = 49;
+  static constexpr std::size_t packed_sip_timestamp_offset = 0;
+  static constexpr std::size_t packed_conditions_offset = 8;
+  static constexpr std::size_t packed_participant_timestamp_offset = 33;
+  static constexpr std::size_t packed_price_offset = 41;
   static constexpr std::size_t packed_size_offset = 57;
   static constexpr std::size_t packed_size_scale_offset = 65;
   using PackedData = detail::PackedBuffer<packed_size>;
@@ -2504,6 +2987,8 @@ struct StockTrade {
 
     StockTrade result;
     std::size_t offset = 0;
+    result.sip_timestamp =
+        detail::read_unsigned_be<std::uint64_t>(packed_data, offset);
     result.conditions = detail::read_bitset_le<96>(packed_data, offset);
     result.correction = detail::read_int32_le(packed_data, offset);
     result.exchange = detail::read_unsigned_le<std::uint8_t>(packed_data, offset);
@@ -2512,7 +2997,6 @@ struct StockTrade {
         detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
     result.price = detail::read_double_le(packed_data, offset);
     result.sequence_number = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
-    result.sip_timestamp = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
     result.exact_size.coefficient =
         detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
     result.exact_size.scale =
@@ -2541,7 +3025,7 @@ struct StockTrade {
   }
 
   static std::uint64_t sip_timestamp_at(const void* packed_data) {
-    return detail::read_uint64_le_at(packed_data, packed_sip_timestamp_offset);
+    return detail::read_uint64_be_at(packed_data, packed_sip_timestamp_offset);
   }
 
   static double price_at(const void* packed_data) {
@@ -2569,28 +3053,32 @@ struct StockTrade {
       return false;
     }
     const auto* bytes = static_cast<const std::uint8_t*>(packed_data);
-    return (bytes[condition_code / 8] &
+    return (bytes[packed_conditions_offset + condition_code / 8] &
             static_cast<std::uint8_t>(1U << (condition_code % 8))) != 0;
   }
 
   static bool updates_high_low_at(const void* packed_data) {
     return !detail::stock_trade_high_low_exclusion_mask.intersects_packed(
-        packed_data);
+        packed_data,
+        packed_conditions_offset);
   }
 
   static bool updates_open_close_at(const void* packed_data) {
     return !detail::stock_trade_open_close_exclusion_mask.intersects_packed(
-        packed_data);
+        packed_data,
+        packed_conditions_offset);
   }
 
   static bool updates_volume_at(const void* packed_data) {
     return !detail::stock_trade_volume_exclusion_mask.intersects_packed(
-        packed_data);
+        packed_data,
+        packed_conditions_offset);
   }
 
   PackedData pack() const {
     PackedData output{};
     std::size_t offset = 0;
+    detail::write_unsigned_be(output, offset, sip_timestamp);
     detail::write_bitset_le(output, offset, conditions);
     detail::write_int32_le(output, offset, correction);
     detail::write_unsigned_le(output, offset, exchange);
@@ -2598,7 +3086,6 @@ struct StockTrade {
     detail::write_unsigned_le(output, offset, participant_timestamp);
     detail::write_double_le(output, offset, price);
     detail::write_unsigned_le(output, offset, sequence_number);
-    detail::write_unsigned_le(output, offset, sip_timestamp);
     detail::write_unsigned_le(output, offset, exact_size.coefficient);
     detail::write_unsigned_le(output, offset, exact_size.scale);
     detail::write_unsigned_le(output, offset, tape);
@@ -2905,7 +3392,7 @@ struct CryptoTrade {
     CryptoTrade result;
     std::size_t offset = 0;
     result.participant_timestamp =
-        detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
+        detail::read_unsigned_be<std::uint64_t>(packed_data, offset);
     result.id = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
     result.price = detail::read_double_le(packed_data, offset);
     result.size = detail::read_double_le(packed_data, offset);
@@ -2929,7 +3416,7 @@ struct CryptoTrade {
   }
 
   static std::uint64_t participant_timestamp_at(const void* packed_data) {
-    return detail::read_uint64_le_at(
+    return detail::read_uint64_be_at(
         packed_data,
         packed_participant_timestamp_offset);
   }
@@ -2945,7 +3432,7 @@ struct CryptoTrade {
   PackedData pack() const {
     PackedData output{};
     std::size_t offset = 0;
-    detail::write_unsigned_le(output, offset, participant_timestamp);
+    detail::write_unsigned_be(output, offset, participant_timestamp);
     detail::write_unsigned_le(output, offset, id);
     detail::write_double_le(output, offset, price);
     detail::write_double_le(output, offset, size);
@@ -3176,7 +3663,7 @@ struct OptionTrade {
     detail::require_packed_size("OptionTrade", packed_data.size(), packed_size);
     OptionTrade result;
     std::size_t offset = 0;
-    result.sip_timestamp = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
+    result.sip_timestamp = detail::read_unsigned_be<std::uint64_t>(packed_data, offset);
     result.price = detail::read_double_le(packed_data, offset);
     result.size = detail::read_unsigned_le<std::uint32_t>(packed_data, offset);
     result.correction = detail::read_int32_le(packed_data, offset);
@@ -3202,7 +3689,7 @@ struct OptionTrade {
   }
 
   static std::uint64_t sip_timestamp_at(const void* packed_data) {
-    return detail::read_uint64_le_at(packed_data, packed_sip_timestamp_offset);
+    return detail::read_uint64_be_at(packed_data, packed_sip_timestamp_offset);
   }
 
   static double price_at(const void* packed_data) {
@@ -3216,7 +3703,7 @@ struct OptionTrade {
   PackedData pack() const {
     PackedData output{};
     std::size_t offset = 0;
-    detail::write_unsigned_le(output, offset, sip_timestamp);
+    detail::write_unsigned_be(output, offset, sip_timestamp);
     detail::write_double_le(output, offset, price);
     detail::write_unsigned_le(output, offset, size);
     detail::write_int32_le(output, offset, correction);
@@ -3491,7 +3978,7 @@ struct OptionQuote {
     detail::require_packed_size("OptionQuote", packed_data.size(), packed_size);
     OptionQuote result;
     std::size_t offset = 0;
-    result.sip_timestamp = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
+    result.sip_timestamp = detail::read_unsigned_be<std::uint64_t>(packed_data, offset);
     result.sequence_number = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
     result.ask_price = detail::read_double_le(packed_data, offset);
     result.bid_price = detail::read_double_le(packed_data, offset);
@@ -3517,7 +4004,7 @@ struct OptionQuote {
   }
 
   static std::uint64_t sip_timestamp_at(const void* packed_data) {
-    return detail::read_uint64_le_at(packed_data, packed_sip_timestamp_offset);
+    return detail::read_uint64_be_at(packed_data, packed_sip_timestamp_offset);
   }
 
   static double ask_price_at(const void* packed_data) {
@@ -3539,7 +4026,7 @@ struct OptionQuote {
   PackedData pack() const {
     PackedData output{};
     std::size_t offset = 0;
-    detail::write_unsigned_le(output, offset, sip_timestamp);
+    detail::write_unsigned_be(output, offset, sip_timestamp);
     detail::write_unsigned_le(output, offset, sequence_number);
     detail::write_double_le(output, offset, ask_price);
     detail::write_double_le(output, offset, bid_price);
@@ -3712,12 +4199,12 @@ struct OptionQuote {
 
 struct StockQuote {
   static constexpr std::size_t packed_size = 83;
-  static constexpr std::size_t packed_ask_price_offset = 1;
-  static constexpr std::size_t packed_ask_size_offset = 9;
-  static constexpr std::size_t packed_bid_price_offset = 14;
-  static constexpr std::size_t packed_bid_size_offset = 22;
-  static constexpr std::size_t packed_participant_timestamp_offset = 50;
-  static constexpr std::size_t packed_sip_timestamp_offset = 66;
+  static constexpr std::size_t packed_sip_timestamp_offset = 0;
+  static constexpr std::size_t packed_ask_price_offset = 9;
+  static constexpr std::size_t packed_ask_size_offset = 17;
+  static constexpr std::size_t packed_bid_price_offset = 22;
+  static constexpr std::size_t packed_bid_size_offset = 30;
+  static constexpr std::size_t packed_participant_timestamp_offset = 58;
   using PackedData = detail::PackedBuffer<packed_size>;
   enum AttributeIndex : std::size_t {
     ticker_attribute,
@@ -3841,6 +4328,8 @@ struct StockQuote {
 
     StockQuote result;
     std::size_t offset = 0;
+    result.sip_timestamp =
+        detail::read_unsigned_be<std::uint64_t>(packed_data, offset);
     result.ask_exchange = detail::read_unsigned_le<std::uint8_t>(packed_data, offset);
     result.ask_price = detail::read_double_le(packed_data, offset);
     result.ask_size = detail::read_unsigned_le<std::uint32_t>(packed_data, offset);
@@ -3852,7 +4341,6 @@ struct StockQuote {
     result.participant_timestamp =
         detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
     result.sequence_number = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
-    result.sip_timestamp = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
     result.tape = detail::read_unsigned_le<std::uint8_t>(packed_data, offset);
     result.trf_timestamp = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
     return result;
@@ -3875,7 +4363,7 @@ struct StockQuote {
   }
 
   static std::uint64_t sip_timestamp_at(const void* packed_data) {
-    return detail::read_uint64_le_at(packed_data, packed_sip_timestamp_offset);
+    return detail::read_uint64_be_at(packed_data, packed_sip_timestamp_offset);
   }
 
   static double ask_price_at(const void* packed_data) {
@@ -3897,6 +4385,7 @@ struct StockQuote {
   PackedData pack() const {
     PackedData output{};
     std::size_t offset = 0;
+    detail::write_unsigned_be(output, offset, sip_timestamp);
     detail::write_unsigned_le(output, offset, ask_exchange);
     detail::write_double_le(output, offset, ask_price);
     detail::write_unsigned_le(output, offset, ask_size);
@@ -3907,7 +4396,6 @@ struct StockQuote {
     detail::write_bitset_le(output, offset, indicators);
     detail::write_unsigned_le(output, offset, participant_timestamp);
     detail::write_unsigned_le(output, offset, sequence_number);
-    detail::write_unsigned_le(output, offset, sip_timestamp);
     detail::write_unsigned_le(output, offset, tape);
     detail::write_unsigned_le(output, offset, trf_timestamp);
     return output;
@@ -4219,7 +4707,7 @@ struct FuturesTrade {
     detail::require_packed_size("FuturesTrade", packed_data.size(), packed_size);
     FuturesTrade result;
     std::size_t offset = 0;
-    result.timestamp = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
+    result.timestamp = detail::read_unsigned_be<std::uint64_t>(packed_data, offset);
     result.sequence_number = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
     result.price = detail::read_double_le(packed_data, offset);
     result.report_sequence = detail::read_unsigned_le<std::uint32_t>(packed_data, offset);
@@ -4243,7 +4731,7 @@ struct FuturesTrade {
   }
 
   static std::uint64_t timestamp_at(const void* packed_data) {
-    return detail::read_uint64_le_at(packed_data, packed_timestamp_offset);
+    return detail::read_uint64_be_at(packed_data, packed_timestamp_offset);
   }
 
   static double price_at(const void* packed_data) {
@@ -4257,7 +4745,7 @@ struct FuturesTrade {
   PackedData pack() const {
     PackedData output{};
     std::size_t offset = 0;
-    detail::write_unsigned_le(output, offset, timestamp);
+    detail::write_unsigned_be(output, offset, timestamp);
     detail::write_unsigned_le(output, offset, sequence_number);
     detail::write_double_le(output, offset, price);
     detail::write_unsigned_le(output, offset, report_sequence);
@@ -4511,7 +4999,7 @@ struct FuturesQuote {
     detail::require_packed_size("FuturesQuote", packed_data.size(), packed_size);
     FuturesQuote result;
     std::size_t offset = 0;
-    result.timestamp = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
+    result.timestamp = detail::read_unsigned_be<std::uint64_t>(packed_data, offset);
     result.sequence_number = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
     result.ask_timestamp = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
     result.bid_timestamp = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
@@ -4538,7 +5026,7 @@ struct FuturesQuote {
   }
 
   static std::uint64_t timestamp_at(const void* packed_data) {
-    return detail::read_uint64_le_at(packed_data, packed_timestamp_offset);
+    return detail::read_uint64_be_at(packed_data, packed_timestamp_offset);
   }
 
   static double ask_price_at(const void* packed_data) {
@@ -4560,7 +5048,7 @@ struct FuturesQuote {
   PackedData pack() const {
     PackedData output{};
     std::size_t offset = 0;
-    detail::write_unsigned_le(output, offset, timestamp);
+    detail::write_unsigned_be(output, offset, timestamp);
     detail::write_unsigned_le(output, offset, sequence_number);
     detail::write_unsigned_le(output, offset, ask_timestamp);
     detail::write_unsigned_le(output, offset, bid_timestamp);
@@ -4739,9 +5227,9 @@ struct FuturesQuote {
 
 struct CurrencyQuote {
   static constexpr std::size_t packed_size = 26;
-  static constexpr std::size_t packed_ask_price_offset = 1;
-  static constexpr std::size_t packed_bid_price_offset = 10;
-  static constexpr std::size_t packed_participant_timestamp_offset = 18;
+  static constexpr std::size_t packed_participant_timestamp_offset = 0;
+  static constexpr std::size_t packed_ask_price_offset = 9;
+  static constexpr std::size_t packed_bid_price_offset = 18;
   using PackedData = detail::PackedBuffer<packed_size>;
   enum AttributeIndex : std::size_t {
     ticker_attribute,
@@ -4819,12 +5307,12 @@ struct CurrencyQuote {
 
     CurrencyQuote result;
     std::size_t offset = 0;
+    result.participant_timestamp =
+        detail::read_unsigned_be<std::uint64_t>(packed_data, offset);
     result.ask_exchange = detail::read_unsigned_le<std::uint8_t>(packed_data, offset);
     result.ask_price = detail::read_double_le(packed_data, offset);
     result.bid_exchange = detail::read_unsigned_le<std::uint8_t>(packed_data, offset);
     result.bid_price = detail::read_double_le(packed_data, offset);
-    result.participant_timestamp =
-        detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
     return result;
   }
 
@@ -4839,7 +5327,7 @@ struct CurrencyQuote {
   }
 
   static std::uint64_t participant_timestamp_at(const void* packed_data) {
-    return detail::read_uint64_le_at(
+    return detail::read_uint64_be_at(
         packed_data,
         packed_participant_timestamp_offset);
   }
@@ -4855,11 +5343,11 @@ struct CurrencyQuote {
   PackedData pack() const {
     PackedData output{};
     std::size_t offset = 0;
+    detail::write_unsigned_be(output, offset, participant_timestamp);
     detail::write_unsigned_le(output, offset, ask_exchange);
     detail::write_double_le(output, offset, ask_price);
     detail::write_unsigned_le(output, offset, bid_exchange);
     detail::write_double_le(output, offset, bid_price);
-    detail::write_unsigned_le(output, offset, participant_timestamp);
     return output;
   }
 
@@ -5022,7 +5510,7 @@ struct IndexValue {
     detail::require_packed_size("IndexValue", packed_data.size(), packed_size);
     IndexValue result;
     std::size_t offset = 0;
-    result.timestamp = detail::read_unsigned_le<std::uint64_t>(packed_data, offset);
+    result.timestamp = detail::read_unsigned_be<std::uint64_t>(packed_data, offset);
     result.value = detail::read_double_le(packed_data, offset);
     return result;
   }
@@ -5042,7 +5530,7 @@ struct IndexValue {
   }
 
   static std::uint64_t timestamp_at(const void* packed_data) {
-    return detail::read_uint64_le_at(packed_data, packed_timestamp_offset);
+    return detail::read_uint64_be_at(packed_data, packed_timestamp_offset);
   }
 
   static std::uint64_t participant_timestamp_at(const void* packed_data) {
@@ -5056,7 +5544,7 @@ struct IndexValue {
   PackedData pack() const {
     PackedData output{};
     std::size_t offset = 0;
-    detail::write_unsigned_le(output, offset, timestamp);
+    detail::write_unsigned_be(output, offset, timestamp);
     detail::write_double_le(output, offset, value);
     return output;
   }
@@ -5292,15 +5780,32 @@ inline std::uint64_t saturating_add_uint64(
 }
 
 inline std::uint64_t seconds_to_ns(
-    std::uint64_t seconds,
+    double seconds,
     std::string_view name) {
-  constexpr std::uint64_t nanoseconds_per_second = 1'000'000'000ULL;
-  if (seconds > std::numeric_limits<std::uint64_t>::max() / nanoseconds_per_second) {
+  if (!std::isfinite(seconds) || !(seconds > 0.0)) {
+    std::ostringstream message;
+    message << name << " must be a finite positive number of seconds";
+    throw std::invalid_argument(message.str());
+  }
+  constexpr double nanoseconds_per_second = 1'000'000'000.0;
+  const double nanoseconds = seconds * nanoseconds_per_second;
+  if (nanoseconds < 1.0) {
+    std::ostringstream message;
+    message << name << " is smaller than one nanosecond";
+    throw std::invalid_argument(message.str());
+  }
+  if (nanoseconds > static_cast<double>(std::numeric_limits<std::uint64_t>::max())) {
     std::ostringstream message;
     message << name << " is too large to convert to nanoseconds";
     throw std::invalid_argument(message.str());
   }
-  return seconds * nanoseconds_per_second;
+  return static_cast<std::uint64_t>(std::llround(nanoseconds));
+}
+
+inline std::uint64_t seconds_to_ns(
+    std::uint64_t seconds,
+    std::string_view name) {
+  return seconds_to_ns(static_cast<double>(seconds), name);
 }
 
 inline std::uint64_t aggregation_window_start(
@@ -6415,18 +6920,18 @@ class WindowAggregator {
 
   WindowAggregator(
       nanobind::handle rows,
-      std::uint64_t interval_seconds,
+      double interval_seconds,
       std::uint64_t start_timestamp)
       : interval_ns_(detail::seconds_to_ns(interval_seconds, "interval_seconds")),
         start_timestamp_(start_timestamp) {
-    if (interval_seconds == 0) {
-      throw std::invalid_argument("interval_seconds must be greater than zero");
-    }
 
     DatabaseType* database = nullptr;
     if (nanobind::try_cast<DatabaseType*>(rows, database, false)) {
-      database_ = database;
       database_owner_ = nanobind::borrow<nanobind::object>(rows);
+      // Flat-file only: aggregator drives mmap itself. next_database() reads
+      // fixed records via packed_data_at + Traits::add_packed — no per-row
+      // StockTrade/StockQuote allocation, no Python objects in the hot loop.
+      database_ = database;
       const std::int64_t first_index =
           database_->index_after_timestamp(start_timestamp_, std::nullopt);
       database_index_ = first_index < 0
@@ -6488,39 +6993,58 @@ class WindowAggregator {
   }
 
  private:
+  // Hot path when the binary file exists: scan mmap bytes only.
+  // Release the GIL for the page-fault-heavy packed scan so multiple threads
+  // can fault and aggregate in parallel; reacquire before returning so
+  // nanobind can build the yielded Python bar under the GIL.
   OutputType next_database() {
-    if (database_index_ >= database_->size()) {
+    OutputType result;
+    bool exhausted = false;
+    {
+      nanobind::gil_scoped_release release;
+
+      if (database_index_ >= database_->size()) {
+        exhausted = true;
+      } else {
+        const void* packed_data = database_->packed_data_at(database_index_++);
+        const std::uint64_t timestamp = Traits::packed_timestamp(packed_data);
+        const std::uint64_t row_window_start =
+            detail::aggregation_window_start(
+                timestamp,
+                interval_ns_,
+                start_timestamp_);
+
+        State state(
+            Traits::database_key(*database_),
+            row_window_start,
+            interval_ns_);
+        Traits::add_packed(state, packed_data, timestamp);
+
+        while (database_index_ < database_->size()) {
+          packed_data = database_->packed_data_at(database_index_);
+          const std::uint64_t next_timestamp =
+              Traits::packed_timestamp(packed_data);
+          const std::uint64_t next_window_start =
+              detail::aggregation_window_start(
+                  next_timestamp,
+                  interval_ns_,
+                  start_timestamp_);
+          if (next_window_start != state.window_start) {
+            break;
+          }
+
+          Traits::add_packed(state, packed_data, next_timestamp);
+          ++database_index_;
+        }
+
+        result = state.to_result();
+      }
+    }
+
+    if (exhausted) {
       throw nanobind::stop_iteration();
     }
-
-    const void* packed_data = database_->packed_data_at(database_index_++);
-    const std::uint64_t timestamp = Traits::packed_timestamp(packed_data);
-    const std::uint64_t row_window_start =
-        detail::aggregation_window_start(
-            timestamp,
-            interval_ns_,
-            start_timestamp_);
-
-    State state(Traits::database_key(*database_), row_window_start, interval_ns_);
-    Traits::add_packed(state, packed_data, timestamp);
-
-    while (database_index_ < database_->size()) {
-      packed_data = database_->packed_data_at(database_index_);
-      const std::uint64_t next_timestamp = Traits::packed_timestamp(packed_data);
-      const std::uint64_t next_window_start =
-          detail::aggregation_window_start(
-              next_timestamp,
-              interval_ns_,
-              start_timestamp_);
-      if (next_window_start != state.window_start) {
-        break;
-      }
-
-      Traits::add_packed(state, packed_data, next_timestamp);
-      ++database_index_;
-    }
-
-    return state.to_result();
+    return result;
   }
 
   bool read_next_row(RowType& row) {
@@ -6556,7 +7080,7 @@ class WindowAggregator {
   bool has_pending_row_ = false;
 };
 
-using StockTradeAggregator = WindowAggregator<StockTradeAggregationTraits>;
+using StockTradeWindowAggregator = WindowAggregator<StockTradeAggregationTraits>;
 using StockQuoteAggregator = WindowAggregator<StockQuoteAggregationTraits>;
 using CurrencyQuoteAggregator = WindowAggregator<CurrencyQuoteAggregationTraits>;
 using CryptoTradeAggregator = WindowAggregator<CryptoTradeAggregationTraits>;
@@ -6579,7 +7103,6 @@ inline std::uint64_t sip_timestamp_at(const void* packed_data) {
 struct StockTradeDatabaseTraits {
   using row_type = StockTrade;
   static constexpr std::string_view record_type = "stock_trade";
-
   static std::uint64_t search_timestamp_at(const void* packed_data) {
     return StockTrade::sip_timestamp_at(packed_data);
   }
@@ -6588,7 +7111,6 @@ struct StockTradeDatabaseTraits {
 struct StockQuoteDatabaseTraits {
   using row_type = StockQuote;
   static constexpr std::string_view record_type = "stock_quote";
-
   static std::uint64_t search_timestamp_at(const void* packed_data) {
     return StockQuote::sip_timestamp_at(packed_data);
   }
@@ -6597,7 +7119,6 @@ struct StockQuoteDatabaseTraits {
 struct CryptoTradeDatabaseTraits {
   using row_type = CryptoTrade;
   static constexpr std::string_view record_type = "crypto_trade";
-
   static std::uint64_t search_timestamp_at(const void* packed_data) {
     return CryptoTrade::participant_timestamp_at(packed_data);
   }
@@ -6606,7 +7127,6 @@ struct CryptoTradeDatabaseTraits {
 struct CurrencyQuoteDatabaseTraits {
   using row_type = CurrencyQuote;
   static constexpr std::string_view record_type = "currency_quote";
-
   static std::uint64_t search_timestamp_at(const void* packed_data) {
     return CurrencyQuote::participant_timestamp_at(packed_data);
   }
@@ -6615,7 +7135,6 @@ struct CurrencyQuoteDatabaseTraits {
 struct IndexValueDatabaseTraits {
   using row_type = IndexValue;
   static constexpr std::string_view record_type = "index_value";
-
   static std::uint64_t search_timestamp_at(const void* packed_data) {
     return IndexValue::timestamp_at(packed_data);
   }
@@ -6624,7 +7143,6 @@ struct IndexValueDatabaseTraits {
 struct FuturesTradeDatabaseTraits {
   using row_type = FuturesTrade;
   static constexpr std::string_view record_type = "future_trade";
-
   static std::uint64_t search_timestamp_at(const void* packed_data) {
     return FuturesTrade::timestamp_at(packed_data);
   }
@@ -6633,7 +7151,6 @@ struct FuturesTradeDatabaseTraits {
 struct FuturesQuoteDatabaseTraits {
   using row_type = FuturesQuote;
   static constexpr std::string_view record_type = "future_quote";
-
   static std::uint64_t search_timestamp_at(const void* packed_data) {
     return FuturesQuote::timestamp_at(packed_data);
   }
@@ -6642,7 +7159,6 @@ struct FuturesQuoteDatabaseTraits {
 struct OptionTradeDatabaseTraits {
   using row_type = OptionTrade;
   static constexpr std::string_view record_type = "option_trade";
-
   static std::uint64_t search_timestamp_at(const void* packed_data) {
     return OptionTrade::sip_timestamp_at(packed_data);
   }
@@ -6651,11 +7167,71 @@ struct OptionTradeDatabaseTraits {
 struct OptionQuoteDatabaseTraits {
   using row_type = OptionQuote;
   static constexpr std::string_view record_type = "option_quote";
-
   static std::uint64_t search_timestamp_at(const void* packed_data) {
     return OptionQuote::sip_timestamp_at(packed_data);
   }
 };
+
+// ---------------------------------------------------------------------------
+// NYSE session calendar (pandas_market_calendars), process-wide cache.
+// Used to avoid expensive NFS existence checks on weekends and holidays:
+// non-sessions open as empty DBs without touching the filesystem.
+// ---------------------------------------------------------------------------
+namespace nyse_session {
+struct SessionNs {
+  bool is_session = false;
+  std::uint64_t open_ns = 0;
+  std::uint64_t close_ns = 0;
+};
+
+inline bool record_type_uses_nyse_session(std::string_view record_type) {
+  return record_type == "stock_trade" || record_type == "stock_quote" ||
+         record_type == "option_trade" || record_type == "option_quote" ||
+         record_type == "index_value";
+}
+
+inline SessionNs load_session_uncached(const std::string& date) {
+  namespace nb = nanobind;
+  nb::gil_scoped_acquire acquire;
+  nb::module_ pmc = nb::module_::import_("pandas_market_calendars");
+  nb::object calendar = pmc.attr("get_calendar")("NYSE");
+  nb::object schedule = calendar.attr("schedule")(
+      nb::arg("start_date") = date, nb::arg("end_date") = date);
+  if (nb::cast<bool>(schedule.attr("empty"))) {
+    return SessionNs{};
+  }
+  nb::object row = schedule.attr("iloc").attr("__getitem__")(0);
+  SessionNs session;
+  session.is_session = true;
+  session.open_ns = nb::cast<std::uint64_t>(
+      row.attr("__getitem__")("market_open").attr("value"));
+  session.close_ns = nb::cast<std::uint64_t>(
+      row.attr("__getitem__")("market_close").attr("value"));
+  return session;
+}
+
+inline SessionNs session_for_date(const std::string& date) {
+  static std::mutex mutex;
+  static std::unordered_map<std::string, SessionNs> cache;
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    const auto iter = cache.find(date);
+    if (iter != cache.end()) {
+      return iter->second;
+    }
+  }
+  SessionNs session = load_session_uncached(date);
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    cache.emplace(date, session);
+  }
+  return session;
+}
+
+inline bool is_trading_day(const std::string& date) {
+  return session_for_date(date).is_session;
+}
+}  // namespace nyse_session
 
 template <typename Traits>
 class DatabaseRecordFile {
@@ -6667,10 +7243,12 @@ class DatabaseRecordFile {
     explicit Iterator(
         const DatabaseRecordFile& records,
         std::size_t start_index = 0,
-        std::optional<std::uint64_t> stop_timestamp = std::nullopt)
+        std::optional<std::uint64_t> stop_timestamp = std::nullopt,
+        std::optional<std::uint64_t> start_timestamp = std::nullopt)
         : records_(&records),
           index_(start_index),
-          stop_timestamp_(stop_timestamp) {}
+          stop_timestamp_(stop_timestamp),
+          start_timestamp_(start_timestamp) {}
 
     Iterator& iter() { return *this; }
 
@@ -6681,6 +7259,8 @@ class DatabaseRecordFile {
       if (stop_timestamp_ && records_->timestamp_at(index_) > *stop_timestamp_) {
         throw nanobind::stop_iteration();
       }
+      // start_timestamp_ is applied at construction via galloping_lower_bound.
+      static_cast<void>(start_timestamp_);
       return records_->record_at(index_++);
     }
 
@@ -6688,6 +7268,7 @@ class DatabaseRecordFile {
     const DatabaseRecordFile* records_;
     std::size_t index_ = 0;
     std::optional<std::uint64_t> stop_timestamp_;
+    std::optional<std::uint64_t> start_timestamp_;
   };
 
   DatabaseRecordFile(
@@ -6709,16 +7290,45 @@ class DatabaseRecordFile {
         date_(std::move(date)),
         ticker_(std::move(ticker)),
         record_type_(std::move(record_type)),
-        file_path_(database_path_ / record_type_ / date_ / ticker_),
-        mapping_(file_path_) {
-    if (mapping_.size() % RowType::packed_size != 0) {
-      std::ostringstream message;
-      message << "database file " << file_path_ << " has " << mapping_.size()
-              << " bytes, which is not a multiple of fixed record size "
-              << RowType::packed_size;
-      throw std::invalid_argument(message.str());
+        file_path_(database_path_ / record_type_ / date_ / ticker_) {
+    // Equity/option/index: ask the exchange calendar *before* any NFS
+    // existence check. Non-sessions never get on-disk files (build creates a
+    // file only when a tick is seen), so a missing path on a weekend/holiday
+    // is expected emptiness — not "missing data".
+    const bool nyse_product =
+        nyse_session::record_type_uses_nyse_session(record_type_);
+    if (nyse_product && !nyse_session::is_trading_day(date_)) {
+      size_ = 0;
+      return;
     }
-    size_ = mapping_.size() / RowType::packed_size;
+
+    // Valid session (or non-NYSE product): on-disk flat file only.
+    // No REST / API backfill — missing files are hard errors (or empty for
+    // non-sessions above). Use massive-speedup-build-database offline.
+    std::error_code exists_error;
+    if (std::filesystem::is_regular_file(file_path_, exists_error)) {
+      mapping_.emplace(file_path_);
+      if (mapping_->size() % RowType::packed_size != 0) {
+        std::ostringstream message;
+        message << "database file " << file_path_ << " has " << mapping_->size()
+                << " bytes, which is not a multiple of fixed record size "
+                << RowType::packed_size;
+        throw std::invalid_argument(message.str());
+      }
+      size_ = mapping_->size() / RowType::packed_size;
+      return;
+    }
+
+    std::ostringstream message;
+    message << "missing market data for " << ticker_ << " on " << date_
+            << " (record_type=" << record_type_ << "): no on-disk file at "
+            << file_path_;
+    if (exists_error) {
+      message << ": " << exists_error.message();
+    }
+    message << ". Flat-file only (no REST backfill); build the database offline "
+               "or skip this session in the backtest.";
+    throw std::runtime_error(message.str());
   }
 
   const std::string& ticker() const { return ticker_; }
@@ -6726,10 +7336,11 @@ class DatabaseRecordFile {
   const std::string& record_type() const { return record_type_; }
   const std::filesystem::path& database_path() const { return database_path_; }
   const std::filesystem::path& path() const { return file_path_; }
+
   std::size_t size() const { return size_; }
 
   const void* packed_data_at(std::size_t index) const {
-    return mapping_.data_at(index * RowType::packed_size);
+    return mapping_->data_at(index * RowType::packed_size);
   }
 
   RowType get_item(std::int64_t index) const {
@@ -6808,14 +7419,14 @@ class DatabaseRecordFile {
  protected:
   RowType record_at(std::size_t index) const {
     const auto view = std::string_view(
-        mapping_.char_data_at(index * RowType::packed_size),
+        mapping_->char_data_at(index * RowType::packed_size),
         RowType::packed_size);
     return RowType::from_packed(view, ticker_);
   }
 
   std::uint64_t timestamp_at(std::size_t index) const {
     return Traits::search_timestamp_at(
-        mapping_.data_at(index * RowType::packed_size));
+        mapping_->data_at(index * RowType::packed_size));
   }
 
  private:
@@ -6966,7 +7577,7 @@ class DatabaseRecordFile {
 
   std::uint64_t participant_timestamp_at(std::size_t index) const {
     return RowType::participant_timestamp_at(
-        mapping_.data_at(index * RowType::packed_size));
+        mapping_->data_at(index * RowType::packed_size));
   }
 
   std::size_t participant_scan_lower_bound(
@@ -7075,32 +7686,25 @@ class DatabaseRecordFile {
   std::string ticker_;
   std::string record_type_;
   std::filesystem::path file_path_;
-  detail::MappedFile mapping_;
+  std::optional<detail::MappedFile> mapping_;
   std::size_t size_ = 0;
 };
 
 class StockMarketCalendarMixin {
  protected:
+  // NYSE session open/close (ns since epoch). Uses the process-wide
+  // nyse_session cache (pandas_market_calendars; ~100ms cold, cheap after).
   static std::uint64_t market_timestamp_ns(
       const std::string& date,
       const char* field_name) {
-    namespace nb = nanobind;
-    nb::gil_scoped_acquire acquire;
-    nb::module_ pmc = nb::module_::import_("pandas_market_calendars");
-    nb::object calendar = pmc.attr("get_calendar")("NYSE");
-    nb::object schedule = calendar.attr("schedule")(
-        nb::arg("start_date") = date,
-        nb::arg("end_date") = date);
-
-    if (nb::cast<bool>(schedule.attr("empty"))) {
+    const nyse_session::SessionNs session = nyse_session::session_for_date(date);
+    if (!session.is_session) {
       std::ostringstream message;
       message << "no NYSE market session for date " << date;
       throw std::invalid_argument(message.str());
     }
-
-    nb::object row = schedule.attr("iloc").attr("__getitem__")(0);
-    nb::object timestamp = row.attr("__getitem__")(field_name);
-    return nb::cast<std::uint64_t>(timestamp.attr("value"));
+    return std::strcmp(field_name, "market_open") == 0 ? session.open_ns
+                                                       : session.close_ns;
   }
 };
 
@@ -7328,6 +7932,16 @@ enum class SimulatedOrderSide : std::uint8_t {
   Sell = 1,
 };
 
+enum class ExecutionMode : std::uint8_t {
+  // Always cross the spread (buy ask / sell bid) when the desired unit
+  // position disagrees with the current holding.
+  Market = 0,
+  // Rest a limit relative to the spread. passivity=0 is marketable (touch);
+  // passivity=1 is the far side (buy at bid / sell at ask); passivity>1 is
+  // beyond the far side (more passive / further from the market).
+  Middle = 1,
+};
+
 struct SimulatedOrder {
   std::string instrument;
   SimulatedOrderSide side = SimulatedOrderSide::Buy;
@@ -7336,9 +7950,98 @@ struct SimulatedOrder {
   std::uint64_t execution_timestamp = 0;
   std::uint64_t quote_timestamp = 0;
   std::optional<double> price;
+  std::optional<double> limit_price;
   std::string rejection_reason;
+  // "market", "limit", or empty for legacy market-style submit().
+  std::string order_style;
 };
 
+inline nanobind::dict make_simulation_summary(
+    const std::string& session_date,
+    std::uint64_t trade_latency_ns,
+    const std::vector<SimulatedOrder>& orders,
+    std::size_t order_begin,
+    double cash,
+    const std::unordered_map<std::string, double>& holdings,
+    bool include_positions,
+    ExecutionMode execution_mode = ExecutionMode::Market,
+    double passivity = 0.0,
+    double unit_shares = 1.0,
+    const std::unordered_map<std::string, double>* desired_positions = nullptr,
+    std::size_t working_order_count = 0) {
+  nanobind::list order_rows;
+  std::size_t fill_count = 0;
+  std::size_t cancel_count = 0;
+  double cash_flow = 0.0;
+  for (std::size_t index = order_begin; index < orders.size(); ++index) {
+    const auto& order = orders[index];
+    nanobind::dict row;
+    row["instrument"] = order.instrument;
+    row["side"] = order.side == SimulatedOrderSide::Buy ? "buy" : "sell";
+    row["quantity"] = order.quantity;
+    row["submitted_timestamp"] = order.submitted_timestamp;
+    row["execution_timestamp"] = order.execution_timestamp;
+    if (!order.order_style.empty()) {
+      row["style"] = order.order_style;
+    }
+    if (order.limit_price.has_value()) {
+      row["limit_price"] = *order.limit_price;
+    }
+    if (order.price.has_value()) {
+      const double notional = order.quantity * *order.price;
+      ++fill_count;
+      cash_flow += order.side == SimulatedOrderSide::Buy ? -notional : notional;
+      row["status"] = "filled";
+      row["quote_timestamp"] = order.quote_timestamp;
+      row["price"] = *order.price;
+      row["notional"] = notional;
+    } else if (order.rejection_reason == "cancelled") {
+      ++cancel_count;
+      row["status"] = "cancelled";
+      row["reason"] = order.rejection_reason;
+    } else {
+      row["status"] = "rejected";
+      row["reason"] = order.rejection_reason;
+    }
+    order_rows.append(std::move(row));
+  }
+
+  nanobind::dict result;
+  if (!session_date.empty()) {
+    result["session_date"] = session_date;
+  }
+  result["trade_latency_ns"] = trade_latency_ns;
+  result["execution"] =
+      execution_mode == ExecutionMode::Market ? "market" : "middle";
+  result["passivity"] = passivity;
+  result["unit_shares"] = unit_shares;
+  result["order_count"] = orders.size() - order_begin;
+  result["fill_count"] = fill_count;
+  result["cancel_count"] = cancel_count;
+  result["rejection_count"] =
+      (orders.size() - order_begin) - fill_count - cancel_count;
+  result["working_order_count"] = working_order_count;
+  result["cash_flow"] = cash_flow;
+  result["orders"] = std::move(order_rows);
+  if (include_positions) {
+    result["cash"] = cash;
+    nanobind::dict positions;
+    for (const auto& [symbol, quantity] : holdings) {
+      positions[symbol.c_str()] = quantity;
+    }
+    result["positions"] = std::move(positions);
+    if (desired_positions != nullptr) {
+      nanobind::dict desired;
+      for (const auto& [symbol, quantity] : *desired_positions) {
+        desired[symbol.c_str()] = quantity;
+      }
+      result["desired_positions"] = std::move(desired);
+    }
+  }
+  return result;
+}
+
+// Backward-compatible summary used by Futures/Option markets.
 inline nanobind::dict make_simulation_summary(
     const std::string& session_date,
     std::uint64_t trade_latency_ns,
@@ -7348,42 +8051,623 @@ inline nanobind::dict make_simulation_summary(
     throw std::logic_error(
         "session summary is unavailable until the market iterator is exhausted");
   }
+  static const std::unordered_map<std::string, double> kEmptyHoldings;
+  return make_simulation_summary(
+      session_date,
+      trade_latency_ns,
+      orders,
+      0,
+      0.0,
+      kEmptyHoldings,
+      false);
+}
 
-  nanobind::list order_rows;
-  std::size_t fill_count = 0;
-  double cash_flow = 0.0;
-  for (const auto& order : orders) {
-    nanobind::dict row;
-    row["instrument"] = order.instrument;
-    row["side"] = order.side == SimulatedOrderSide::Buy ? "buy" : "sell";
-    row["quantity"] = order.quantity;
-    row["submitted_timestamp"] = order.submitted_timestamp;
-    row["execution_timestamp"] = order.execution_timestamp;
-    if (order.price.has_value()) {
-      const double notional = order.quantity * *order.price;
-      ++fill_count;
-      cash_flow += order.side == SimulatedOrderSide::Buy ? -notional : notional;
-      row["status"] = "filled";
-      row["quote_timestamp"] = order.quote_timestamp;
-      row["price"] = *order.price;
-      row["notional"] = notional;
-    } else {
-      row["status"] = "rejected";
-      row["reason"] = order.rejection_reason;
-    }
-    order_rows.append(std::move(row));
+class TradeEmulator {
+ public:
+  struct WorkingOrder {
+    std::string instrument;
+    SimulatedOrderSide side = SimulatedOrderSide::Buy;
+    double remaining = 0.0;
+    double limit_price = 0.0;
+    // Absolute share target the working order is trying to reach.
+    double target_shares = 0.0;
+    std::uint64_t submitted_timestamp = 0;
+  };
+
+  explicit TradeEmulator(
+      std::uint64_t trade_latency_ns = 150'000'000ULL,
+      ExecutionMode execution = ExecutionMode::Market,
+      double passivity = 0.0,
+      double unit_shares = 1.0)
+      : trade_latency_ns_(trade_latency_ns),
+        execution_(execution),
+        passivity_(clamp_passivity(passivity)),
+        unit_shares_(checked_unit_shares(unit_shares)) {}
+
+  std::uint64_t trade_latency_ns() const { return trade_latency_ns_; }
+  ExecutionMode execution() const { return execution_; }
+  double passivity() const { return passivity_; }
+  double unit_shares() const { return unit_shares_; }
+  double cash() const { return cash_; }
+  std::size_t order_count() const { return orders_.size(); }
+  std::size_t working_order_count() const { return working_.size(); }
+  bool orders_allowed() const { return orders_allowed_; }
+  void set_orders_allowed(bool allowed) { orders_allowed_ = allowed; }
+
+  void begin_session() {
+    ++active_sessions_;
+    orders_allowed_ = true;
   }
 
-  nanobind::dict result;
-  result["session_date"] = session_date;
-  result["trade_latency_ns"] = trade_latency_ns;
-  result["order_count"] = orders.size();
-  result["fill_count"] = fill_count;
-  result["rejection_count"] = orders.size() - fill_count;
-  result["cash_flow"] = cash_flow;
-  result["orders"] = std::move(order_rows);
-  return result;
-}
+  void end_session() {
+    if (active_sessions_ > 0) {
+      --active_sessions_;
+    }
+    if (active_sessions_ == 0) {
+      // Drop resting limits when the last bar/market session ends so they
+      // cannot fill against the next calendar day without a new intent.
+      cancel_all_working("session_end");
+      orders_allowed_ = false;
+    }
+  }
+
+  // Flatten inventory at an explicit price (official close / MOC approximation).
+  // Cancels any working limit first. Does not require a quote database. Used when
+  // the strategy stops continuous trading at the MOC deadline (~15:50 ET) and
+  // marks residual unit size at the day's official close (no auction book).
+  void force_close_at(
+      const std::string& symbol,
+      double price,
+      std::uint64_t timestamp_ns,
+      const std::string& style = "moc_approx") {
+    cancel_working(symbol, timestamp_ns, "force_close");
+    desired_[symbol] = 0.0;
+    const double qty = position(symbol);
+    if (std::abs(qty) <= kShareEps) {
+      holdings_[symbol] = 0.0;
+      return;
+    }
+    if (!std::isfinite(price) || price <= 0.0) {
+      throw std::invalid_argument(
+          "force_close_at price must be a positive finite number");
+    }
+    if (qty > 0.0) {
+      apply_fill(
+          symbol,
+          SimulatedOrderSide::Sell,
+          qty,
+          price,
+          timestamp_ns,
+          timestamp_ns,
+          timestamp_ns,
+          std::nullopt,
+          style);
+    } else {
+      apply_fill(
+          symbol,
+          SimulatedOrderSide::Buy,
+          -qty,
+          price,
+          timestamp_ns,
+          timestamp_ns,
+          timestamp_ns,
+          std::nullopt,
+          style);
+    }
+    if (std::abs(position(symbol)) <= kShareEps) {
+      holdings_[symbol] = 0.0;
+    }
+  }
+
+  double position(const std::string& symbol) const {
+    const auto iter = holdings_.find(symbol);
+    return iter == holdings_.end() ? 0.0 : iter->second;
+  }
+
+  double desired_position(const std::string& symbol) const {
+    const auto iter = desired_.find(symbol);
+    return iter == desired_.end() ? 0.0 : iter->second;
+  }
+
+  const std::unordered_map<std::string, double>& holdings() const {
+    return holdings_;
+  }
+
+  const std::vector<SimulatedOrder>& orders() const { return orders_; }
+
+  const WorkingOrder* working_order(const std::string& symbol) const {
+    const auto iter = working_.find(symbol);
+    return iter == working_.end() ? nullptr : &iter->second;
+  }
+
+  // Advance middle-mode resting orders against the quote at decision+latency.
+  // SimpleMarket calls this on every trade/quote event so limits can fill as
+  // the book evolves without a new set_desired call.
+  void poll_working(
+      const std::string& symbol,
+      std::uint64_t sip_timestamp,
+      StockQuoteDatabase& quotes,
+      std::int64_t& last_execution_quote_index,
+      std::int64_t last_quote_index_hint) {
+    if (!orders_allowed_ || working_.empty()) {
+      return;
+    }
+    try_fill_working(
+        symbol,
+        sip_timestamp,
+        quotes,
+        last_execution_quote_index,
+        last_quote_index_hint);
+  }
+
+  static std::uint64_t add_latency(
+      std::uint64_t timestamp,
+      std::uint64_t latency) {
+    const std::uint64_t maximum = std::numeric_limits<std::uint64_t>::max();
+    if (maximum - timestamp < latency) {
+      return maximum;
+    }
+    return timestamp + latency;
+  }
+
+  // Legacy aggressive marketable submit (always crosses the spread).
+  void submit(
+      const std::string& symbol,
+      double shares,
+      SimulatedOrderSide side,
+      std::uint64_t sip_timestamp,
+      StockQuoteDatabase& quotes,
+      std::int64_t& last_execution_quote_index,
+      std::int64_t last_quote_index_hint) {
+    submit_marketable(
+        symbol,
+        shares,
+        side,
+        sip_timestamp,
+        quotes,
+        last_execution_quote_index,
+        last_quote_index_hint,
+        "market");
+  }
+
+  // Intent-based API: desired unit position in {-1, 0, +1} (long / flat / short).
+  // Call every iteration even when unchanged so middle-mode resting orders can
+  // fill as quotes evolve. Target shares = desired * unit_shares.
+  void set_desired(
+      const std::string& symbol,
+      double desired,
+      std::uint64_t sip_timestamp,
+      StockQuoteDatabase& quotes,
+      std::int64_t& last_execution_quote_index,
+      std::int64_t last_quote_index_hint) {
+    if (!orders_allowed_) {
+      throw std::logic_error(
+          "orders cannot be submitted after the session ends");
+    }
+    if (!std::isfinite(desired) ||
+        !(desired == -1.0 || desired == 0.0 || desired == 1.0)) {
+      throw std::invalid_argument(
+          "desired position must be -1, 0, or +1");
+    }
+
+    const double target_shares = desired * unit_shares_;
+    desired_[symbol] = desired;
+
+    // Always attempt fills first so unchanged intents can complete.
+    try_fill_working(
+        symbol,
+        sip_timestamp,
+        quotes,
+        last_execution_quote_index,
+        last_quote_index_hint);
+
+    auto working_iter = working_.find(symbol);
+    if (working_iter != working_.end()) {
+      if (same_shares(working_iter->second.target_shares, target_shares)) {
+        // Still working toward the same target.
+        return;
+      }
+      cancel_working(symbol, sip_timestamp, "intent_change");
+    }
+
+    const double current = position(symbol);
+    const double delta = target_shares - current;
+    if (std::abs(delta) <= kShareEps) {
+      return;
+    }
+
+    const SimulatedOrderSide side =
+        delta > 0.0 ? SimulatedOrderSide::Buy : SimulatedOrderSide::Sell;
+    const double qty = std::abs(delta);
+
+    if (execution_ == ExecutionMode::Market || passivity_ <= 0.0) {
+      submit_marketable(
+          symbol,
+          qty,
+          side,
+          sip_timestamp,
+          quotes,
+          last_execution_quote_index,
+          last_quote_index_hint,
+          "market");
+      return;
+    }
+
+    // Middle mode: rest a limit between bid and ask.
+    QuoteSnapshot quote;
+    if (!lookup_quote(
+            quotes,
+            sip_timestamp,
+            last_execution_quote_index,
+            last_quote_index_hint,
+            quote)) {
+      SimulatedOrder order;
+      order.instrument = symbol;
+      order.side = side;
+      order.quantity = qty;
+      order.submitted_timestamp = sip_timestamp;
+      order.execution_timestamp =
+          add_latency(sip_timestamp, trade_latency_ns_);
+      order.order_style = "limit";
+      order.rejection_reason = "no_quote";
+      orders_.push_back(std::move(order));
+      return;
+    }
+    if (!usable_quote(quote)) {
+      SimulatedOrder order;
+      order.instrument = symbol;
+      order.side = side;
+      order.quantity = qty;
+      order.submitted_timestamp = sip_timestamp;
+      order.execution_timestamp =
+          add_latency(sip_timestamp, trade_latency_ns_);
+      order.order_style = "limit";
+      order.rejection_reason = "unusable_price";
+      orders_.push_back(std::move(order));
+      return;
+    }
+
+    WorkingOrder working;
+    working.instrument = symbol;
+    working.side = side;
+    working.remaining = qty;
+    working.limit_price = limit_price_for(side, quote.bid, quote.ask);
+    working.target_shares = target_shares;
+    working.submitted_timestamp = sip_timestamp;
+    working_[symbol] = working;
+
+    // Marketable at submission → fill immediately at the touch.
+    try_fill_working(
+        symbol,
+        sip_timestamp,
+        quotes,
+        last_execution_quote_index,
+        last_quote_index_hint);
+  }
+
+  nanobind::dict summary() const {
+    return make_simulation_summary(
+        std::string(),
+        trade_latency_ns_,
+        orders_,
+        0,
+        cash_,
+        holdings_,
+        true,
+        execution_,
+        passivity_,
+        unit_shares_,
+        &desired_,
+        working_.size());
+  }
+
+  nanobind::dict session_summary(
+      const std::string& session_date,
+      bool exhausted,
+      std::size_t order_begin,
+      bool require_exhausted,
+      bool include_positions) const {
+    if (require_exhausted && !exhausted) {
+      throw std::logic_error(
+          "session summary is unavailable until the market iterator is exhausted");
+    }
+    return make_simulation_summary(
+        session_date,
+        trade_latency_ns_,
+        orders_,
+        order_begin,
+        cash_,
+        holdings_,
+        include_positions,
+        execution_,
+        passivity_,
+        unit_shares_,
+        &desired_,
+        working_.size());
+  }
+
+ private:
+  static constexpr double kShareEps = 1e-12;
+
+  struct QuoteSnapshot {
+    double bid = std::numeric_limits<double>::quiet_NaN();
+    double ask = std::numeric_limits<double>::quiet_NaN();
+    std::uint64_t quote_timestamp = 0;
+    std::int64_t quote_index = -1;
+  };
+
+  static double clamp_passivity(double value) {
+    if (!std::isfinite(value)) {
+      throw std::invalid_argument("passivity must be finite");
+    }
+    if (value < 0.0) {
+      throw std::invalid_argument(
+          "passivity must be >= 0 (0 = touch/marketable; "
+          "1 = far side of NBBO; >1 = beyond far side)");
+    }
+    // No upper bound: values > 1 rest beyond the far side of the NBBO.
+    // passivity == 0 uses the marketable (cross) path in set_desired.
+    return value;
+  }
+
+  static double checked_unit_shares(double value) {
+    if (!std::isfinite(value) || value <= 0.0) {
+      throw std::invalid_argument("unit_shares must be a positive finite number");
+    }
+    return value;
+  }
+
+  static bool same_shares(double left, double right) {
+    return std::abs(left - right) <= kShareEps;
+  }
+
+  static bool usable_quote(const QuoteSnapshot& quote) {
+    return std::isfinite(quote.bid) && std::isfinite(quote.ask) &&
+           quote.bid > 0.0 && quote.ask > 0.0 && quote.ask >= quote.bid;
+  }
+
+  // passivity 0 → touch (buy ask / sell bid);
+  // passivity 1 → far side (buy bid / sell ask);
+  // passivity > 1 → beyond far side (buy below bid / sell above ask).
+  double limit_price_for(
+      SimulatedOrderSide side,
+      double bid,
+      double ask) const {
+    const double spread = ask - bid;
+    if (side == SimulatedOrderSide::Buy) {
+      return ask - passivity_ * spread;
+    }
+    return bid + passivity_ * spread;
+  }
+
+  bool lookup_quote(
+      StockQuoteDatabase& quotes,
+      std::uint64_t sip_timestamp,
+      std::int64_t& last_execution_quote_index,
+      std::int64_t last_quote_index_hint,
+      QuoteSnapshot& out) const {
+    const std::uint64_t target_timestamp =
+        add_latency(sip_timestamp, trade_latency_ns_);
+    // On-disk galloping uses an index hint from the previous fill.
+    const std::optional<std::int64_t> galloping =
+        last_execution_quote_index >= 0
+            ? std::optional<std::int64_t>(last_execution_quote_index)
+            : std::optional<std::int64_t>(
+                  last_quote_index_hint >= 0 ? last_quote_index_hint : 0);
+    const std::int64_t quote_index =
+        quotes.index_before_timestamp(target_timestamp, galloping);
+    if (quote_index < 0) {
+      return false;
+    }
+    const void* quote_data =
+        quotes.packed_data_at(static_cast<std::size_t>(quote_index));
+    out.bid = StockQuote::bid_price_at(quote_data);
+    out.ask = StockQuote::ask_price_at(quote_data);
+    out.quote_timestamp = StockQuote::sip_timestamp_at(quote_data);
+    out.quote_index = quote_index;
+    last_execution_quote_index = quote_index;
+    return true;
+  }
+
+  void apply_fill(
+      const std::string& symbol,
+      SimulatedOrderSide side,
+      double shares,
+      double price,
+      std::uint64_t submitted_timestamp,
+      std::uint64_t execution_timestamp,
+      std::uint64_t quote_timestamp,
+      std::optional<double> limit_price,
+      const std::string& style) {
+    SimulatedOrder order;
+    order.instrument = symbol;
+    order.side = side;
+    order.quantity = shares;
+    order.submitted_timestamp = submitted_timestamp;
+    order.execution_timestamp = execution_timestamp;
+    order.quote_timestamp = quote_timestamp;
+    order.price = price;
+    order.limit_price = limit_price;
+    order.order_style = style;
+    const double notional = shares * price;
+    if (side == SimulatedOrderSide::Buy) {
+      holdings_[symbol] += shares;
+      cash_ -= notional;
+    } else {
+      holdings_[symbol] -= shares;
+      cash_ += notional;
+    }
+    orders_.push_back(std::move(order));
+  }
+
+  void submit_marketable(
+      const std::string& symbol,
+      double shares,
+      SimulatedOrderSide side,
+      std::uint64_t sip_timestamp,
+      StockQuoteDatabase& quotes,
+      std::int64_t& last_execution_quote_index,
+      std::int64_t last_quote_index_hint,
+      const std::string& style) {
+    if (!orders_allowed_) {
+      throw std::logic_error(
+          "orders cannot be submitted after the session ends");
+    }
+    if (!std::isfinite(shares) || shares < 0.0) {
+      throw std::invalid_argument(
+          "shares must be a finite non-negative number");
+    }
+    if (shares <= kShareEps) {
+      return;
+    }
+
+    const std::uint64_t target_timestamp =
+        add_latency(sip_timestamp, trade_latency_ns_);
+    QuoteSnapshot quote;
+    if (!lookup_quote(
+            quotes,
+            sip_timestamp,
+            last_execution_quote_index,
+            last_quote_index_hint,
+            quote)) {
+      SimulatedOrder order;
+      order.instrument = symbol;
+      order.side = side;
+      order.quantity = shares;
+      order.submitted_timestamp = sip_timestamp;
+      order.execution_timestamp = target_timestamp;
+      order.order_style = style;
+      order.rejection_reason = "no_quote";
+      orders_.push_back(std::move(order));
+      return;
+    }
+    const double price =
+        side == SimulatedOrderSide::Buy ? quote.ask : quote.bid;
+    if (!std::isfinite(price) || price <= 0.0) {
+      SimulatedOrder order;
+      order.instrument = symbol;
+      order.side = side;
+      order.quantity = shares;
+      order.submitted_timestamp = sip_timestamp;
+      order.execution_timestamp = target_timestamp;
+      order.order_style = style;
+      order.rejection_reason = "unusable_price";
+      orders_.push_back(std::move(order));
+      return;
+    }
+    apply_fill(
+        symbol,
+        side,
+        shares,
+        price,
+        sip_timestamp,
+        target_timestamp,
+        quote.quote_timestamp,
+        std::nullopt,
+        style);
+  }
+
+  void cancel_working(
+      const std::string& symbol,
+      std::uint64_t sip_timestamp,
+      const std::string& reason) {
+    const auto iter = working_.find(symbol);
+    if (iter == working_.end()) {
+      return;
+    }
+    const WorkingOrder& working = iter->second;
+    SimulatedOrder order;
+    order.instrument = symbol;
+    order.side = working.side;
+    order.quantity = working.remaining;
+    order.submitted_timestamp = working.submitted_timestamp;
+    order.execution_timestamp = sip_timestamp;
+    order.limit_price = working.limit_price;
+    order.order_style = "limit";
+    // Status mapping keys off rejection_reason == "cancelled".
+    order.rejection_reason = "cancelled";
+    (void)reason;
+    orders_.push_back(std::move(order));
+    working_.erase(iter);
+  }
+
+  void cancel_all_working(const std::string& reason) {
+    std::vector<std::string> symbols;
+    symbols.reserve(working_.size());
+    for (const auto& [symbol, _] : working_) {
+      symbols.push_back(symbol);
+    }
+    for (const auto& symbol : symbols) {
+      cancel_working(symbol, 0, reason);
+    }
+  }
+
+  void try_fill_working(
+      const std::string& symbol,
+      std::uint64_t sip_timestamp,
+      StockQuoteDatabase& quotes,
+      std::int64_t& last_execution_quote_index,
+      std::int64_t last_quote_index_hint) {
+    const auto iter = working_.find(symbol);
+    if (iter == working_.end()) {
+      return;
+    }
+    WorkingOrder& working = iter->second;
+    QuoteSnapshot quote;
+    if (!lookup_quote(
+            quotes,
+            sip_timestamp,
+            last_execution_quote_index,
+            last_quote_index_hint,
+            quote) ||
+        !usable_quote(quote)) {
+      return;
+    }
+
+    // Marketable limit: buy if ask has reached our limit; sell if bid has.
+    // Fill at the touch (not free mid improvement beyond the book).
+    const bool marketable = working.side == SimulatedOrderSide::Buy
+        ? quote.ask <= working.limit_price + 1e-12
+        : quote.bid >= working.limit_price - 1e-12;
+    if (!marketable) {
+      return;
+    }
+    const double fill_price =
+        working.side == SimulatedOrderSide::Buy ? quote.ask : quote.bid;
+    if (!std::isfinite(fill_price) || fill_price <= 0.0) {
+      return;
+    }
+
+    const double qty = working.remaining;
+    const double limit = working.limit_price;
+    const auto side = working.side;
+    const auto submitted = working.submitted_timestamp;
+    working_.erase(iter);
+
+    apply_fill(
+        symbol,
+        side,
+        qty,
+        fill_price,
+        submitted,
+        add_latency(sip_timestamp, trade_latency_ns_),
+        quote.quote_timestamp,
+        limit,
+        "limit");
+  }
+
+  std::uint64_t trade_latency_ns_ = 150'000'000ULL;
+  ExecutionMode execution_ = ExecutionMode::Market;
+  double passivity_ = 0.0;
+  double unit_shares_ = 1.0;
+  double cash_ = 0.0;
+  bool orders_allowed_ = true;
+  int active_sessions_ = 0;
+  std::unordered_map<std::string, double> holdings_;
+  std::unordered_map<std::string, double> desired_;
+  std::unordered_map<std::string, WorkingOrder> working_;
+  std::vector<SimulatedOrder> orders_;
+};
 
 struct SimpleMarketState {
   enum class EventKind : std::uint8_t {
@@ -7427,14 +8711,22 @@ struct SimpleMarketState {
       std::filesystem::path database_path,
       std::string date,
       const std::vector<std::string>& symbols,
-      std::uint64_t trade_latency_ns,
+      std::shared_ptr<TradeEmulator> emulator,
+      bool shared_emulator,
       bool emit_quotes,
       bool fast)
       : database_path(std::move(database_path)),
         date(std::move(date)),
-        trade_latency_ns(trade_latency_ns),
+        emulator(std::move(emulator)),
+        shared_emulator(shared_emulator),
         emit_quotes(emit_quotes),
         fast(fast) {
+    if (!this->emulator) {
+      throw std::invalid_argument("TradeEmulator is required");
+    }
+    session_order_begin = this->emulator->order_count();
+    this->emulator->begin_session();
+
     symbol_states.reserve(symbols.size());
     for (const auto& symbol : symbols) {
       SymbolState state;
@@ -7475,26 +8767,17 @@ struct SimpleMarketState {
     return nanobind::steal<nanobind::object>(object);
   }
 
-  static std::uint64_t add_latency(
-      std::uint64_t timestamp,
-      std::uint64_t latency) {
-    const std::uint64_t maximum = std::numeric_limits<std::uint64_t>::max();
-    if (maximum - timestamp < latency) {
-      return maximum;
-    }
-    return timestamp + latency;
-  }
-
   std::filesystem::path database_path;
   std::string date;
-  std::uint64_t trade_latency_ns = 0;
+  std::shared_ptr<TradeEmulator> emulator;
+  bool shared_emulator = false;
+  std::size_t session_order_begin = 0;
   bool emit_quotes = false;
   bool fast = false;
   nanobind::dict last_trades_by_symbol;
   nanobind::dict last_quotes_by_symbol;
   std::vector<SymbolState> symbol_states;
   std::priority_queue<Event, std::vector<Event>, EventGreater> event_queue;
-  std::vector<SimulatedOrder> orders;
   bool exhausted = false;
 };
 
@@ -7508,8 +8791,28 @@ class SimpleMarketBroker {
         symbol_index_(symbol_index),
         sip_timestamp_(sip_timestamp) {}
 
+  // Single-symbol broker used by StockTradeAggregator.
+  SimpleMarketBroker(
+      std::shared_ptr<TradeEmulator> emulator,
+      std::string symbol,
+      std::uint64_t sip_timestamp,
+      StockQuoteDatabase* quotes,
+      std::int64_t* last_execution_quote_index)
+      : emulator_(std::move(emulator)),
+        single_symbol_(std::move(symbol)),
+        sip_timestamp_(sip_timestamp),
+        single_quotes_(quotes),
+        single_last_execution_quote_index_(last_execution_quote_index) {}
+
   nanobind::object symbol() const {
-    return state_->symbol_states.at(symbol_index_).symbol_object;
+    if (state_) {
+      return state_->symbol_states.at(symbol_index_).symbol_object;
+    }
+    PyObject* object = PyUnicode_InternFromString(single_symbol_.c_str());
+    if (object == nullptr) {
+      throw nanobind::python_error();
+    }
+    return nanobind::steal<nanobind::object>(object);
   }
 
   std::uint64_t sip_timestamp() const { return sip_timestamp_; }
@@ -7520,6 +8823,46 @@ class SimpleMarketBroker {
 
   void sell(double shares, std::optional<std::string> symbol = std::nullopt) {
     execute(shares, symbol, SimulatedOrderSide::Sell);
+  }
+
+  // Desired unit position: +1 long, 0 flat, -1 short (see TradeEmulator).
+  void set_desired(
+      double desired,
+      std::optional<std::string> symbol = std::nullopt) {
+    if (state_) {
+      if (state_->exhausted) {
+        throw std::logic_error(
+            "orders cannot be submitted after the session ends");
+      }
+      const std::size_t target_symbol_index = resolve_symbol_index(symbol);
+      auto& symbol_state = state_->symbol_states[target_symbol_index];
+      state_->emulator->set_desired(
+          symbol_state.symbol,
+          desired,
+          sip_timestamp_,
+          *symbol_state.quotes,
+          symbol_state.last_execution_quote_index,
+          symbol_state.last_quote_index);
+      return;
+    }
+
+    if (!emulator_ || single_quotes_ == nullptr ||
+        single_last_execution_quote_index_ == nullptr) {
+      throw std::logic_error("broker is not bound to a quote source");
+    }
+    const std::string& target_symbol =
+        symbol.has_value() ? *symbol : single_symbol_;
+    if (target_symbol != single_symbol_) {
+      throw std::out_of_range(
+          "StockTradeAggregator broker received an unknown symbol");
+    }
+    emulator_->set_desired(
+        target_symbol,
+        desired,
+        sip_timestamp_,
+        *single_quotes_,
+        *single_last_execution_quote_index_,
+        *single_last_execution_quote_index_);
   }
 
  private:
@@ -7539,55 +8882,51 @@ class SimpleMarketBroker {
       double shares,
       const std::optional<std::string>& symbol,
       SimulatedOrderSide side) {
-    if (state_->exhausted) {
-      throw std::logic_error("orders cannot be submitted after the session ends");
-    }
-    if (!std::isfinite(shares) || shares < 0.0) {
-      throw std::invalid_argument("shares must be a finite non-negative number");
-    }
-
-    const std::size_t target_symbol_index = resolve_symbol_index(symbol);
-    auto& symbol_state = state_->symbol_states[target_symbol_index];
-    const std::uint64_t target_timestamp =
-        SimpleMarketState::add_latency(sip_timestamp_, state_->trade_latency_ns);
-    SimulatedOrder order;
-    order.instrument = symbol_state.symbol;
-    order.side = side;
-    order.quantity = shares;
-    order.submitted_timestamp = sip_timestamp_;
-    order.execution_timestamp = target_timestamp;
-    const std::optional<std::int64_t> galloping =
-        symbol_state.last_execution_quote_index >= 0
-            ? std::optional<std::int64_t>(symbol_state.last_execution_quote_index)
-            : std::optional<std::int64_t>(
-                  symbol_state.last_quote_index >= 0 ? symbol_state.last_quote_index : 0);
-    const std::int64_t quote_index =
-        symbol_state.quotes->index_before_timestamp(target_timestamp, galloping);
-    if (quote_index < 0) {
-      order.rejection_reason = "no_quote";
-      state_->orders.push_back(std::move(order));
+    if (state_) {
+      if (state_->exhausted) {
+        throw std::logic_error(
+            "orders cannot be submitted after the session ends");
+      }
+      const std::size_t target_symbol_index = resolve_symbol_index(symbol);
+      auto& symbol_state = state_->symbol_states[target_symbol_index];
+      state_->emulator->submit(
+          symbol_state.symbol,
+          shares,
+          side,
+          sip_timestamp_,
+          *symbol_state.quotes,
+          symbol_state.last_execution_quote_index,
+          symbol_state.last_quote_index);
       return;
     }
-    symbol_state.last_execution_quote_index = quote_index;
 
-    const void* quote_data =
-        symbol_state.quotes->packed_data_at(static_cast<std::size_t>(quote_index));
-    const double price = side == SimulatedOrderSide::Buy
-        ? StockQuote::ask_price_at(quote_data)
-        : StockQuote::bid_price_at(quote_data);
-    if (!std::isfinite(price) || price <= 0.0) {
-      order.rejection_reason = "unusable_price";
-      state_->orders.push_back(std::move(order));
-      return;
+    if (!emulator_ || single_quotes_ == nullptr ||
+        single_last_execution_quote_index_ == nullptr) {
+      throw std::logic_error("broker is not bound to a quote source");
     }
-    order.quote_timestamp = StockQuote::sip_timestamp_at(quote_data);
-    order.price = price;
-    state_->orders.push_back(std::move(order));
+    const std::string& target_symbol =
+        symbol.has_value() ? *symbol : single_symbol_;
+    if (target_symbol != single_symbol_) {
+      throw std::out_of_range(
+          "StockTradeAggregator broker received an unknown symbol");
+    }
+    emulator_->submit(
+        target_symbol,
+        shares,
+        side,
+        sip_timestamp_,
+        *single_quotes_,
+        *single_last_execution_quote_index_,
+        *single_last_execution_quote_index_);
   }
 
   std::shared_ptr<SimpleMarketState> state_;
+  std::shared_ptr<TradeEmulator> emulator_;
+  std::string single_symbol_;
   std::size_t symbol_index_ = 0;
   std::uint64_t sip_timestamp_ = 0;
+  StockQuoteDatabase* single_quotes_ = nullptr;
+  std::int64_t* single_last_execution_quote_index_ = nullptr;
 };
 
 class SimpleMarket {
@@ -7598,14 +8937,33 @@ class SimpleMarket {
       const std::vector<std::string>& symbols,
       std::uint64_t trade_latency_ns,
       bool quotes,
-      bool fast)
-      : state_(std::make_shared<SimpleMarketState>(
-            std::move(database_path),
-            std::move(date),
-            symbols,
-            trade_latency_ns,
-            quotes,
-            fast)) {}
+      bool fast,
+      std::shared_ptr<TradeEmulator> trade_emulator = nullptr,
+      ExecutionMode execution = ExecutionMode::Market,
+      double passivity = 0.0,
+      double unit_shares = 1.0) {
+    const bool shared_emulator = static_cast<bool>(trade_emulator);
+    if (shared_emulator) {
+      if (trade_latency_ns != 150'000'000ULL &&
+          trade_latency_ns != trade_emulator->trade_latency_ns()) {
+        throw std::invalid_argument(
+            "trade_latency_ns does not match trade_emulator.trade_latency_ns");
+      }
+      // Shared emulator owns execution policy; constructor knobs are ignored.
+    }
+    auto emulator = shared_emulator
+        ? std::move(trade_emulator)
+        : std::make_shared<TradeEmulator>(
+              trade_latency_ns, execution, passivity, unit_shares);
+    state_ = std::make_shared<SimpleMarketState>(
+        std::move(database_path),
+        std::move(date),
+        symbols,
+        std::move(emulator),
+        shared_emulator,
+        quotes,
+        fast);
+  }
 
   SimpleMarket& iter() { return *this; }
 
@@ -7627,6 +8985,13 @@ class SimpleMarket {
             static_cast<std::int64_t>(quote_index));
         state_->last_quotes_by_symbol[symbol_state.symbol_object] =
             nanobind::cast(*symbol_state.last_quote);
+        // Quote moves can make middle-mode resting limits marketable.
+        state_->emulator->poll_working(
+            symbol_state.symbol,
+            timestamp,
+            *symbol_state.quotes,
+            symbol_state.last_execution_quote_index,
+            symbol_state.last_quote_index);
         push_next_quote(event.symbol_index);
         if (!state_->emit_quotes) {
           continue;
@@ -7649,6 +9014,13 @@ class SimpleMarket {
           static_cast<std::int64_t>(trade_index));
       state_->last_trades_by_symbol[symbol_state.symbol_object] =
           nanobind::cast(*symbol_state.last_trade);
+      // Time advances with each trade; re-check resting limits.
+      state_->emulator->poll_working(
+          symbol_state.symbol,
+          timestamp,
+          *symbol_state.quotes,
+          symbol_state.last_execution_quote_index,
+          symbol_state.last_quote_index);
       push_next_trade(event.symbol_index);
       current_broker_ = SimpleMarketBroker(state_, event.symbol_index, timestamp);
       return make_event_tuple(
@@ -7659,23 +9031,46 @@ class SimpleMarket {
     }
 
     state_->exhausted = true;
+    state_->emulator->end_session();
     current_broker_.reset();
     throw nanobind::stop_iteration();
   }
 
   nanobind::dict summary() const {
-    return make_simulation_summary(
+    return state_->emulator->session_summary(
         state_->date,
-        state_->trade_latency_ns,
         state_->exhausted,
-        state_->orders);
+        state_->session_order_begin,
+        true,
+        /*include_positions=*/true);
   }
 
   SimpleMarketBroker broker() const {
     if (!current_broker_) {
-      throw std::out_of_range("SimpleMarket broker is not available before iteration");
+      throw std::out_of_range(
+          "SimpleMarket broker is not available before iteration");
     }
     return *current_broker_;
+  }
+
+  std::shared_ptr<TradeEmulator> trade_emulator() const {
+    return state_->emulator;
+  }
+
+  ExecutionMode execution() const { return state_->emulator->execution(); }
+  double passivity() const { return state_->emulator->passivity(); }
+  double unit_shares() const { return state_->emulator->unit_shares(); }
+  std::uint64_t trade_latency_ns() const {
+    return state_->emulator->trade_latency_ns();
+  }
+
+  double get_holding(nanobind::handle key) const {
+    // Single-day markets own an emulator; multi-day shared emulators too.
+    // Always expose cash/positions from the attached TradeEmulator.
+    if (key.is_none()) {
+      return state_->emulator->cash();
+    }
+    return state_->emulator->position(nanobind::cast<std::string>(key));
   }
 
  private:
@@ -7766,6 +9161,107 @@ class SimpleMarket {
 
   std::shared_ptr<SimpleMarketState> state_;
   std::optional<SimpleMarketBroker> current_broker_;
+};
+
+class StockTradeAggregator {
+ public:
+  using DatabaseType = StockTradeDatabase;
+  using OutputType = StockTradeAggregation;
+
+  StockTradeAggregator(
+      nanobind::handle rows,
+      double interval_seconds,
+      std::uint64_t start_timestamp,
+      StockQuoteDatabase* quotes,
+      nanobind::object quotes_owner,
+      std::shared_ptr<TradeEmulator> trade_emulator)
+      : base_(rows, interval_seconds, start_timestamp),
+        interval_ns_(
+            detail::seconds_to_ns(interval_seconds, "interval_seconds")),
+        quotes_(quotes),
+        quotes_owner_(std::move(quotes_owner)),
+        emulator_(std::move(trade_emulator)) {
+    if (static_cast<bool>(emulator_) != static_cast<bool>(quotes_)) {
+      throw std::invalid_argument(
+          "quotes and trade_emulator must be provided together");
+    }
+    if (emulator_) {
+      emulator_->begin_session();
+      session_open_ = true;
+    }
+  }
+
+  // End the emulator session when the aggregator is destroyed — not when the
+  // last bar is pulled — so the strategy can still set_desired / buy / sell on
+  // the final bar's broker after StopIteration is observed by the outer loop.
+  ~StockTradeAggregator() { close_session(); }
+
+  StockTradeAggregator(const StockTradeAggregator&) = delete;
+  StockTradeAggregator& operator=(const StockTradeAggregator&) = delete;
+
+  StockTradeAggregator& iter() { return *this; }
+
+  OutputType next() {
+    try {
+      OutputType bar = base_.next();
+      if (emulator_) {
+        const std::uint64_t decision_timestamp =
+            detail::saturating_add_uint64(bar.window_start, interval_ns_);
+        current_symbol_ = bar.ticker;
+        // Bar close advances time; fill middle-mode rests against that clock.
+        emulator_->poll_working(
+            current_symbol_,
+            decision_timestamp,
+            *quotes_,
+            last_execution_quote_index_,
+            last_execution_quote_index_);
+        current_broker_ = SimpleMarketBroker(
+            emulator_,
+            current_symbol_,
+            decision_timestamp,
+            quotes_,
+            &last_execution_quote_index_);
+      }
+      return bar;
+    } catch (const nanobind::builtin_exception& error) {
+      if (error.type() == nanobind::exception_type::stop_iteration) {
+        // Keep session_open_ so the last bar's broker remains usable until
+        // this aggregator is destroyed.
+        current_broker_.reset();
+      }
+      throw;
+    }
+  }
+
+  SimpleMarketBroker broker() const {
+    if (!current_broker_) {
+      throw std::out_of_range(
+          "StockTradeAggregator broker is not available; provide quotes and "
+          "trade_emulator, and advance the iterator");
+    }
+    return *current_broker_;
+  }
+
+  std::shared_ptr<TradeEmulator> trade_emulator() const { return emulator_; }
+
+  void close_session() {
+    if (session_open_ && emulator_) {
+      emulator_->end_session();
+      session_open_ = false;
+    }
+    current_broker_.reset();
+  }
+
+ private:
+  StockTradeWindowAggregator base_;
+  std::uint64_t interval_ns_ = 0;
+  StockQuoteDatabase* quotes_ = nullptr;
+  nanobind::object quotes_owner_;
+  std::shared_ptr<TradeEmulator> emulator_;
+  std::string current_symbol_;
+  std::int64_t last_execution_quote_index_ = -1;
+  std::optional<SimpleMarketBroker> current_broker_;
+  bool session_open_ = false;
 };
 
 struct FuturesMarketState {
@@ -8535,35 +10031,6 @@ struct NativeSpecialization {
       std::string_view text,
       std::string_view field_name) {
     return detail::parse_bitset<BitCount>(text, field_name);
-  }
-
-  static inline void split_on_commas(
-      std::string_view payload,
-      std::vector<std::string>& output) {
-    if (output.empty()) {
-      output.resize(4);
-    }
-
-    std::size_t field_index = 0;
-    std::size_t start = 0;
-
-    while (true) {
-      if (field_index >= output.size()) {
-        output.resize(output.size() * 2);
-      }
-
-      const auto comma = payload.find(',', start);
-      if (comma == std::string_view::npos) {
-        output[field_index].assign(payload.substr(start));
-        break;
-      }
-
-      output[field_index].assign(payload.substr(start, comma - start));
-      ++field_index;
-      start = comma + 1;
-    }
-
-    output.resize(field_index + 1);
   }
 
   static inline void split_csv_fields(
@@ -10374,10 +11841,121 @@ class Implementation : public Base {
       const std::filesystem::path& input_path,
       const std::filesystem::path& database_path,
       std::string_view record_type,
-      bool force = false) {
+      bool force = false,
+      PyObject* write_lock = nullptr,
+      std::size_t block_size = 1U << 20,
+      std::size_t reader_parallelization = 1,
+      bool sort_records = true) {
+    if (reader_parallelization == 0) {
+      throw std::invalid_argument("reader_parallelization must be greater than zero");
+    }
+    detail::BufferedGzipLineReader reader(
+        input_path,
+        reader_parallelization,
+        1U << 20,
+        block_size);
+    std::string_view header;
+    reader.template next_line<Specialization>(header);
+    return build_database_rows(
+        reader,
+        input_path,
+        database_path,
+        record_type,
+        force,
+        write_lock,
+        block_size,
+        sort_records);
+  }
+
+  static std::pair<std::string, std::uint64_t> build_database_file_inferred(
+      const std::filesystem::path& input_path,
+      const std::filesystem::path& database_path,
+      bool force = false,
+      PyObject* write_lock = nullptr,
+      std::size_t block_size = 1U << 20,
+      std::size_t reader_parallelization = 1,
+      bool sort_records = true) {
+    if (reader_parallelization == 0) {
+      throw std::invalid_argument("reader_parallelization must be greater than zero");
+    }
+    detail::BufferedGzipLineReader reader(
+        input_path,
+        reader_parallelization,
+        1U << 20,
+        block_size);
+    std::string_view header;
+    if (!reader.template next_line<Specialization>(header) || header.empty()) {
+      std::ostringstream message;
+      message << "input file has no header: " << input_path.string();
+      throw std::invalid_argument(message.str());
+    }
+
+    const std::string record_type = infer_database_record_type(input_path, header);
+    const std::uint64_t rows_written = build_database_rows(
+        reader,
+        input_path,
+        database_path,
+        record_type,
+        force,
+        write_lock,
+        block_size,
+        sort_records);
+    return {record_type, rows_written};
+  }
+
+  static std::tuple<std::string, std::uint64_t, std::uint64_t>
+  build_database_file_inferred_with_stats(
+      const std::filesystem::path& input_path,
+      const std::filesystem::path& database_path,
+      bool force = false,
+      PyObject* write_lock = nullptr,
+      std::size_t block_size = 1U << 20,
+      std::size_t reader_parallelization = 1,
+      bool sort_records = true) {
+    if (reader_parallelization == 0) {
+      throw std::invalid_argument("reader_parallelization must be greater than zero");
+    }
+    detail::BufferedGzipLineReader reader(
+        input_path,
+        reader_parallelization,
+        1U << 20,
+        block_size);
+    std::string_view header;
+    if (!reader.template next_line<Specialization>(header) || header.empty()) {
+      std::ostringstream message;
+      message << "input file has no header: " << input_path.string();
+      throw std::invalid_argument(message.str());
+    }
+
+    const std::string record_type = infer_database_record_type(input_path, header);
+    const std::uint64_t rows_written = build_database_rows(
+        reader,
+        input_path,
+        database_path,
+        record_type,
+        force,
+        write_lock,
+        block_size,
+        sort_records);
+    const std::uint64_t nonempty_lines = reader.nonempty_lines_read();
+    const std::uint64_t rows_processed =
+        nonempty_lines == 0 ? 0 : nonempty_lines - 1;
+    return {record_type, rows_written, rows_processed};
+  }
+
+  static std::uint64_t build_database_rows(
+      detail::BufferedGzipLineReader& reader,
+      const std::filesystem::path& input_path,
+      const std::filesystem::path& database_path,
+      std::string_view record_type,
+      bool force = false,
+      PyObject* write_lock = nullptr,
+      std::size_t block_size = 1U << 20,
+      bool sort_records = true) {
     if (record_type == "stock_trade") {
       detail::BitsetParseCache<96> bitset_cache;
       return build_parsed_database<StockTrade>(
+          reader,
           input_path,
           database_path,
           record_type,
@@ -10385,12 +11963,16 @@ class Implementation : public Base {
             return Implementation::parse_trade_row(line, bitset_cache);
           },
           [](const StockTrade& row) { return row.sip_timestamp; },
-          force);
+          force,
+          write_lock,
+          block_size,
+          sort_records);
     }
 
     if (record_type == "crypto_trade") {
       detail::BitsetParseCache<96> bitset_cache;
       return build_parsed_database<CryptoTrade>(
+          reader,
           input_path,
           database_path,
           record_type,
@@ -10399,34 +11981,45 @@ class Implementation : public Base {
           },
           [](const CryptoTrade& row) { return row.participant_timestamp; },
           force,
-          true);
+          write_lock,
+          block_size,
+          sort_records);
     }
 
     if (record_type == "option_trade") {
       return build_option_database<OptionTrade>(
+          reader,
           input_path,
           database_path,
           record_type,
           [](std::string_view line) {
             return Implementation::parse_option_trade_row(line);
           },
-          force);
+          force,
+          write_lock,
+          block_size,
+          sort_records);
     }
 
     if (record_type == "option_quote") {
       return build_option_database<OptionQuote>(
+          reader,
           input_path,
           database_path,
           record_type,
           [](std::string_view line) {
             return Implementation::parse_option_quote_row(line);
           },
-          force);
+          force,
+          write_lock,
+          block_size,
+          sort_records);
     }
 
     if (record_type == "stock_quote") {
       detail::BitsetParseCache<96> bitset_cache;
       return build_parsed_database<StockQuote>(
+          reader,
           input_path,
           database_path,
           record_type,
@@ -10434,11 +12027,15 @@ class Implementation : public Base {
             return Implementation::parse_quote_row(line, bitset_cache);
           },
           [](const StockQuote& row) { return row.sip_timestamp; },
-          force);
+          force,
+          write_lock,
+          block_size,
+          sort_records);
     }
 
     if (record_type == "currency_quote") {
       return build_parsed_database<CurrencyQuote>(
+          reader,
           input_path,
           database_path,
           record_type,
@@ -10446,11 +12043,15 @@ class Implementation : public Base {
             return Implementation::parse_currency_quote_row(line);
           },
           [](const CurrencyQuote& row) { return row.participant_timestamp; },
-          force);
+          force,
+          write_lock,
+          block_size,
+          sort_records);
     }
 
     if (record_type == "index_value") {
       return build_parsed_database<IndexValue>(
+          reader,
           input_path,
           database_path,
           record_type,
@@ -10459,7 +12060,9 @@ class Implementation : public Base {
           },
           [](const IndexValue& row) { return row.timestamp; },
           force,
-          true);
+          write_lock,
+          block_size,
+          sort_records);
     }
 
     if (record_type == "future_trade" ||
@@ -10468,6 +12071,7 @@ class Implementation : public Base {
         record_type == "future_comex_trade" ||
         record_type == "future_nymex_trade") {
       return build_parsed_database<FuturesTrade>(
+          reader,
           input_path,
           database_path,
           record_type,
@@ -10475,7 +12079,10 @@ class Implementation : public Base {
             return Implementation::parse_futures_trade_row(line);
           },
           [](const FuturesTrade& row) { return row.timestamp; },
-          force);
+          force,
+          write_lock,
+          block_size,
+          sort_records);
     }
 
     if (record_type == "future_quote" ||
@@ -10484,6 +12091,7 @@ class Implementation : public Base {
         record_type == "future_comex_quote" ||
         record_type == "future_nymex_quote") {
       return build_parsed_database<FuturesQuote>(
+          reader,
           input_path,
           database_path,
           record_type,
@@ -10491,7 +12099,10 @@ class Implementation : public Base {
             return Implementation::parse_futures_quote_row(line);
           },
           [](const FuturesQuote& row) { return row.timestamp; },
-          force);
+          force,
+          write_lock,
+          block_size,
+          sort_records);
     }
 
     std::ostringstream message;
@@ -10499,90 +12110,221 @@ class Implementation : public Base {
     throw std::invalid_argument(message.str());
   }
 
-  Summary parse_message(nb::handle payload) const {
-    const std::string materialized = payload_to_string(payload);
-    Summary summary = this->build_summary(
-        materialized,
-        "parse_message",
-        "json",
-        &Specialization::split_on_commas);
-    summary.emplace(
-        "message_frames",
-        nanobind::int_(
-            count_substring(materialized, "},{") + count_substring(materialized, "}{") +
-            (materialized.empty() ? 0 : 1)));
-    return summary;
+  static std::string infer_database_record_type(
+      const std::filesystem::path& input_path,
+      std::string_view header) {
+    if (header ==
+        "ticker,conditions,correction,exchange,id,participant_timestamp,price,"
+        "sequence_number,sip_timestamp,size,tape,trf_id,trf_timestamp") {
+      return "stock_trade";
+    }
+    if (header ==
+        "ticker,ask_exchange,ask_price,ask_size,bid_exchange,bid_price,bid_size,"
+        "conditions,indicators,participant_timestamp,sequence_number,sip_timestamp,"
+        "tape,trf_timestamp") {
+      return "stock_quote";
+    }
+    if (header ==
+        "ticker,ask_exchange,ask_price,bid_exchange,bid_price,participant_timestamp") {
+      return "currency_quote";
+    }
+    if (header == "ticker,conditions,exchange,id,participant_timestamp,price,size") {
+      return "crypto_trade";
+    }
+    if (header == "ticker,value,timestamp") {
+      return "index_value";
+    }
+    if (header == "ticker,conditions,correction,exchange,price,sip_timestamp,size") {
+      return "option_trade";
+    }
+    if (header ==
+        "ticker,ask_exchange,ask_price,ask_size,bid_exchange,bid_price,bid_size,"
+        "sequence_number,sip_timestamp") {
+      return "option_quote";
+    }
+    if (header ==
+        "ticker,timestamp,sequence_number,report_sequence,price,size,correction,"
+        "exchange,session_end_date") {
+      return infer_futures_record_type(input_path, "trade");
+    }
+    if (header ==
+        "ticker,timestamp,sequence_number,report_sequence,ask_timestamp,ask_price,"
+        "ask_size,bid_timestamp,bid_price,bid_size,exchange,session_end_date") {
+      return infer_futures_record_type(input_path, "quote");
+    }
+
+    std::ostringstream message;
+    message << "unsupported input header in " << input_path.string() << ": " << header;
+    throw std::invalid_argument(message.str());
   }
 
-  static inline void split_on_commas(
-      std::string_view payload,
-      std::vector<std::string>& output) {
-    Specialization::split_on_commas(payload, output);
+  static std::string infer_futures_record_type(
+      const std::filesystem::path& input_path,
+      std::string_view kind) {
+    static constexpr std::array<std::string_view, 4> exchanges{
+        "cbot",
+        "cme",
+        "comex",
+        "nymex",
+    };
+
+    for (auto part = input_path.end(); part != input_path.begin();) {
+      --part;
+      std::string lowered = part->string();
+      std::transform(
+          lowered.begin(),
+          lowered.end(),
+          lowered.begin(),
+          [](unsigned char character) {
+            return static_cast<char>(std::tolower(character));
+          });
+
+      for (const std::string_view exchange : exchanges) {
+        const std::string category = "future_" + std::string(exchange);
+        if (lowered == category ||
+            lowered == category + "_trade" ||
+            lowered == category + "_quote" ||
+            lowered == "us_futures_" + std::string(exchange)) {
+          return "future_" + std::string(exchange) + "_" + std::string(kind);
+        }
+      }
+    }
+
+    return "future_" + std::string(kind);
   }
 
  private:
   template <typename RowType, typename ParseRowFn, typename DateTimestampFn>
   static std::uint64_t build_parsed_database(
+      detail::BufferedGzipLineReader& reader,
       const std::filesystem::path& input_path,
       const std::filesystem::path& database_path,
       std::string_view record_type,
       ParseRowFn parse_row,
       DateTimestampFn date_timestamp,
       bool force,
-      bool validate_ticker_timestamp_order = false) {
-    std::filesystem::create_directories(database_path);
+      PyObject* write_lock,
+      std::size_t block_size,
+      bool sort_records) {
+    if (!sort_records) {
+      return build_unsorted_parsed_database<RowType>(
+          reader,
+          input_path,
+          database_path,
+          record_type,
+          std::move(parse_row),
+          force,
+          block_size);
+    }
 
-    detail::BufferedGzipLineReader reader(input_path);
-    detail::AtomicBinaryRecordWriter writer;
+    detail::create_directories_for_output(database_path, write_lock);
+
+    detail::AtomicBinaryRecordWriter writer(block_size, write_lock);
     std::string_view line;
     const std::filesystem::path output_root =
         database_path / std::string(record_type) /
         detail::date_directory_name_from_filename(input_path);
     std::string current_ticker;
-    bool is_first_line = true;
-    bool has_current_output = false;
-    bool skip_current_output = false;
-    bool has_previous_row = false;
-    std::string previous_ticker;
-    std::uint64_t previous_timestamp = 0;
+    std::vector<RowType> rows;
     std::uint64_t rows_written = 0;
+    bool output_root_ready = false;
+    bool has_current_ticker = false;
+    bool skip_current_ticker = false;
+
+    const auto flush_ticker = [&]() {
+      if (!has_current_ticker || skip_current_ticker) {
+        rows.clear();
+        return;
+      }
+
+      std::size_t sort_comparisons = 0;
+      std::stable_sort(
+          rows.begin(),
+          rows.end(),
+          [&date_timestamp, &sort_comparisons](
+              const RowType& left,
+              const RowType& right) {
+            ++sort_comparisons;
+            if ((sort_comparisons & ((1U << 20) - 1U)) == 0) {
+              detail::check_pending_python_signals();
+            }
+            return date_timestamp(left) < date_timestamp(right);
+          });
+
+      if (!output_root_ready) {
+        detail::create_directories_for_output(output_root, write_lock);
+        output_root_ready = true;
+      }
+
+      writer.open(output_root / current_ticker);
+      std::size_t packed_rows = 0;
+      for (const RowType& row : rows) {
+        writer.write(row.pack());
+        ++packed_rows;
+        if ((packed_rows & ((1U << 14) - 1U)) == 0) {
+          detail::check_pending_python_signals();
+        }
+      }
+      writer.commit();
+      rows_written += rows.size();
+      rows.clear();
+    };
 
     while (reader.template next_line<Specialization>(line)) {
-      if (is_first_line) {
-        is_first_line = false;
+      if (line.empty()) {
         continue;
       }
 
+      RowType row = parse_row(line);
+      if (!has_current_ticker || row.ticker != current_ticker) {
+        flush_ticker();
+        current_ticker = row.ticker;
+        const auto output_path = output_root / current_ticker;
+        skip_current_ticker = !force && std::filesystem::exists(output_path);
+        has_current_ticker = true;
+      }
+
+      if (!skip_current_ticker) {
+        rows.push_back(std::move(row));
+      }
+    }
+
+    flush_ticker();
+    return rows_written;
+  }
+
+  template <typename RowType, typename ParseRowFn>
+  static std::uint64_t build_unsorted_parsed_database(
+      detail::BufferedGzipLineReader& reader,
+      const std::filesystem::path& input_path,
+      const std::filesystem::path& database_path,
+      std::string_view record_type,
+      ParseRowFn parse_row,
+      bool force,
+      std::size_t block_size) {
+    std::filesystem::create_directories(database_path);
+
+    detail::AtomicBinaryRecordWriter writer(block_size);
+    std::string_view line;
+    const std::filesystem::path output_root =
+        database_path / std::string(record_type) /
+        detail::date_directory_name_from_filename(input_path);
+    std::string current_ticker;
+    bool has_current_output = false;
+    bool skip_current_output = false;
+    std::uint64_t rows_written = 0;
+    bool output_root_ready = false;
+
+    while (reader.template next_line<Specialization>(line)) {
       if (line.empty()) {
         continue;
       }
 
       const RowType row = parse_row(line);
-      const std::uint64_t row_timestamp = date_timestamp(row);
-      if (validate_ticker_timestamp_order) {
-        if (has_previous_row) {
-          if (row.ticker < previous_ticker) {
-            std::ostringstream message;
-            message << "input rows are not ordered by ticker,participant_timestamp: "
-                    << "ticker '" << row.ticker << "' appeared after ticker '"
-                    << previous_ticker << "'";
-            throw std::invalid_argument(message.str());
-          }
-          if (row.ticker == previous_ticker && row_timestamp < previous_timestamp) {
-            std::ostringstream message;
-            message << "input rows are not ordered by ticker,participant_timestamp: "
-                    << "participant_timestamp " << row_timestamp
-                    << " appeared after " << previous_timestamp
-                    << " for ticker '" << row.ticker << "'";
-            throw std::invalid_argument(message.str());
-          }
-        }
-        previous_ticker = row.ticker;
-        previous_timestamp = row_timestamp;
-        has_previous_row = true;
+      if (!output_root_ready) {
+        std::filesystem::create_directories(output_root);
+        output_root_ready = true;
       }
-
-      std::filesystem::create_directories(output_root);
 
       if (!has_current_output || row.ticker != current_ticker) {
         writer.commit();
@@ -10609,30 +12351,46 @@ class Implementation : public Base {
 
   template <typename RowType, typename ParseRowFn>
   static std::uint64_t build_option_database(
+      detail::BufferedGzipLineReader& reader,
       const std::filesystem::path& input_path,
       const std::filesystem::path& database_path,
       std::string_view record_type,
       ParseRowFn parse_row,
-      bool force) {
-    std::filesystem::create_directories(database_path);
+      bool force,
+      PyObject* write_lock,
+      std::size_t block_size,
+      bool sort_records) {
+    if (!sort_records) {
+      return build_unsorted_option_database<RowType>(
+          reader,
+          input_path,
+          database_path,
+          record_type,
+          std::move(parse_row),
+          force);
+    }
 
-    detail::BufferedGzipLineReader reader(input_path);
+    detail::create_directories_for_output(database_path, write_lock);
+
     std::string_view line;
     const std::filesystem::path output_root =
         database_path / std::string(record_type) /
         detail::date_directory_name_from_filename(input_path);
-    bool is_first_line = true;
     std::string current_root;
     std::unordered_map<std::string, std::vector<RowType>> rows_by_key;
     std::vector<std::string> key_order;
     std::uint64_t rows_written = 0;
+    bool output_root_ready = false;
 
     const auto flush_root = [&]() {
       if (rows_by_key.empty()) {
         return;
       }
 
-      std::filesystem::create_directories(output_root);
+      if (!output_root_ready) {
+        detail::create_directories_for_output(output_root, write_lock);
+        output_root_ready = true;
+      }
 
       for (const std::string& row_key : key_order) {
         auto found = rows_by_key.find(row_key);
@@ -10641,24 +12399,34 @@ class Implementation : public Base {
         }
 
         auto& rows = found->second;
+        std::size_t sort_comparisons = 0;
         std::stable_sort(
             rows.begin(),
             rows.end(),
-            [](const RowType& lhs, const RowType& rhs) {
+            [&sort_comparisons](const RowType& lhs, const RowType& rhs) {
+              ++sort_comparisons;
+              if ((sort_comparisons & ((1U << 20) - 1U)) == 0) {
+                detail::check_pending_python_signals();
+              }
               return lhs.sip_timestamp < rhs.sip_timestamp;
             });
 
         const auto output_path = output_root / row_key;
-        std::filesystem::create_directories(output_path.parent_path());
+        detail::create_directories_for_output(output_path.parent_path(), write_lock);
         if (!force && std::filesystem::exists(output_path)) {
           continue;
         }
 
-        detail::AtomicBinaryRecordWriter writer;
+        detail::AtomicBinaryRecordWriter writer(block_size, write_lock);
         writer.open(output_path);
+        std::size_t packed_rows = 0;
         for (const RowType& row : rows) {
           writer.write(row.pack());
           ++rows_written;
+          ++packed_rows;
+          if ((packed_rows & ((1U << 14) - 1U)) == 0) {
+            detail::check_pending_python_signals();
+          }
         }
         writer.commit();
       }
@@ -10668,11 +12436,6 @@ class Implementation : public Base {
     };
 
     while (reader.template next_line<Specialization>(line)) {
-      if (is_first_line) {
-        is_first_line = false;
-        continue;
-      }
-
       if (line.empty()) {
         continue;
       }
@@ -10698,6 +12461,54 @@ class Implementation : public Base {
     }
 
     flush_root();
+    return rows_written;
+  }
+
+  template <typename RowType, typename ParseRowFn>
+  static std::uint64_t build_unsorted_option_database(
+      detail::BufferedGzipLineReader& reader,
+      const std::filesystem::path& input_path,
+      const std::filesystem::path& database_path,
+      std::string_view record_type,
+      ParseRowFn parse_row,
+      bool force) {
+    std::filesystem::create_directories(database_path);
+
+    std::string_view line;
+    const std::filesystem::path output_root =
+        database_path / std::string(record_type) /
+        detail::date_directory_name_from_filename(input_path);
+    detail::StagedRecordWriterCache writers;
+    std::unordered_map<std::string, bool> skipped_paths;
+    std::uint64_t rows_written = 0;
+
+    while (reader.template next_line<Specialization>(line)) {
+      if (line.empty()) {
+        continue;
+      }
+
+      RowType row = parse_row(line);
+      const std::filesystem::path output_path =
+          output_root /
+          detail::option_contract_key(
+              row.root,
+              row.expiration,
+              row.right,
+              row.strike_millis);
+      const std::string path_key = output_path.string();
+      const auto [state, inserted] = skipped_paths.try_emplace(
+          path_key,
+          !force && std::filesystem::exists(output_path));
+      static_cast<void>(inserted);
+      if (state->second) {
+        continue;
+      }
+
+      writers.write(output_path, row.pack());
+      ++rows_written;
+    }
+
+    writers.close_all();
     return rows_written;
   }
 

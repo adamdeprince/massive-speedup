@@ -131,12 +131,6 @@ def gzip_lines(path: str | Path, parallelization: int = 0, chunk_size: int = 1 <
     yield from read_gzip_lines(path)
 
 
-def _to_text(payload: bytes | str) -> str:
-    if isinstance(payload, bytes):
-        return payload.decode("utf-8", errors="replace")
-    return payload
-
-
 def _parse_int(text: str) -> int:
     return int(text) if text else 0
 
@@ -921,27 +915,6 @@ class Parser:
     def processor_name(self) -> str:
         return "generic"
 
-    def split_on_commas(self, payload: str, output: list[str]) -> None:
-        output.extend(payload.split(","))
-
-    def build_summary(self, payload: bytes | str, operation: str, fmt: str) -> dict[str, object]:
-        text = _to_text(payload)
-        segments: list[str] = []
-        self.split_on_commas(text, segments)
-        return {
-            "parser_group": self.parser_group_name,
-            "asset_class": self.asset_class_name,
-            "processor": self.processor_name(),
-            "operation": operation,
-            "format": fmt,
-            "bytes": len(text.encode("utf-8")),
-            "commas": text.count(","),
-            "newlines": text.count("\n"),
-            "json_objects": text.count("{"),
-            "segments": len(segments),
-            "event_markers": text.count('"ev"'),
-        }
-
 
 class FlatFileParser(Parser):
     parser_group_name = "flatfiles"
@@ -953,17 +926,6 @@ class FlatFileParser(Parser):
     @classmethod
     def parse_trades(cls, payload: bytes | str) -> dict[str, object]:
         raise NotImplementedError("flatfile trade parsing must be implemented by a concrete parser")
-
-
-class WebSocketParser(Parser):
-    parser_group_name = "websocket"
-
-    @classmethod
-    def parse_message(cls, payload: bytes | str) -> dict[str, object]:
-        text = _to_text(payload)
-        summary = cls().build_summary(text, "parse_message", "json")
-        summary["message_frames"] = text.count("},{") + text.count("}{") + (0 if not text else 1)
-        return summary
 
 
 class FlatFileStocksParser(FlatFileParser):
@@ -1444,34 +1406,6 @@ class FlatFileCryptoParser(FlatFileParser):
                     yield line
 
 
-class WebSocketMessagesParser(WebSocketParser):
-    asset_class_name = "messages"
-
-
-class WebSocketStocksParser(WebSocketParser):
-    asset_class_name = "stocks"
-
-
-class WebSocketOptionsParser(WebSocketParser):
-    asset_class_name = "options"
-
-
-class WebSocketFuturesParser(WebSocketParser):
-    asset_class_name = "futures"
-
-
-class WebSocketIndicesParser(WebSocketParser):
-    asset_class_name = "indices"
-
-
-class WebSocketForexParser(WebSocketParser):
-    asset_class_name = "forex"
-
-
-class WebSocketCryptoParser(WebSocketParser):
-    asset_class_name = "crypto"
-
-
 FlatFiles = SimpleNamespace(
     Stock=FlatFileStocksParser,
     Options=FlatFileOptionsParser,
@@ -1480,16 +1414,6 @@ FlatFiles = SimpleNamespace(
     Forex=FlatFileForexParser,
     currency=FlatFileCurrenciesParser,
     Crypto=FlatFileCryptoParser,
-)
-
-WebSocket = SimpleNamespace(
-    Messages=WebSocketMessagesParser,
-    Stocks=WebSocketStocksParser,
-    Options=WebSocketOptionsParser,
-    Futures=WebSocketFuturesParser,
-    Indices=WebSocketIndicesParser,
-    Forex=WebSocketForexParser,
-    Crypto=WebSocketCryptoParser,
 )
 
 FlatFiles.StockTrade = StockTrade
@@ -1629,6 +1553,19 @@ def build_database_file(*args, **kwargs):
     raise RuntimeError("build_database_file requires the native massive_speedup extension")
 
 
+def build_database_file_inferred(*args, **kwargs):
+    raise RuntimeError(
+        "build_database_file_inferred requires the native massive_speedup extension"
+    )
+
+
+def build_database_file_inferred_with_stats(*args, **kwargs):
+    raise RuntimeError(
+        "build_database_file_inferred_with_stats requires the native "
+        "massive_speedup extension"
+    )
+
+
 class StockTradeDatabase:
     def __init__(self, *args, **kwargs):
         raise RuntimeError("StockTradeDatabase requires the native massive_speedup extension")
@@ -1657,6 +1594,11 @@ class SimpleMarketBroker:
 class SimpleMarket:
     def __init__(self, *args, **kwargs):
         raise RuntimeError("SimpleMarket requires the native massive_speedup extension")
+
+
+class TradeEmulator:
+    def __init__(self, *args, **kwargs):
+        raise RuntimeError("TradeEmulator requires the native massive_speedup extension")
 
 
 def stock_trade_quote_timeline(*args, **kwargs):

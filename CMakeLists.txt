@@ -3,9 +3,6 @@ project(massive_speedup LANGUAGES CXX)
 
 include(FetchContent)
 
-# Third-party static libraries are linked into nanobind extension modules.
-set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
 find_package(nanobind 2.12 CONFIG REQUIRED)
 find_package(ZLIB REQUIRED)
@@ -17,9 +14,7 @@ set(
   "Do not contact dependency remotes for updates after FetchContent sources exist."
 )
 
-option(MASSIVE_SPEEDUP_USE_SYSTEM_SIMDJSON "Use an already-installed simdjson package." OFF)
 option(MASSIVE_SPEEDUP_USE_SYSTEM_RAPIDGZIP "Use a pre-vendored rapidgzip checkout." OFF)
-option(MASSIVE_SPEEDUP_USE_SYSTEM_IXWEBSOCKET "Use an already-installed IXWebSocket package." OFF)
 option(
   MASSIVE_SPEEDUP_OFFLINE
   "Never download missing third-party dependency sources."
@@ -32,7 +27,6 @@ set(
   "Path to a local rapidgzip source checkout when MASSIVE_SPEEDUP_USE_SYSTEM_RAPIDGZIP=ON."
 )
 
-set(MASSIVE_SPEEDUP_HAS_SIMDJSON_VALUE 1)
 set(MASSIVE_SPEEDUP_HAS_RAPIDGZIP_VALUE 1)
 set(MASSIVE_SPEEDUP_DEPS_DIR "${CMAKE_BINARY_DIR}/_deps")
 
@@ -63,75 +57,7 @@ function(massive_speedup_clear_stale_fetchcontent_subbuild dependency_name)
   endif()
 endfunction()
 
-massive_speedup_clear_stale_fetchcontent_subbuild(simdjson)
 massive_speedup_clear_stale_fetchcontent_subbuild(rapidgzip)
-massive_speedup_clear_stale_fetchcontent_subbuild(ixwebsocket)
-
-if(MASSIVE_SPEEDUP_USE_SYSTEM_SIMDJSON)
-  find_package(simdjson REQUIRED)
-elseif(EXISTS "${MASSIVE_SPEEDUP_DEPS_DIR}/simdjson-src/CMakeLists.txt")
-  set(SIMDJSON_JUST_LIBRARY ON CACHE INTERNAL "")
-  set(SIMDJSON_BUILD_STATIC ON CACHE INTERNAL "")
-  FetchContent_Declare(
-    simdjson
-    SOURCE_DIR "${MASSIVE_SPEEDUP_DEPS_DIR}/simdjson-src"
-    BINARY_DIR "${MASSIVE_SPEEDUP_DEPS_DIR}/simdjson-build"
-  )
-  FetchContent_MakeAvailable(simdjson)
-elseif(MASSIVE_SPEEDUP_OFFLINE)
-  message(
-    WARNING
-    "simdjson source checkout is missing at ${MASSIVE_SPEEDUP_DEPS_DIR}/simdjson-src; "
-    "building without C++ simdjson integration because MASSIVE_SPEEDUP_OFFLINE=ON."
-  )
-  add_library(simdjson INTERFACE)
-  set(MASSIVE_SPEEDUP_HAS_SIMDJSON_VALUE 0)
-else()
-  set(SIMDJSON_JUST_LIBRARY ON CACHE INTERNAL "")
-  set(SIMDJSON_BUILD_STATIC ON CACHE INTERNAL "")
-  FetchContent_Declare(
-    simdjson
-    GIT_REPOSITORY https://github.com/simdjson/simdjson.git
-    GIT_TAG v3.13.0
-    GIT_SHALLOW TRUE
-    UPDATE_DISCONNECTED TRUE
-  )
-  FetchContent_MakeAvailable(simdjson)
-endif()
-
-set(BUILD_DEMO OFF CACHE BOOL "" FORCE)
-set(IXWEBSOCKET_INSTALL OFF CACHE BOOL "" FORCE)
-set(USE_TEST OFF CACHE BOOL "" FORCE)
-set(USE_TLS ON CACHE BOOL "" FORCE)
-set(USE_WS OFF CACHE BOOL "" FORCE)
-set(USE_ZLIB ON CACHE BOOL "" FORCE)
-
-if(MASSIVE_SPEEDUP_USE_SYSTEM_IXWEBSOCKET)
-  find_package(ixwebsocket CONFIG REQUIRED)
-elseif(EXISTS "${MASSIVE_SPEEDUP_DEPS_DIR}/ixwebsocket-src/CMakeLists.txt")
-  FetchContent_Declare(
-    ixwebsocket
-    SOURCE_DIR "${MASSIVE_SPEEDUP_DEPS_DIR}/ixwebsocket-src"
-    BINARY_DIR "${MASSIVE_SPEEDUP_DEPS_DIR}/ixwebsocket-build"
-  )
-  FetchContent_MakeAvailable(ixwebsocket)
-elseif(MASSIVE_SPEEDUP_OFFLINE)
-  message(
-    FATAL_ERROR
-    "IXWebSocket source checkout is missing at "
-    "${MASSIVE_SPEEDUP_DEPS_DIR}/ixwebsocket-src. Disable MASSIVE_SPEEDUP_OFFLINE "
-    "or install IXWebSocket and set MASSIVE_SPEEDUP_USE_SYSTEM_IXWEBSOCKET=ON."
-  )
-else()
-  FetchContent_Declare(
-    ixwebsocket
-    GIT_REPOSITORY https://github.com/machinezone/IXWebSocket.git
-    GIT_TAG v11.4.6
-    GIT_SHALLOW TRUE
-    UPDATE_DISCONNECTED TRUE
-  )
-  FetchContent_MakeAvailable(ixwebsocket)
-endif()
 
 if(MASSIVE_SPEEDUP_USE_SYSTEM_RAPIDGZIP)
   if(NOT MASSIVE_SPEEDUP_RAPIDGZIP_SOURCE_DIR)
@@ -196,15 +122,12 @@ target_link_libraries(
   massive_speedup_cppdeps
   INTERFACE
   rapidgzip
-  simdjson
-  ixwebsocket::ixwebsocket
   ZLIB::ZLIB
 )
 target_compile_definitions(
   massive_speedup_cppdeps
   INTERFACE
   MASSIVE_SPEEDUP_HAS_RAPIDGZIP=${MASSIVE_SPEEDUP_HAS_RAPIDGZIP_VALUE}
-  MASSIVE_SPEEDUP_HAS_SIMDJSON=${MASSIVE_SPEEDUP_HAS_SIMDJSON_VALUE}
 )
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
@@ -218,8 +141,6 @@ endif()
 set(MASSIVE_SPEEDUP_COMMON_SOURCES
   src/cpp/parser_common.cpp
   src/cpp/flatfiles.cpp
-  src/cpp/websocket.cpp
-  src/cpp/websocket_native.cpp
 )
 
 function(configure_massive_speedup_target target_name)

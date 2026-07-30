@@ -4,8 +4,10 @@
 #include <nanobind/make_iterator.h>
 #include <nanobind/stl/filesystem.h>
 #include <nanobind/stl/optional.h>
+#include <nanobind/stl/pair.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/string_view.h>
+#include <nanobind/stl/tuple.h>
 #include <nanobind/stl/unordered_map.h>
 #include <nanobind/stl/vector.h>
 
@@ -20,7 +22,6 @@
 #include <vector>
 
 #include "native.hpp"
-#include "websocket_native.hpp"
 #include "massive_speedup/parsers.hpp"
 
 namespace massive_speedup::bindings {
@@ -37,22 +38,6 @@ inline std::filesystem::path configured_database_path(
     throw std::runtime_error(
         "database_path is not configured; set MASSIVE_SPEEDUP_DB_PATH or pass "
         "database_path=...");
-  }
-  return configured;
-}
-
-inline std::string configured_massive_api_key(
-    const std::optional<std::string>& api_key) {
-  if (api_key.has_value()) {
-    if (api_key->empty()) {
-      throw std::invalid_argument("api_key cannot be empty");
-    }
-    return *api_key;
-  }
-  const char* configured = std::getenv("MASSIVE_API_KEY");
-  if (configured == nullptr || *configured == '\0') {
-    throw std::runtime_error(
-        "api_key is not configured; set MASSIVE_API_KEY or pass api_key=...");
   }
   return configured;
 }
@@ -77,11 +62,6 @@ Summary parse_quotes_static(nb::handle payload) {
 template <typename ParserType>
 Summary parse_trades_static(nb::handle payload) {
   return ParserType{}.parse_trades(payload);
-}
-
-template <typename ParserType>
-Summary parse_message_static(nb::handle payload) {
-  return ParserType{}.parse_message(payload);
 }
 
 template <typename ParserType>
@@ -698,7 +678,152 @@ inline void bind_stock_trade_quote_timeline(nb::module_& m) {
       nb::arg("database_path") = nb::none());
 }
 
+inline std::shared_ptr<native::TradeEmulator> borrow_trade_emulator(
+    native::TradeEmulator* trade_emulator) {
+  if (trade_emulator == nullptr) {
+    return nullptr;
+  }
+  return std::shared_ptr<native::TradeEmulator>(
+      trade_emulator,
+      [](native::TradeEmulator*) {});
+}
+
 inline void bind_simple_market(nb::module_& m) {
+  nb::class_<native::TradeEmulator>(m, "TradeEmulator")
+      .def(
+          "__init__",
+          [](native::TradeEmulator* self,
+             std::uint64_t trade_latency_ns,
+             const std::string& execution,
+             double passivity,
+             double unit_shares) {
+            native::ExecutionMode mode = native::ExecutionMode::Market;
+            if (execution == "market") {
+              mode = native::ExecutionMode::Market;
+            } else if (execution == "middle") {
+              mode = native::ExecutionMode::Middle;
+            } else {
+              throw std::invalid_argument(
+                  "execution must be 'market' or 'middle'");
+            }
+            new (self) native::TradeEmulator(
+                trade_latency_ns, mode, passivity, unit_shares);
+          },
+          nb::arg("trade_latency_ns") = 150'000'000ULL,
+          nb::arg("execution") = "market",
+          nb::arg("passivity") = 0.0,
+          nb::arg("unit_shares") = 1.0)
+      .def_prop_ro(
+          "trade_latency_ns",
+          &native::TradeEmulator::trade_latency_ns)
+      .def_prop_ro(
+          "execution",
+          [](const native::TradeEmulator& self) {
+            return self.execution() == native::ExecutionMode::Market
+                ? "market"
+                : "middle";
+          })
+      .def_prop_ro("passivity", &native::TradeEmulator::passivity)
+      .def_prop_ro("unit_shares", &native::TradeEmulator::unit_shares)
+      .def_prop_ro("cash", &native::TradeEmulator::cash)
+      .def_prop_ro(
+          "working_order_count",
+          &native::TradeEmulator::working_order_count)
+      .def(
+          "position",
+          &native::TradeEmulator::position,
+          nb::arg("symbol"))
+      .def(
+          "desired_position",
+          &native::TradeEmulator::desired_position,
+          nb::arg("symbol"))
+      .def(
+          "force_close_at",
+          &native::TradeEmulator::force_close_at,
+          nb::arg("symbol"),
+          nb::arg("price"),
+          nb::arg("timestamp_ns") = 0,
+          nb::arg("style") = "moc_approx",
+          "Flatten any open position at an explicit price (e.g. official "
+          "close as a unit-share MOC approximation). Cancels working limits. "
+          "Does not require quotes.")
+      .def(
+          "set_desired",
+          [](native::TradeEmulator& self,
+             const std::string& symbol,
+             double desired,
+             std::uint64_t sip_timestamp,
+             native::StockQuoteDatabase& quotes,
+             std::int64_t quote_index_hint) {
+            std::int64_t index = quote_index_hint;
+            self.set_desired(
+                symbol,
+                desired,
+                sip_timestamp,
+                quotes,
+                index,
+                quote_index_hint);
+            return index;
+          },
+          nb::arg("symbol"),
+          nb::arg("desired"),
+          nb::arg("sip_timestamp"),
+          nb::arg("quotes"),
+          nb::arg("quote_index_hint") = static_cast<std::int64_t>(-1),
+          "Set desired unit position (+1/0/-1) using quotes at "
+          "sip_timestamp + trade_latency_ns.\n\n"
+          "Returns the updated quote-search index for galloping reuse. "
+          "Call every bar (even when unchanged) so middle-mode limits can fill. "
+          "Safe to drive from a single allocation thread after parallel "
+          "per-symbol bar materialization.")
+      .def(
+          "poll_working",
+          [](native::TradeEmulator& self,
+             const std::string& symbol,
+             std::uint64_t sip_timestamp,
+             native::StockQuoteDatabase& quotes,
+             std::int64_t quote_index_hint) {
+            std::int64_t index = quote_index_hint;
+            self.poll_working(
+                symbol, sip_timestamp, quotes, index, quote_index_hint);
+            return index;
+          },
+          nb::arg("symbol"),
+          nb::arg("sip_timestamp"),
+          nb::arg("quotes"),
+          nb::arg("quote_index_hint") = static_cast<std::int64_t>(-1),
+          "Advance middle-mode resting orders without changing desired. "
+          "Returns updated quote-search index.")
+      .def(
+          "working_order",
+          [](const native::TradeEmulator& self, const std::string& symbol)
+              -> nb::object {
+            const auto* order = self.working_order(symbol);
+            if (order == nullptr) {
+              return nb::none();
+            }
+            nb::dict row;
+            row["instrument"] = order->instrument;
+            row["side"] =
+                order->side == native::SimulatedOrderSide::Buy ? "buy" : "sell";
+            row["remaining"] = order->remaining;
+            row["limit_price"] = order->limit_price;
+            row["target_shares"] = order->target_shares;
+            row["submitted_timestamp"] = order->submitted_timestamp;
+            return row;
+          },
+          nb::arg("symbol"))
+      .def(
+          "__getitem__",
+          [](const native::TradeEmulator& self, nb::handle key) {
+            if (key.is_none()) {
+              return self.cash();
+            }
+            return self.position(nb::cast<std::string>(key));
+          },
+          nb::arg("key").none())
+      .def("summary", &native::TradeEmulator::summary);
+
   nb::class_<native::SimpleMarketBroker>(m, "SimpleMarketBroker")
       .def_prop_ro("symbol", &native::SimpleMarketBroker::symbol)
       .def_prop_ro("sip_timestamp", &native::SimpleMarketBroker::sip_timestamp)
@@ -723,7 +848,24 @@ inline void bind_simple_market(nb::module_& m) {
             self.sell(shares, nb::cast<std::string>(symbol));
           },
           nb::arg("shares"),
-          nb::arg("symbol") = nb::none());
+          nb::arg("symbol") = nb::none())
+      .def(
+          "set_desired",
+          [](native::SimpleMarketBroker& self,
+             double desired,
+             nb::handle symbol) {
+            if (symbol.is_none()) {
+              self.set_desired(desired);
+              return;
+            }
+            self.set_desired(desired, nb::cast<std::string>(symbol));
+          },
+          nb::arg("desired"),
+          nb::arg("symbol") = nb::none(),
+          "Set desired unit position: +1 long, 0 flat, -1 short.\n\n"
+          "Call every iteration (even when unchanged) so middle-mode resting "
+          "limits can fill as the quote evolves. Market mode trades immediately "
+          "when holdings disagree with desired * unit_shares.");
 
   nb::class_<native::SimpleMarket>(m, "SimpleMarket")
       .def(
@@ -734,14 +876,31 @@ inline void bind_simple_market(nb::module_& m) {
              std::uint64_t trade_latency_ns,
              const std::optional<std::filesystem::path>& database_path,
              bool quotes,
-             bool fast) {
+             bool fast,
+             native::TradeEmulator* trade_emulator,
+             const std::string& execution,
+             double passivity,
+             double unit_shares) {
+            native::ExecutionMode mode = native::ExecutionMode::Market;
+            if (execution == "market") {
+              mode = native::ExecutionMode::Market;
+            } else if (execution == "middle") {
+              mode = native::ExecutionMode::Middle;
+            } else {
+              throw std::invalid_argument(
+                  "execution must be 'market' or 'middle'");
+            }
             new (self) native::SimpleMarket(
                 configured_database_path(database_path),
                 date_argument_to_string(date),
                 symbols,
                 trade_latency_ns,
                 quotes,
-                fast);
+                fast,
+                borrow_trade_emulator(trade_emulator),
+                mode,
+                passivity,
+                unit_shares);
           },
           nb::arg("date"),
           nb::arg("symbols"),
@@ -749,7 +908,18 @@ inline void bind_simple_market(nb::module_& m) {
           nb::kw_only(),
           nb::arg("database_path") = nb::none(),
           nb::arg("quotes") = false,
-          nb::arg("fast") = false)
+          nb::arg("fast") = false,
+          nb::arg("trade_emulator") = nb::none(),
+          nb::arg("execution") = "market",
+          nb::arg("passivity") = 0.0,
+          nb::arg("unit_shares") = 1.0,
+          nb::keep_alive<1, 8>(),
+          "Tick-by-tick market simulator with TradeEmulator fills.\n\n"
+          "execution='market' crosses the spread on set_desired; "
+          "execution='middle' rests limits using passivity >= 0 "
+          "(0=touch, 1=far side of NBBO, >1=beyond far side; no upper "
+          "cap). Pass a shared trade_emulator for multi-day books "
+          "(execution knobs then come from that emulator).")
       .def(
           "__iter__",
           [](native::SimpleMarket& self) -> native::SimpleMarket& {
@@ -758,7 +928,31 @@ inline void bind_simple_market(nb::module_& m) {
           nb::rv_policy::reference_internal)
       .def("__next__", &native::SimpleMarket::next)
       .def_prop_ro("broker", &native::SimpleMarket::broker)
-      .def("summary", &native::SimpleMarket::summary);
+      .def("summary", &native::SimpleMarket::summary)
+      .def_prop_ro(
+          "trade_emulator",
+          [](const native::SimpleMarket& self) {
+            return self.trade_emulator().get();
+          },
+          nb::rv_policy::reference_internal)
+      .def_prop_ro(
+          "execution",
+          [](const native::SimpleMarket& self) {
+            return self.execution() == native::ExecutionMode::Market
+                ? "market"
+                : "middle";
+          })
+      .def_prop_ro("passivity", &native::SimpleMarket::passivity)
+      .def_prop_ro("unit_shares", &native::SimpleMarket::unit_shares)
+      .def_prop_ro(
+          "trade_latency_ns",
+          &native::SimpleMarket::trade_latency_ns)
+      .def(
+          "__getitem__",
+          [](const native::SimpleMarket& self, nb::handle key) {
+            return self.get_holding(key);
+          },
+          nb::arg("key").none());
 
   nb::class_<native::FuturesMarketBroker>(m, "FuturesMarketBroker")
       .def_prop_ro("symbol", &native::FuturesMarketBroker::symbol)
@@ -888,7 +1082,7 @@ void bind_window_aggregator(
           [](
              AggregatorType* self,
              nb::handle rows,
-             std::uint64_t interval_seconds,
+             double interval_seconds,
              nb::handle start_timestamp) {
             std::uint64_t start_timestamp_ns = 0;
             if (!start_timestamp.is_none()) {
@@ -1260,12 +1454,72 @@ inline void bind_aggregation_results(nb::module_& m) {
 #undef MASSIVE_SPEEDUP_BIND_AGG_DOUBLE
 #undef MASSIVE_SPEEDUP_BIND_AGG_UINT64
 
+inline void bind_stock_trade_aggregator(nb::module_& m) {
+  using AggregatorType = native::StockTradeAggregator;
+  using DatabaseType = typename AggregatorType::DatabaseType;
+
+  nb::class_<AggregatorType>(m, "StockTradeAggregator")
+      .def(
+          "__init__",
+          [](AggregatorType* self,
+             nb::handle rows,
+             double interval_seconds,
+             nb::handle start_timestamp,
+             nb::handle quotes,
+             native::TradeEmulator* trade_emulator) {
+            std::uint64_t start_timestamp_ns = 0;
+            if (!start_timestamp.is_none()) {
+              DatabaseType* database = nullptr;
+              if (nb::try_cast<DatabaseType*>(rows, database, false)) {
+                start_timestamp_ns =
+                    timestamp_argument_to_ns(*database, start_timestamp);
+              } else {
+                start_timestamp_ns = nanoseconds_argument_to_uint64(
+                    start_timestamp,
+                    "start_timestamp");
+              }
+            }
+            native::StockQuoteDatabase* quotes_ptr = nullptr;
+            nb::object quotes_owner = nb::none();
+            if (!quotes.is_none()) {
+              quotes_ptr = nb::cast<native::StockQuoteDatabase*>(quotes);
+              quotes_owner = nb::borrow<nb::object>(quotes);
+            }
+            new (self) AggregatorType(
+                rows,
+                interval_seconds,
+                start_timestamp_ns,
+                quotes_ptr,
+                std::move(quotes_owner),
+                borrow_trade_emulator(trade_emulator));
+          },
+          nb::arg("rows"),
+          nb::arg("interval_seconds"),
+          nb::kw_only(),
+          nb::arg("start_timestamp") = nb::none(),
+          nb::arg("quotes") = nb::none(),
+          nb::arg("trade_emulator") = nb::none(),
+          nb::keep_alive<1, 2>(),
+          nb::keep_alive<1, 5>(),
+          nb::keep_alive<1, 6>())
+      .def(
+          "__iter__",
+          [](AggregatorType& self) -> AggregatorType& { return self.iter(); },
+          nb::rv_policy::reference_internal)
+      .def("__next__", &AggregatorType::next)
+      .def_prop_ro("broker", &AggregatorType::broker)
+      .def_prop_ro(
+          "trade_emulator",
+          [](const AggregatorType& self) {
+            return self.trade_emulator().get();
+          },
+          nb::rv_policy::reference_internal);
+}
+
 inline void bind_window_aggregators(nb::module_& m) {
   bind_aggregation_results(m);
 
-  bind_window_aggregator<native::StockTradeAggregator>(
-      m,
-      "StockTradeAggregator");
+  bind_stock_trade_aggregator(m);
   bind_window_aggregator<native::StockQuoteAggregator>(
       m,
       "StockQuoteAggregator");
@@ -2165,8 +2419,6 @@ inline void bind_common_bases(nb::module_& m) {
 
   nb::class_<FlatFileParser, Parser>(m, "FlatFileParser");
 
-  nb::class_<WebSocketParser, Parser>(m, "WebSocketParser");
-
   nb::class_<FlatFileStocksParser, FlatFileParser>(m, "FlatFileStocksParser");
   nb::class_<FlatFileOptionsParser, FlatFileParser>(m, "FlatFileOptionsParser");
   nb::class_<FlatFileFuturesParser, FlatFileParser>(m, "FlatFileFuturesParser");
@@ -2175,13 +2427,6 @@ inline void bind_common_bases(nb::module_& m) {
   nb::class_<FlatFileCurrenciesParser, FlatFileParser>(m, "FlatFileCurrenciesParser");
   nb::class_<FlatFileCryptoParser, FlatFileParser>(m, "FlatFileCryptoParser");
 
-  nb::class_<WebSocketMessagesParser, WebSocketParser>(m, "WebSocketMessagesParser");
-  nb::class_<WebSocketStocksParser, WebSocketParser>(m, "WebSocketStocksParser");
-  nb::class_<WebSocketOptionsParser, WebSocketParser>(m, "WebSocketOptionsParser");
-  nb::class_<WebSocketFuturesParser, WebSocketParser>(m, "WebSocketFuturesParser");
-  nb::class_<WebSocketIndicesParser, WebSocketParser>(m, "WebSocketIndicesParser");
-  nb::class_<WebSocketForexParser, WebSocketParser>(m, "WebSocketForexParser");
-  nb::class_<WebSocketCryptoParser, WebSocketParser>(m, "WebSocketCryptoParser");
 }
 
 template <typename BaseAsset, typename ImplAsset>
@@ -2615,485 +2860,6 @@ void bind_options_flatfile_asset(
 }
 
 template <typename BaseAsset, typename ImplAsset>
-void bind_websocket_asset(
-    nb::module_& module,
-    const char* name,
-    native::WebSocketAsset asset) {
-  nb::class_<ImplAsset, BaseAsset>(module, name)
-      .def(nb::init<>())
-      .def_static(
-          "parse_message",
-          [asset](nb::handle payload) {
-            return native::parse_websocket_message(payload, asset);
-          },
-          nb::arg("payload"))
-      .def_static(
-          "parse",
-          [asset](nb::handle payload) {
-            return native::parse_websocket_message(payload, asset);
-          },
-          nb::arg("payload"))
-      .def_static(
-          "summarize_message",
-          &parse_message_static<ImplAsset>,
-          nb::arg("payload"))
-      .def_static(
-          "market",
-          [asset](nb::handle messages,
-                  nb::handle broker,
-                  bool quotes,
-                  bool fast) {
-            return native::WebSocketMarket(
-                messages,
-                broker,
-                asset,
-                quotes,
-                fast);
-          },
-          nb::arg("messages"),
-          nb::arg("broker"),
-          nb::kw_only(),
-          nb::arg("quotes") = false,
-          nb::arg("fast") = false)
-      .def_static(
-          "connect",
-          [asset](const std::string& subscriptions,
-                  const std::optional<std::string>& api_key,
-                  const std::optional<std::string>& url,
-                  double timeout,
-                  std::size_t queue_capacity,
-                  bool reconnect) {
-            return native::WebSocketFeed(
-                asset,
-                subscriptions,
-                configured_massive_api_key(api_key),
-                url.value_or(native::default_websocket_url(asset)),
-                timeout,
-                queue_capacity,
-                reconnect);
-          },
-          nb::arg("subscriptions"),
-          nb::kw_only(),
-          nb::arg("api_key") = nb::none(),
-          nb::arg("url") = nb::none(),
-          nb::arg("timeout") = 10.0,
-          nb::arg("queue_capacity") = 1024,
-          nb::arg("reconnect") = true)
-      .def_static("serialize", &serialize_static<ImplAsset>)
-      .def_static("processor_name", &processor_name_static<ImplAsset>);
-}
-
-inline void bind_websocket_models(nb::module_& m) {
-  nb::class_<native::WebSocketEvent>(m, "WebSocketEvent")
-      .def_prop_ro("event_type", &native::WebSocketEvent::event_type_object)
-      .def(
-          "__getitem__",
-          &native::WebSocketEvent::get_item,
-          nb::arg("key"))
-      .def(
-          "get",
-          &native::WebSocketEvent::get,
-          nb::arg("key"),
-          nb::arg("default") = nb::none())
-      .def(
-          "__contains__",
-          &native::WebSocketEvent::contains,
-          nb::arg("key"))
-      .def("is_cached", &native::WebSocketEvent::is_cached, nb::arg("key"))
-      .def(
-          "is_property_cached",
-          &native::WebSocketEvent::is_property_cached,
-          nb::arg("key"))
-      .def_prop_ro("cached_fields", &native::WebSocketEvent::cached_fields)
-      .def_prop_ro(
-          "cached_properties",
-          &native::WebSocketEvent::cached_properties)
-      .def_prop_ro("raw_json", &native::WebSocketEvent::raw_json)
-      .def_prop_ro("message_bytes", &native::WebSocketEvent::message_bytes)
-      .def_prop_ro("asset_class", &native::WebSocketEvent::asset_class)
-      .def("__repr__", &native::WebSocketEvent::repr);
-
-#define MASSIVE_SPEEDUP_BIND_WS_PROPERTY(binding_, type_, property_) \
-  binding_.def_prop_ro(#property_, &type_::property_##_object)
-
-  auto status = nb::class_<native::WebSocketStatus, native::WebSocketEvent>(
-      m,
-      "WebSocketStatus");
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(status, native::WebSocketStatus, status);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(status, native::WebSocketStatus, message);
-
-  auto fair_market_value =
-      nb::class_<native::WebSocketFairMarketValue, native::WebSocketEvent>(
-          m,
-          "WebSocketFairMarketValue");
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      fair_market_value, native::WebSocketFairMarketValue, ticker);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      fair_market_value, native::WebSocketFairMarketValue, value);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      fair_market_value,
-      native::WebSocketFairMarketValue,
-      fair_market_value);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      fair_market_value, native::WebSocketFairMarketValue, timestamp);
-
-  auto stock_luld = nb::class_<
-      native::WebSocketStockLimitUpLimitDown,
-      native::WebSocketEvent>(m, "WebSocketStockLimitUpLimitDown");
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_luld, native::WebSocketStockLimitUpLimitDown, ticker);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_luld, native::WebSocketStockLimitUpLimitDown, high_price);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_luld, native::WebSocketStockLimitUpLimitDown, low_price);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_luld, native::WebSocketStockLimitUpLimitDown, indicators);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_luld, native::WebSocketStockLimitUpLimitDown, tape);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_luld, native::WebSocketStockLimitUpLimitDown, timestamp);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_luld, native::WebSocketStockLimitUpLimitDown, sequence_number);
-
-  auto stock_imbalance =
-      nb::class_<native::WebSocketStockImbalance, native::WebSocketEvent>(
-          m,
-          "WebSocketStockImbalance");
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_imbalance, native::WebSocketStockImbalance, ticker);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_imbalance, native::WebSocketStockImbalance, timestamp);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_imbalance, native::WebSocketStockImbalance, auction_time);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_imbalance, native::WebSocketStockImbalance, auction_type);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_imbalance, native::WebSocketStockImbalance, sequence_number);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_imbalance, native::WebSocketStockImbalance, exchange);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_imbalance, native::WebSocketStockImbalance, imbalance_quantity);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_imbalance, native::WebSocketStockImbalance, paired_quantity);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_imbalance,
-      native::WebSocketStockImbalance,
-      book_clearing_price);
-
-  auto stock_trade =
-      nb::class_<native::WebSocketStockTrade, native::WebSocketEvent>(
-          m,
-          "WebSocketStockTrade");
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_trade, native::WebSocketStockTrade, ticker);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_trade, native::WebSocketStockTrade, conditions);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_trade, native::WebSocketStockTrade, correction);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_trade, native::WebSocketStockTrade, exchange);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(stock_trade, native::WebSocketStockTrade, id);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_trade, native::WebSocketStockTrade, participant_timestamp);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_trade, native::WebSocketStockTrade, price);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_trade, native::WebSocketStockTrade, sequence_number);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_trade, native::WebSocketStockTrade, sip_timestamp);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_trade, native::WebSocketStockTrade, size);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_trade, native::WebSocketStockTrade, decimal_size);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_trade, native::WebSocketStockTrade, size_coefficient);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_trade, native::WebSocketStockTrade, size_scale);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_trade, native::WebSocketStockTrade, tape);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_trade, native::WebSocketStockTrade, trf_id);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_trade, native::WebSocketStockTrade, trf_timestamp);
-  stock_trade
-      .def("updates_high_low", &native::WebSocketStockTrade::updates_high_low)
-      .def("updates_open_close", &native::WebSocketStockTrade::updates_open_close)
-      .def("updates_volume", &native::WebSocketStockTrade::updates_volume);
-
-  auto stock_quote =
-      nb::class_<native::WebSocketStockQuote, native::WebSocketEvent>(
-          m,
-          "WebSocketStockQuote");
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_quote, native::WebSocketStockQuote, ticker);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_quote, native::WebSocketStockQuote, ask_exchange);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_quote, native::WebSocketStockQuote, ask_price);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_quote, native::WebSocketStockQuote, ask_size);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_quote, native::WebSocketStockQuote, bid_exchange);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_quote, native::WebSocketStockQuote, bid_price);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_quote, native::WebSocketStockQuote, bid_size);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_quote, native::WebSocketStockQuote, conditions);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_quote, native::WebSocketStockQuote, indicators);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_quote, native::WebSocketStockQuote, participant_timestamp);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_quote, native::WebSocketStockQuote, sequence_number);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_quote, native::WebSocketStockQuote, sip_timestamp);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_quote, native::WebSocketStockQuote, tape);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      stock_quote, native::WebSocketStockQuote, trf_timestamp);
-  stock_quote
-      .def("updates_high_low", &native::WebSocketStockQuote::updates_high_low)
-      .def("updates_open_close", &native::WebSocketStockQuote::updates_open_close)
-      .def("updates_volume", &native::WebSocketStockQuote::updates_volume);
-
-  auto option_trade =
-      nb::class_<native::WebSocketOptionTrade, native::WebSocketEvent>(
-          m,
-          "WebSocketOptionTrade");
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      option_trade, native::WebSocketOptionTrade, ticker);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      option_trade, native::WebSocketOptionTrade, root);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      option_trade, native::WebSocketOptionTrade, expiration);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      option_trade, native::WebSocketOptionTrade, right);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      option_trade, native::WebSocketOptionTrade, strike);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      option_trade, native::WebSocketOptionTrade, conditions);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      option_trade, native::WebSocketOptionTrade, correction);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      option_trade, native::WebSocketOptionTrade, exchange);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      option_trade, native::WebSocketOptionTrade, price);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      option_trade, native::WebSocketOptionTrade, sequence_number);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      option_trade, native::WebSocketOptionTrade, sip_timestamp);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      option_trade, native::WebSocketOptionTrade, size);
-
-  auto option_quote =
-      nb::class_<native::WebSocketOptionQuote, native::WebSocketEvent>(
-          m,
-          "WebSocketOptionQuote");
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      option_quote, native::WebSocketOptionQuote, ticker);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      option_quote, native::WebSocketOptionQuote, root);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      option_quote, native::WebSocketOptionQuote, expiration);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      option_quote, native::WebSocketOptionQuote, right);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      option_quote, native::WebSocketOptionQuote, strike);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      option_quote, native::WebSocketOptionQuote, ask_exchange);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      option_quote, native::WebSocketOptionQuote, ask_price);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      option_quote, native::WebSocketOptionQuote, ask_size);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      option_quote, native::WebSocketOptionQuote, bid_exchange);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      option_quote, native::WebSocketOptionQuote, bid_price);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      option_quote, native::WebSocketOptionQuote, bid_size);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      option_quote, native::WebSocketOptionQuote, sequence_number);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      option_quote, native::WebSocketOptionQuote, sip_timestamp);
-
-  auto futures_trade =
-      nb::class_<native::WebSocketFuturesTrade, native::WebSocketEvent>(
-          m,
-          "WebSocketFuturesTrade");
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      futures_trade, native::WebSocketFuturesTrade, ticker);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      futures_trade, native::WebSocketFuturesTrade, timestamp);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      futures_trade, native::WebSocketFuturesTrade, sequence_number);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      futures_trade, native::WebSocketFuturesTrade, report_sequence);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      futures_trade, native::WebSocketFuturesTrade, price);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      futures_trade, native::WebSocketFuturesTrade, size);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      futures_trade, native::WebSocketFuturesTrade, correction);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      futures_trade, native::WebSocketFuturesTrade, exchange);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      futures_trade, native::WebSocketFuturesTrade, session_end_date);
-
-  auto futures_quote =
-      nb::class_<native::WebSocketFuturesQuote, native::WebSocketEvent>(
-          m,
-          "WebSocketFuturesQuote");
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      futures_quote, native::WebSocketFuturesQuote, ticker);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      futures_quote, native::WebSocketFuturesQuote, timestamp);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      futures_quote, native::WebSocketFuturesQuote, sequence_number);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      futures_quote, native::WebSocketFuturesQuote, report_sequence);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      futures_quote, native::WebSocketFuturesQuote, ask_timestamp);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      futures_quote, native::WebSocketFuturesQuote, ask_price);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      futures_quote, native::WebSocketFuturesQuote, ask_size);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      futures_quote, native::WebSocketFuturesQuote, bid_timestamp);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      futures_quote, native::WebSocketFuturesQuote, bid_price);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      futures_quote, native::WebSocketFuturesQuote, bid_size);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      futures_quote, native::WebSocketFuturesQuote, exchange);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      futures_quote, native::WebSocketFuturesQuote, session_end_date);
-
-  auto crypto_trade =
-      nb::class_<native::WebSocketCryptoTrade, native::WebSocketEvent>(
-          m,
-          "WebSocketCryptoTrade");
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      crypto_trade, native::WebSocketCryptoTrade, ticker);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      crypto_trade, native::WebSocketCryptoTrade, conditions);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      crypto_trade, native::WebSocketCryptoTrade, exchange);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      crypto_trade, native::WebSocketCryptoTrade, id);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      crypto_trade, native::WebSocketCryptoTrade, participant_timestamp);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      crypto_trade, native::WebSocketCryptoTrade, received_timestamp);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      crypto_trade, native::WebSocketCryptoTrade, price);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      crypto_trade, native::WebSocketCryptoTrade, size);
-
-  auto crypto_quote =
-      nb::class_<native::WebSocketCryptoQuote, native::WebSocketEvent>(
-          m,
-          "WebSocketCryptoQuote");
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      crypto_quote, native::WebSocketCryptoQuote, ticker);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      crypto_quote, native::WebSocketCryptoQuote, ask_price);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      crypto_quote, native::WebSocketCryptoQuote, ask_size);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      crypto_quote, native::WebSocketCryptoQuote, bid_price);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      crypto_quote, native::WebSocketCryptoQuote, bid_size);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      crypto_quote, native::WebSocketCryptoQuote, exchange);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      crypto_quote, native::WebSocketCryptoQuote, participant_timestamp);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      crypto_quote, native::WebSocketCryptoQuote, received_timestamp);
-
-  auto currency_quote =
-      nb::class_<native::WebSocketCurrencyQuote, native::WebSocketEvent>(
-          m,
-          "WebSocketCurrencyQuote");
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      currency_quote, native::WebSocketCurrencyQuote, ticker);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      currency_quote, native::WebSocketCurrencyQuote, tickers);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      currency_quote, native::WebSocketCurrencyQuote, ask_exchange);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      currency_quote, native::WebSocketCurrencyQuote, ask_price);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      currency_quote, native::WebSocketCurrencyQuote, bid_exchange);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      currency_quote, native::WebSocketCurrencyQuote, bid_price);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      currency_quote, native::WebSocketCurrencyQuote, participant_timestamp);
-
-  auto index_value =
-      nb::class_<native::WebSocketIndexValue, native::WebSocketEvent>(
-          m,
-          "WebSocketIndexValue");
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      index_value, native::WebSocketIndexValue, ticker);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      index_value, native::WebSocketIndexValue, value);
-  MASSIVE_SPEEDUP_BIND_WS_PROPERTY(
-      index_value, native::WebSocketIndexValue, timestamp);
-
-#undef MASSIVE_SPEEDUP_BIND_WS_PROPERTY
-
-  nb::class_<native::WebSocketMessage>(m, "WebSocketMessage")
-      .def("__len__", &native::WebSocketMessage::size)
-      .def("__getitem__", &native::WebSocketMessage::get_item)
-      .def("__iter__", &native::WebSocketMessage::iterator)
-      .def_prop_ro("events", &native::WebSocketMessage::events)
-      .def_prop_ro("raw_json", &native::WebSocketMessage::raw_json)
-      .def_prop_ro("asset_class", &native::WebSocketMessage::asset_class)
-      .def("__repr__", &native::WebSocketMessage::repr);
-
-  nb::class_<native::WebSocketFeed>(m, "WebSocketFeed")
-      .def(
-          "__iter__",
-          [](native::WebSocketFeed& self) -> native::WebSocketFeed& {
-            return self.iter();
-          },
-          nb::rv_policy::reference_internal)
-      .def("__next__", &native::WebSocketFeed::next)
-      .def("close", &native::WebSocketFeed::close)
-      .def(
-          "__enter__",
-          [](native::WebSocketFeed& self) -> native::WebSocketFeed& {
-            return self;
-          },
-          nb::rv_policy::reference_internal)
-      .def(
-          "__exit__",
-          [](native::WebSocketFeed& self, nb::args) {
-            self.close();
-            return false;
-          })
-      .def_prop_ro("closed", &native::WebSocketFeed::closed)
-      .def_prop_ro("reconnect", &native::WebSocketFeed::reconnect)
-      .def_prop_ro("subscriptions", &native::WebSocketFeed::subscriptions)
-      .def_prop_ro("url", &native::WebSocketFeed::url)
-      .def_prop_ro("asset_class", &native::WebSocketFeed::asset_class);
-
-  nb::class_<native::WebSocketMarket>(m, "WebSocketMarket")
-      .def(
-          "__iter__",
-          [](native::WebSocketMarket& self) -> native::WebSocketMarket& {
-            return self.iter();
-          },
-          nb::rv_policy::reference_internal)
-      .def("__next__", &native::WebSocketMarket::next)
-      .def_prop_ro("broker", &native::WebSocketMarket::broker)
-      .def_prop_ro("quotes", &native::WebSocketMarket::quotes)
-      .def_prop_ro("fast", &native::WebSocketMarket::fast)
-      .def_prop_ro("asset_class", &native::WebSocketMarket::asset_class);
-}
-
-template <typename BaseAsset, typename ImplAsset>
 void bind_indices_flatfile_asset(
     nb::module_& module,
     const char* name,
@@ -3345,18 +3111,84 @@ void bind_native_module(nb::module_& m, const char* alias_prefix) {
       [](const std::filesystem::path& input_path,
          const std::string& record_type,
          const std::optional<std::filesystem::path>& database_path,
-         bool force) {
+         bool force,
+         nb::object write_lock,
+         std::size_t block_size,
+         std::size_t reader_parallelization,
+         bool sort_records) {
         return Impl<FlatFileStocksParser>::build_database_file(
             input_path,
             configured_database_path(database_path),
             record_type,
-            force);
+            force,
+            write_lock.is_none() ? nullptr : write_lock.ptr(),
+            block_size,
+            reader_parallelization,
+            sort_records);
       },
       nb::arg("input_path"),
       nb::arg("record_type"),
       nb::kw_only(),
       nb::arg("database_path") = nb::none(),
       nb::arg("force") = false,
+      nb::arg("write_lock") = nb::none(),
+      nb::arg("block_size") = 1U << 20,
+      nb::arg("reader_parallelization") = 1,
+      nb::arg("sort_records") = true,
+      nb::call_guard<nb::gil_scoped_release>());
+  m.def(
+      "build_database_file_inferred",
+      [](const std::filesystem::path& input_path,
+         const std::optional<std::filesystem::path>& database_path,
+         bool force,
+         nb::object write_lock,
+         std::size_t block_size,
+         std::size_t reader_parallelization,
+         bool sort_records) {
+        return Impl<FlatFileStocksParser>::build_database_file_inferred(
+            input_path,
+            configured_database_path(database_path),
+            force,
+            write_lock.is_none() ? nullptr : write_lock.ptr(),
+            block_size,
+            reader_parallelization,
+            sort_records);
+      },
+      nb::arg("input_path"),
+      nb::kw_only(),
+      nb::arg("database_path") = nb::none(),
+      nb::arg("force") = false,
+      nb::arg("write_lock") = nb::none(),
+      nb::arg("block_size") = 1U << 20,
+      nb::arg("reader_parallelization") = 1,
+      nb::arg("sort_records") = true,
+      nb::call_guard<nb::gil_scoped_release>());
+  m.def(
+      "build_database_file_inferred_with_stats",
+      [](const std::filesystem::path& input_path,
+         const std::optional<std::filesystem::path>& database_path,
+         bool force,
+         nb::object write_lock,
+         std::size_t block_size,
+         std::size_t reader_parallelization,
+         bool sort_records) {
+        return Impl<FlatFileStocksParser>::build_database_file_inferred_with_stats(
+            input_path,
+            configured_database_path(database_path),
+            force,
+            write_lock.is_none() ? nullptr : write_lock.ptr(),
+            block_size,
+            reader_parallelization,
+            sort_records);
+      },
+      nb::arg("input_path"),
+      nb::kw_only(),
+      nb::arg("database_path") = nb::none(),
+      nb::arg("force") = false,
+      nb::arg("write_lock") = nb::none(),
+      nb::arg("block_size") = 1U << 20,
+      nb::arg("reader_parallelization") = 1,
+      nb::arg("sort_records") = true,
       nb::call_guard<nb::gil_scoped_release>());
   static_cast<void>(alias_prefix);
 
@@ -3454,73 +3286,6 @@ void bind_native_module(nb::module_& m, const char* alias_prefix) {
       raw_crypto_trade_iterator_name.c_str(),
       raw_line_iterator_name.c_str(),
       crypto_trade_api_name.c_str());
-
-  auto websocket = m.def_submodule("WebSocket", "Websocket parser classes.");
-  bind_websocket_models(m);
-  bind_websocket_asset<WebSocketMessagesParser, Impl<WebSocketMessagesParser>>(
-      websocket,
-      "Messages",
-      native::WebSocketAsset::Messages);
-  bind_websocket_asset<WebSocketStocksParser, Impl<WebSocketStocksParser>>(
-      websocket,
-      "Stocks",
-      native::WebSocketAsset::Stocks);
-  bind_websocket_asset<WebSocketOptionsParser, Impl<WebSocketOptionsParser>>(
-      websocket,
-      "Options",
-      native::WebSocketAsset::Options);
-  bind_websocket_asset<WebSocketFuturesParser, Impl<WebSocketFuturesParser>>(
-      websocket,
-      "Futures",
-      native::WebSocketAsset::Futures);
-  bind_websocket_asset<WebSocketIndicesParser, Impl<WebSocketIndicesParser>>(
-      websocket,
-      "Indices",
-      native::WebSocketAsset::Indices);
-  bind_websocket_asset<WebSocketForexParser, Impl<WebSocketForexParser>>(
-      websocket,
-      "Forex",
-      native::WebSocketAsset::Forex);
-  bind_websocket_asset<WebSocketCryptoParser, Impl<WebSocketCryptoParser>>(
-      websocket,
-      "Crypto",
-      native::WebSocketAsset::Crypto);
-
-  websocket.attr("Status") = m.attr("WebSocketStatus");
-  websocket.attr("Feed") = m.attr("WebSocketFeed");
-  websocket.attr("Market") = m.attr("WebSocketMarket");
-  websocket.attr("Stocks").attr("Feed") = m.attr("WebSocketFeed");
-  websocket.attr("Options").attr("Feed") = m.attr("WebSocketFeed");
-  websocket.attr("Futures").attr("Feed") = m.attr("WebSocketFeed");
-  websocket.attr("Indices").attr("Feed") = m.attr("WebSocketFeed");
-  websocket.attr("Forex").attr("Feed") = m.attr("WebSocketFeed");
-  websocket.attr("Crypto").attr("Feed") = m.attr("WebSocketFeed");
-  websocket.attr("Stocks").attr("FairMarketValue") =
-      m.attr("WebSocketFairMarketValue");
-  websocket.attr("Stocks").attr("LimitUpLimitDown") =
-      m.attr("WebSocketStockLimitUpLimitDown");
-  websocket.attr("Stocks").attr("LULD") =
-      m.attr("WebSocketStockLimitUpLimitDown");
-  websocket.attr("Stocks").attr("NetOrderImbalance") =
-      m.attr("WebSocketStockImbalance");
-  websocket.attr("Stocks").attr("Imbalance") =
-      m.attr("WebSocketStockImbalance");
-  websocket.attr("Stocks").attr("Trade") = m.attr("WebSocketStockTrade");
-  websocket.attr("Stocks").attr("Quote") = m.attr("WebSocketStockQuote");
-  websocket.attr("Options").attr("Trade") = m.attr("WebSocketOptionTrade");
-  websocket.attr("Options").attr("Quote") = m.attr("WebSocketOptionQuote");
-  websocket.attr("Options").attr("FairMarketValue") =
-      m.attr("WebSocketFairMarketValue");
-  websocket.attr("Futures").attr("Trade") = m.attr("WebSocketFuturesTrade");
-  websocket.attr("Futures").attr("Quote") = m.attr("WebSocketFuturesQuote");
-  websocket.attr("Crypto").attr("Trade") = m.attr("WebSocketCryptoTrade");
-  websocket.attr("Crypto").attr("Quote") = m.attr("WebSocketCryptoQuote");
-  websocket.attr("Crypto").attr("FairMarketValue") =
-      m.attr("WebSocketFairMarketValue");
-  websocket.attr("Forex").attr("Quote") = m.attr("WebSocketCurrencyQuote");
-  websocket.attr("Forex").attr("FairMarketValue") =
-      m.attr("WebSocketFairMarketValue");
-  websocket.attr("Indices").attr("Value") = m.attr("WebSocketIndexValue");
 
   bind_row_models<typename Impl<FlatFileStocksParser>::specialization_type>(m, flatfiles);
   bind_window_aggregators(m);
